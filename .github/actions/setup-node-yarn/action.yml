@@ -1,0 +1,20 @@
+name: Set up Node and Yarn
+description: Node from .nvmrc, the Yarn version pinned in package.json, and the locked dependencies.
+
+runs:
+  using: composite
+  steps:
+    # Corepack installs exactly the Yarn version named in "packageManager" (package.json).
+    # It has to run before setup-node, so the cache step below asks that Yarn, not the
+    # Yarn 1 that comes preinstalled on the runner, where its cache folder is.
+    - run: corepack enable
+      shell: bash
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version-file: .nvmrc # the same major as the nodejs24.x Lambda runtime
+        cache: yarn
+
+    # --immutable fails if yarn.lock would change: what is tested is what was committed.
+    - run: yarn install --immutable
+      shell: bash

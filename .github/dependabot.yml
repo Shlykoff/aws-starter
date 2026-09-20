@@ -1,0 +1,23 @@
+version: 2
+
+# Weekly update pull requests. They go through the same checks as any other pull request,
+# and a merge deploys like any other merge.
+updates:
+  - package-ecosystem: npm
+    directories: ["/", "/backend", "/frontend"] # one entry per workspace package
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch: # fewer pull requests: minor and patch updates arrive together
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: terraform
+    directories: ["/bootstrap", "/infra/envs/dev"]
+    schedule:
+      interval: weekly
