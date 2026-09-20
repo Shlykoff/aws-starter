@@ -22,4 +22,24 @@ describe("RequestStatusBadge", () => {
 
     expect(new Set(classes).size).toBe(REQUEST_STATUSES.length);
   });
+
+  it("explains rejected and failed in the title, and nothing else", () => {
+    render(
+      <>
+        <RequestStatusBadge status="rejected" />
+        <RequestStatusBadge status="failed" />
+        <RequestStatusBadge status="sent" />
+      </>,
+    );
+
+    expect(screen.getByText("Rejected")).toHaveAttribute(
+      "title",
+      "The partner refused this request. It was not retried.",
+    );
+    expect(screen.getByText("Failed")).toHaveAttribute(
+      "title",
+      "Delivery was attempted several times and did not succeed. The request needs attention.",
+    );
+    expect(screen.getByText("Sent")).not.toHaveAttribute("title");
+  });
 });

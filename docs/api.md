@@ -1,4 +1,4 @@
-# API contract (stage 1)
+# API and delivery contract
 
 The single source of truth for backend, infrastructure and frontend. Change it here
 first, then in the code.
@@ -22,15 +22,30 @@ Request {
 
 The owner (`sub` claim of the token) is stored with the item but never returned.
 
-Statuses: `created` (stored) -> `queued` (in SQS FIFO) -> `sent` (partner answered 2xx).
-`failed`: delivery retries exhausted, message is in the DLQ. `rejected`: XML failed schema
-validation, not retried. **Stage 1 only ever sets `created`.**
+## Statuses
+
+```
+created --(enqueuer put it on the queue)--> queued --(partner answered 2xx)------> sent
+   |                                           |--(partner answered 4xx)-------> rejected
+   `-------- (the worker may see it first) ----`--(5th attempt failed, DLQ)-----> failed
+```
+
+- `created`: stored by the API. `queued`: on the SQS FIFO queue. `sent`: the partner
+  accepted it. `rejected`: the partner refused it for good (retrying is pointless).
+  `failed`: delivery attempts are exhausted and the message sits in the DLQ.
+- `sent`, `rejected` and `failed` are **terminal**: they never change again.
+- Every status change is a conditional `UpdateItem` (`ConditionExpression` on the current
+  status), so a late or repeated message cannot move a request backwards.
+  `queued` is set only from `created`; the terminal statuses only from `created` or `queued`
+  (the worker can pick a message up before the enqueuer has written `queued`).
+  A failed condition means somebody else already moved the request on: treat it as done,
+  not as an error.
 
 ## Endpoints
 
 | Method | Path | Body | Success | Errors |
 |---|---|---|---|---|
-| POST | `/requests` | `{ partner, subject, body }` | `201` `Request` | `400` validation, `500` |
+| POST | `/requests` | `{ partner, subject, body }` | `201` `Request` (status `created`) | `400` validation, `500` |
 | GET | `/requests` | | `200` `{ items: Request[] }`, newest first, at most 50 (pagination later) | `500` |
 | GET | `/requests/{id}` | | `200` `Request` | `404` (also for a malformed id), `500` |
 
@@ -38,7 +53,8 @@ A request that belongs to another user is `404`, not `403`, so existence is not 
 A missing `sub` claim on a protected route is a misconfiguration and answers
 `500 internal_error` (the reason is logged, the token is not). Reads are eventually
 consistent: a list requested right after a create may briefly miss the new item, so
-clients should use the `POST` response.
+clients should use the `POST` response. The status changes after the response: clients that
+show it poll every few seconds while a request is `created` or `queued`.
 
 Errors produced by the Lambdas use one shape:
 
@@ -58,6 +74,7 @@ headers `authorization` and `content-type`, methods `GET`, `POST`, `OPTIONS`.
 ## Storage
 
 Table `<project>-<env>-requests`, provisioned 5 RCU / 5 WCU, no autoscaling.
+**DynamoDB Streams is on, view type `NEW_IMAGE`** (see "Delivery pipeline").
 
 | Key | Attribute | Value |
 |---|---|---|
@@ -69,25 +86,128 @@ Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`.
 - List = `Query` on `pk`, `ScanIndexForward=false`, `Limit=50`.
 - Get = `GetItem` on (`pk`, `REQ#<id>`).
 - `pk` is always built from the token's `sub`, never from client input, so one user cannot
-  address another user's items. No GSI in stage 1.
+  address another user's items. No GSI.
 - Known limit: read capacity is charged by the size of the items read, not by the fields
   returned, so dropping `body` from the list response would not lower it. A page of 50
   items with maximum-size bodies (about 265 KB) costs roughly 33 RCU per call with
   eventually consistent reads, against 5 provisioned RCU. Burst capacity covers occasional
   calls; refreshing the list in a tight loop could throttle.
 
+## Delivery pipeline
+
+```
+POST /requests -> DynamoDB (created) -> stream -> enqueuer -> SQS FIFO -> delivery-worker
+                                                                 |          |-> partner (Function URL, SigV4)
+                                                                 |          |-> DynamoDB (sent | rejected | failed)
+                                                                 |          |-> S3 audit copy, SNS request-status
+                                                                 `-> after 5 receives -> DLQ (kept for inspection)
+```
+
+**Outbox through DynamoDB Streams.** The API only writes to the table. The stream feeds the
+`enqueuer`, so a request cannot be stored without also being queued (at least once), and the
+API needs no permission for the queue.
+
+**enqueuer** (event source mapping on the stream):
+- Filter: `INSERT` events only, so the status updates of the pipeline do not trigger it again.
+- Batch size up to 10 (`SendMessageBatch` takes at most 10). Reports failures per record
+  (`ReportBatchItemFailures`), `bisect_batch_on_function_error`, a bounded number of retries
+  and record age; when a record is given up on, the mapping's failure destination is the
+  `alerts` SNS topic. Stream records live 24 h, so a stuck enqueuer must alert well before that.
+- For each record it sends one message, then conditionally sets `queued` (from `created`).
+  If the update fails the whole record is retried: the queue's deduplication and the worker's
+  status check absorb the duplicate. Never log the record image (it holds the request text).
+
+**Queue** `<project>-<env>-deliveries.fifo` and its DLQ `<project>-<env>-deliveries-dlq.fifo`
+(a FIFO queue needs a FIFO DLQ):
+- Message body: `{ "requestId": ULID, "ownerId": string }`. Ids only: no request text in the queue.
+- `MessageGroupId` = SHA-256 hex of `partner.trim().toLowerCase()`. A hash, because a group id
+  may only contain alphanumerics and punctuation and the partner is free text. Order is kept
+  per partner; a failing message blocks its own partner's later messages until it is in the DLQ.
+- `MessageDeduplicationId` = `requestId`. No content-based deduplication.
+- Visibility timeout 120 s (at least 6 x the worker timeout), `maxReceiveCount` 5, retention
+  4 days on the queue and 14 days on the DLQ, server-side encryption on.
+
+**delivery-worker** (SQS event source mapping: batch size 1, `maximum_concurrency` 2,
+`ReportBatchItemFailures`):
+1. `GetItem` with `ConsistentRead` (the item was written moments ago). Terminal status:
+   acknowledge and do nothing (idempotent consumer).
+2. `POST` the partner (below) with an 8 s timeout. Outcome: 2xx = delivered; 401, 403, 408,
+   429, 5xx, network error or timeout = retryable failure; any other 4xx = rejected for good.
+   401 and 403 mean that our own credentials or permissions are wrong, not that the partner
+   refused the request. They are retried and end as `failed` with an alarm, instead of a silent
+   `rejected` that would hide a misconfiguration.
+3. Delivered: put the audit copy in S3, set `sent`, publish to SNS. Rejected: set `rejected`,
+   publish, acknowledge (no retry).
+4. Retryable failure: report the message as failed so SQS retries it after the visibility timeout.
+   On the **last** attempt (`ApproximateReceiveCount >= MAX_RECEIVE_COUNT`) set `failed` and
+   publish first, then still report the message as failed so that SQS moves it to the DLQ,
+   which keeps it for inspection. `MAX_RECEIVE_COUNT` comes from Terraform, the same value as
+   the queue's `maxReceiveCount`.
+5. The mapping uses batch size 1: a FIFO queue hands out the messages of one partner strictly
+   in order, and with one message per invocation a failure affects only that message. The code
+   also handles larger batches the way AWS advises for FIFO: stop at the first failure and
+   return it and every message after it in `batchItemFailures` (keeps the order). The price
+   of larger batches: the messages behind a failure are charged a receive without being tried,
+   so they can reach the DLQ untried, and one failing partner holds back unrelated ones in the
+   same batch. That is why the demo does not use them.
+6. The SNS publish is best effort: log a failure, do not fail the message.
+7. Two more outcomes that are reported as failed and end in the DLQ after the allowed receives:
+   a malformed message body, and a message whose request does not exist (both are bugs, so
+   they must be visible to the alarm, never silently acknowledged). If the conditional update
+   finds the request already finished, the message is acknowledged: nothing to publish, no DLQ.
+
+Known limits: if the worker dies between the partner's answer and the status update, the retry
+sends a duplicate, so the partner must honour the `Idempotency-Key`. An unexpected error on our
+side (DynamoDB, S3, a bug) never writes `failed`, even on the last attempt: the database may be
+what broke, and after the partner accepted the request `failed` would be wrong. The message goes
+to the DLQ, the alarm fires, and the request keeps its status. The same happens if the worker dies
+on the last attempt before writing `failed`: the request stays `queued` and only the alarm shows it.
+
+**Partner webhook** (`partner-mock`, a Lambda with a Function URL, auth type `AWS_IAM`; the
+worker signs its request with SigV4, service `lambda`, so there is no public endpoint and no
+shared secret):
+- `POST <url>`, headers `Content-Type: application/json` and `Idempotency-Key: <requestId>`,
+  body `{ "id", "partner", "subject", "body", "createdAt" }`.
+- `200 { "accepted": true }` normally. If `subject` contains `[reject]`: `422 { "error": ... }`.
+  If it contains `[fail]`: `503`. This makes both kinds of failure easy to show. The markers
+  are case-sensitive; if both are present, `[reject]` wins. A body that is not JSON or has no
+  string `subject` gets `400 { "error": ... }`. It keeps no state.
+
+**S3 audit copy**: bucket `<project>-<env>-deliveries-<account id>` (private, encrypted, objects
+expire after 30 days), key `deliveries/<requestId>.json` holding `{ "sentAt", "payload",
+"partnerStatus" }`, written after the partner answered 2xx.
+
+**SNS**
+- `<project>-<env>-request-status`: the worker publishes one event per terminal status. Body
+  `{ "requestId", "status", "at" }` (no request text), message attribute `status` (String). The
+  owner's e-mail subscription has a filter policy on `status` in [`failed`, `rejected`].
+- `<project>-<env>-alerts`: operational alarms and the enqueuer's failure destination. The
+  owner's e-mail subscription has no filter. CloudWatch alarms: DLQ depth >= 1
+  (`ApproximateNumberOfMessagesVisible`) and enqueuer `IteratorAge` above 5 minutes.
+- The e-mail address is the `notification_email` Terraform variable (in CI a GitHub secret).
+  Each subscription needs a confirmation click.
+
 ## Lambda contract
 
-| Function | Route | DynamoDB action it may call |
-|---|---|---|
-| `create-request` | `POST /requests` | `PutItem` |
-| `list-requests` | `GET /requests` | `Query` |
-| `get-request` | `GET /requests/{id}` | `GetItem` |
+| Function | Trigger | DynamoDB | Other permissions (all resource-scoped) |
+|---|---|---|---|
+| `create-request` | `POST /requests` | `PutItem` | |
+| `list-requests` | `GET /requests` | `Query` | |
+| `get-request` | `GET /requests/{id}` | `GetItem` | |
+| `enqueuer` | DynamoDB stream | `UpdateItem` | stream read; `sqs:SendMessage` on the queue; `sns:Publish` on `alerts` |
+| `delivery-worker` | SQS queue | `GetItem`, `UpdateItem` | queue receive/delete/attributes; `sns:Publish` on `request-status`; `s3:PutObject` on `deliveries/*`; invoke the `partner-mock` Function URL |
+| `partner-mock` | Function URL | | |
 
-- Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, timeout 10 s, memory 256 MB.
-- Event: API Gateway HTTP API payload format 2.0 with JWT authorizer
+- Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. Timeouts:
+  API functions, `enqueuer` and `partner-mock` 10 s, `delivery-worker` 15 s.
+- The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
+  event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
+- API events: HTTP API payload format 2.0 with JWT authorizer
   (`event.requestContext.authorizer.jwt.claims.sub`).
-- Environment: `TABLE_NAME`, `LOG_LEVEL` (default `info`), `NODE_OPTIONS=--enable-source-maps`
-  (the build is minified; the source map keeps stack traces readable).
+- Environment, all functions: `LOG_LEVEL` (default `info`), `NODE_OPTIONS=--enable-source-maps`
+  (the build is minified; the source map keeps stack traces readable). Per function:
+  API functions `TABLE_NAME`; `enqueuer` `TABLE_NAME`, `QUEUE_URL`; `delivery-worker` `TABLE_NAME`,
+  `PARTNER_URL`, `TOPIC_ARN` (request-status), `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`. The worker
+  also reads `AWS_REGION`, which the Lambda runtime sets (needed to sign the partner request).
 - Build output: `backend/dist/<function>/index.mjs` (plus a source map). Terraform zips each
   directory with `archive_file`; the build does not produce zips.

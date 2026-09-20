@@ -1,9 +1,9 @@
-import { screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeRequest, makeRequestsApi } from "@test/factories";
 import { renderWithProviders } from "@test/render";
 import { ApiError } from "@/shared/api";
-import { RequestsStore } from "@/entities/request";
+import { RequestsStore, STATUS_POLL_INTERVAL_MS } from "@/entities/request";
 import { RequestsListPage } from "./RequestsListPage";
 
 function setup() {
@@ -62,5 +62,129 @@ describe("RequestsListPage", () => {
 
     expect(await screen.findByRole("link", { name: "Recovered" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("RequestsListPage status polling", () => {
+  // Fake timers, so five seconds pass instantly and no real time is spent waiting.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Moves the fake clock and lets the promises of the fake API settle; act() makes React
+  // apply the resulting re-render before the test looks at the page.
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  const statusOf = (subject: string) =>
+    within(screen.getByRole("link", { name: subject }).closest("tr") as HTMLElement).getByText(
+      /^(Created|Queued|Sent|Rejected|Failed)$/,
+    ).textContent;
+
+  it("follows a request from created to queued to sent, then stops asking", async () => {
+    const { api, requests } = setup();
+    const created = makeRequest({ subject: "Watched", status: "created" });
+    api.list
+      .mockResolvedValueOnce([created])
+      .mockResolvedValueOnce([{ ...created, status: "queued" }])
+      .mockResolvedValue([{ ...created, status: "sent" }]);
+
+    renderWithProviders(<RequestsListPage />, { requests });
+    await advance(0);
+    expect(statusOf("Watched")).toBe("Created");
+
+    await advance(STATUS_POLL_INTERVAL_MS);
+    expect(statusOf("Watched")).toBe("Queued");
+
+    await advance(STATUS_POLL_INTERVAL_MS);
+    expect(statusOf("Watched")).toBe("Sent");
+    expect(api.list).toHaveBeenCalledTimes(3);
+
+    // Everything is terminal now: a minute later there is still no further request.
+    await advance(60_000);
+    expect(api.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not poll at all when every request is already terminal", async () => {
+    const { api, requests } = setup();
+    api.list.mockResolvedValue([
+      makeRequest({ status: "sent" }),
+      makeRequest({ status: "rejected" }),
+      makeRequest({ status: "failed" }),
+    ]);
+
+    renderWithProviders(<RequestsListPage />, { requests });
+    await advance(60_000);
+
+    expect(api.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps polling while at least one request is still pending", async () => {
+    const { api, requests } = setup();
+    const done = makeRequest({ subject: "Done", status: "sent" });
+    const waiting = makeRequest({ subject: "Waiting", status: "created" });
+    api.list
+      .mockResolvedValueOnce([waiting, done])
+      .mockResolvedValueOnce([{ ...waiting, status: "queued" }, done])
+      .mockResolvedValue([{ ...waiting, status: "rejected" }, done]);
+
+    renderWithProviders(<RequestsListPage />, { requests });
+    await advance(0);
+    await advance(STATUS_POLL_INTERVAL_MS * 2);
+    expect(statusOf("Waiting")).toBe("Rejected");
+    expect(statusOf("Done")).toBe("Sent");
+
+    await advance(60_000);
+    expect(api.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the rows and keeps polling when a refresh fails", async () => {
+    const { api, requests } = setup();
+    const request = makeRequest({ subject: "Still here", status: "queued" });
+    api.list
+      .mockResolvedValueOnce([request])
+      .mockRejectedValueOnce(new ApiError(500, "internal_error", "Internal server error"))
+      .mockResolvedValue([{ ...request, status: "sent" }]);
+
+    renderWithProviders(<RequestsListPage />, { requests });
+    await advance(0);
+    await advance(STATUS_POLL_INTERVAL_MS);
+
+    // The failed refresh neither removed the row nor showed the error alert.
+    expect(statusOf("Still here")).toBe("Queued");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await advance(STATUS_POLL_INTERVAL_MS);
+    expect(statusOf("Still here")).toBe("Sent");
+  });
+
+  it("stops asking when the page is closed", async () => {
+    const { api, requests } = setup();
+    api.list.mockResolvedValue([makeRequest({ status: "queued" })]);
+
+    const { unmount } = renderWithProviders(<RequestsListPage />, { requests });
+    await advance(0);
+    unmount();
+    await advance(60_000);
+
+    expect(api.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poll while the page's own load is still running", async () => {
+    const { api, requests } = setup();
+    // A request the store already knows (e.g. just created) is on screen while the list loads.
+    api.create.mockResolvedValue(makeRequest({ status: "created" }));
+    await requests.create({ partner: "p", subject: "s", body: "b" });
+    api.list.mockReturnValue(new Promise(() => undefined));
+
+    renderWithProviders(<RequestsListPage />, { requests });
+    await advance(60_000);
+
+    expect(api.list).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,6 @@
 import { Badge } from "@/shared/ui/badge";
 import type { RequestStatus } from "../model/types";
+import { getStatusExplanation } from "./statusExplanation";
 
 // One look per status. The label is always visible text, so the meaning never depends on
 // colour alone. Typed as Record<RequestStatus, ...>: adding a status to the API makes
@@ -23,7 +24,9 @@ const STATUS_LOOK: Record<RequestStatus, { label: string; variant: "default" | "
 export function RequestStatusBadge({ status }: { status: RequestStatus }) {
   const look = STATUS_LOOK[status];
   return (
-    <Badge variant={look.variant} className={look.className} data-status={status}>
+    // `title` is the hover text: it explains the two bad outcomes (rejected, failed) in the
+    // list. The details page shows the same sentence as visible text.
+    <Badge variant={look.variant} className={look.className} data-status={status} title={getStatusExplanation(status)}>
       {look.label}
     </Badge>
   );

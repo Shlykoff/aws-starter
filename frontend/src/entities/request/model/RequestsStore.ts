@@ -1,6 +1,7 @@
 import { makeAutoObservable, observableRef, runInAction } from "mobx";
 import { ApiError, getErrorMessage } from "@/shared/api";
 import type { RequestsApi } from "../api/requestsApi";
+import { isTerminalStatus } from "./status";
 import type { NewPartnerRequest, PartnerRequest } from "./types";
 
 export type LoadState = "idle" | "loading" | "ready" | "error";
@@ -46,6 +47,12 @@ export class RequestsStore {
     return this.items.find((request) => request.id === id);
   }
 
+  // True while at least one known request can still change status (created or queued).
+  // The list page polls only as long as this is true.
+  get hasPendingItems(): boolean {
+    return this.items.some((request) => !isTerminalStatus(request.status));
+  }
+
   // Every method here is a MobX action. Code after an `await` is no longer inside the
   // action, so those state changes are wrapped in runInAction.
   async loadList(): Promise<void> {
@@ -65,16 +72,49 @@ export class RequestsStore {
     }
   }
 
+  // The background refresh behind the polling: the same call as loadList, but it never
+  // shows a loading state and it never takes the data on screen away. If the request
+  // fails while there are items to show, the failure is ignored and the next poll tries
+  // again. The error state is only for a screen with nothing else to show.
+  async refreshList(): Promise<void> {
+    try {
+      const incoming = await this.api.list();
+      runInAction(() => {
+        this.items = mergeById(this.items, incoming);
+        this.listState = "ready";
+        this.listError = null;
+      });
+    } catch (error) {
+      runInAction(() => {
+        if (this.items.length > 0) return;
+        this.listState = "error";
+        this.listError = getErrorMessage(error);
+      });
+    }
+  }
+
   async loadDetail(id: string): Promise<void> {
     // Already known (from the list, or just created): show it without a request. Right
     // after a create a fresh GET could even answer 404 because of eventual consistency.
-    // Statuses will change in later stages; then this is the place to refresh in the background.
+    // Its status is kept up to date by refreshDetail (the polling).
     if (this.findById(id)) {
       this.detail = { id, status: "ready" };
       return;
     }
 
     this.detail = { id, status: "loading" };
+    await this.fetchDetail(id);
+  }
+
+  // The background refresh behind the polling: unlike loadDetail it always asks the API
+  // (GET /requests/{id}), even for a request we already know. Call it after loadDetail.
+  async refreshDetail(id: string): Promise<void> {
+    await this.fetchDetail(id);
+  }
+
+  // GET /requests/{id} and merge the answer into `items`. On failure the user only sees
+  // an error state when there is nothing else to show for this id.
+  private async fetchDetail(id: string): Promise<void> {
     try {
       const request = await this.api.get(id);
       runInAction(() => {
@@ -85,6 +125,13 @@ export class RequestsStore {
     } catch (error) {
       runInAction(() => {
         if (this.detail?.id !== id) return;
+        // We already have this request (loaded before, or just created): a 404 is then
+        // eventual consistency, not "does not exist", and any other failure is a hiccup
+        // that the next poll may fix. Keep showing what we have.
+        if (this.findById(id)) {
+          this.detail = { id, status: "ready" };
+          return;
+        }
         this.detail =
           error instanceof ApiError && error.status === 404
             ? { id, status: "not-found" }

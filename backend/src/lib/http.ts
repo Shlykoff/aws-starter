@@ -4,7 +4,7 @@ import type {
   Context,
 } from "aws-lambda";
 import type { z } from "zod";
-import { AppError, MisconfigurationError, ValidationError } from "./errors";
+import { AppError, MisconfigurationError, ValidationError, describeError } from "./errors";
 import type { ErrorCode } from "./errors";
 import type { Logger } from "./logger";
 
@@ -56,8 +56,15 @@ export function getOwnerId(event: ApiEvent): string {
   return sub;
 }
 
-/** Parses the JSON body and validates it against a zod schema; throws ValidationError. */
-export function parseJsonBody<T>(event: ApiEvent, schema: z.ZodType<T>): T {
+/**
+ * Parses the JSON body and validates it against a zod schema; throws ValidationError.
+ * It only reads `body` and `isBase64Encoded`, so it also serves the partner mock, whose
+ * Lambda Function URL event has the same shape (payload format 2.0).
+ */
+export function parseJsonBody<T>(
+  event: Pick<ApiEvent, "body" | "isBase64Encoded">,
+  schema: z.ZodType<T>,
+): T {
   if (event.body === undefined || event.body === "") {
     throw new ValidationError("Request body is required");
   }
@@ -119,11 +126,4 @@ export function createHandler(
     });
     return response;
   };
-}
-
-function describeError(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) {
-    return { errorName: error.name, errorMessage: error.message, stack: error.stack };
-  }
-  return { errorName: "NonError", errorMessage: String(error) };
 }

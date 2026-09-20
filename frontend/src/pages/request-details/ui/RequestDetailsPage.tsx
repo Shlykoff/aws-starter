@@ -2,8 +2,14 @@ import { useEffect, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { observer } from "mobx-react-lite";
 import { ArrowLeft, CircleAlert } from "lucide-react";
-import { RequestStatusBadge, useRequestsStore } from "@/entities/request";
-import { formatDateTime, useDocumentTitle } from "@/shared/lib";
+import {
+  getStatusExplanation,
+  isTerminalStatus,
+  RequestStatusBadge,
+  STATUS_POLL_INTERVAL_MS,
+  useRequestsStore,
+} from "@/entities/request";
+import { formatDateTime, useDocumentTitle, usePolling } from "@/shared/lib";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Button } from "@/shared/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/shared/ui/card";
@@ -23,6 +29,11 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
   const detail = requests.detail?.id === id ? requests.detail : null;
   useDocumentTitle(request?.subject ?? "Request");
 
+  // Keep refreshing while the request is created or queued; terminal statuses never change.
+  const polling = request !== undefined && !isTerminalStatus(request.status);
+  usePolling(() => requests.refreshDetail(id), STATUS_POLL_INTERVAL_MS, polling);
+  const explanation = request ? getStatusExplanation(request.status) : undefined;
+
   let content: ReactNode;
   if (request) {
     content = (
@@ -41,6 +52,7 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
             <span className="text-muted-foreground">Status</span>
             <RequestStatusBadge status={request.status} />
           </div>
+          {explanation && <p className="text-sm">{explanation}</p>}
           <Separator />
           <p className="text-sm break-words whitespace-pre-wrap">{request.body}</p>
         </CardContent>

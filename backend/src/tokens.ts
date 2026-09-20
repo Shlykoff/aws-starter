@@ -2,11 +2,32 @@
 // itself, so code that asks for a "RequestRepository" never names the DynamoDB class, and
 // tests or later stages can bind another implementation under the same symbol.
 //
-// The container (src/container.ts) is the only file that connects a symbol to a class.
+// The containers (src/container*.ts) are the only files that connect a symbol to a class.
+// One symbol list serves all of them; a bundle only ever binds the symbols its function uses.
 export const TOKENS = {
-  Config: Symbol("Config"),
+  // Configuration: one token per function kind, because each has its own set of variables.
+  Config: Symbol("Config"), // the API functions
+  EnqueuerConfig: Symbol("EnqueuerConfig"),
+  WorkerConfig: Symbol("WorkerConfig"),
+
   Logger: Symbol("Logger"),
+
+  // AWS SDK clients (created once per cold start)
   DynamoDocumentClient: Symbol("DynamoDocumentClient"),
+  SqsClient: Symbol("SqsClient"),
+  SnsClient: Symbol("SnsClient"),
+  S3Client: Symbol("S3Client"),
+
+  // Repositories, ports and clients
   RequestRepository: Symbol("RequestRepository"),
+  DeliveryRepository: Symbol("DeliveryRepository"),
+  DeliveryQueue: Symbol("DeliveryQueue"),
+  StatusNotifier: Symbol("StatusNotifier"),
+  AuditStore: Symbol("AuditStore"),
+  PartnerClient: Symbol("PartnerClient"),
+
+  // Services
   RequestService: Symbol("RequestService"),
+  EnqueueService: Symbol("EnqueueService"),
+  DeliveryService: Symbol("DeliveryService"),
 } as const;

@@ -2,8 +2,8 @@ import { useEffect, type ReactNode } from "react";
 import { Link } from "react-router";
 import { observer } from "mobx-react-lite";
 import { CircleAlert, Inbox, Plus } from "lucide-react";
-import { RequestStatusBadge, useRequestsStore, type PartnerRequest } from "@/entities/request";
-import { formatDateTime, useDocumentTitle } from "@/shared/lib";
+import { RequestStatusBadge, STATUS_POLL_INTERVAL_MS, useRequestsStore, type PartnerRequest } from "@/entities/request";
+import { formatDateTime, useDocumentTitle, usePolling } from "@/shared/lib";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -75,6 +75,12 @@ export const RequestsListPage = observer(function RequestsListPage() {
   }, [requests]);
 
   const { items, listState, listError } = requests;
+
+  // Statuses change on the server after the request was created, so keep refreshing while
+  // any listed request is not terminal yet. Not while the page's own load is running:
+  // two list requests at once could answer in the wrong order.
+  const polling = requests.hasPendingItems && listState !== "loading";
+  usePolling(() => requests.refreshList(), STATUS_POLL_INTERVAL_MS, polling);
 
   let content: ReactNode;
   if (items.length > 0) content = <RequestsTable items={items} />;

@@ -4,7 +4,14 @@
 import { build } from "esbuild";
 import { rm, stat } from "node:fs/promises";
 
-const functions = ["create-request", "list-requests", "get-request"];
+const functions = [
+  "create-request",
+  "list-requests",
+  "get-request",
+  "enqueuer",
+  "delivery-worker",
+  "partner-mock",
+];
 
 await rm("dist", { recursive: true, force: true });
 

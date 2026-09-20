@@ -1,5 +1,5 @@
-# Single-table design for stage 1: one partition per user (pk = USER#<sub>), one item per
-# request (sk = REQ#<ULID>). Key design is described in docs/api.md.
+# Single-table design: one partition per user (pk = USER#<sub>), one item per request
+# (sk = REQ#<ULID>). Key design is described in docs/api.md.
 resource "aws_dynamodb_table" "this" {
   name = var.name
 
@@ -13,6 +13,13 @@ resource "aws_dynamodb_table" "this" {
 
   hash_key  = "pk"
   range_key = "sk"
+
+  # Change stream for the delivery pipeline (docs/api.md): the enqueuer reads it and puts
+  # every new request on the queue. NEW_IMAGE = the item as it looks after the write; the
+  # enqueuer never needs the old version. The stream holds the request text, so nothing
+  # that reads it may log a record. Turning this on updates the table in place.
+  stream_enabled   = true
+  stream_view_type = "NEW_IMAGE"
 
   attribute {
     name = "pk"

@@ -43,6 +43,16 @@ data "aws_iam_policy_document" "permissions" {
     content {
       actions   = statement.value.actions
       resources = statement.value.resources
+
+      dynamic "condition" {
+        for_each = statement.value.conditions
+
+        content {
+          test     = condition.value.test
+          variable = condition.value.variable
+          values   = condition.value.values
+        }
+      }
     }
   }
 }
@@ -73,11 +83,11 @@ resource "aws_lambda_function" "this" {
   filename         = data.archive_file.this.output_path
   source_code_hash = data.archive_file.this.output_base64sha256
 
-  # The handlers make one DynamoDB call, so anything slower than 10 s is a bug. A short
-  # timeout also caps how long a stuck call holds one of the account's 10 concurrent
-  # executions.
+  # Callers set what their handler needs; the 10 s default suits a handler that makes one or
+  # two SDK calls, where anything slower is a bug. A short timeout also caps how long a stuck
+  # call holds one of the account's 10 concurrent executions.
   timeout     = var.timeout
-  memory_size = var.memory_size # CPU share scales with memory; 256 MB is plenty for one SDK call
+  memory_size = var.memory_size # CPU share scales with memory; 256 MB is plenty for a few SDK calls
 
   # No VPC (reaching the internet from one needs a NAT Gateway, billed by the hour) and no
   # reserved concurrency (the account limit is 10 in total; reserving some would starve
@@ -91,4 +101,16 @@ resource "aws_lambda_function" "this" {
     aws_cloudwatch_log_group.this, # so that our group, with retention, exists before Lambda can create its own
     aws_iam_role_policy.this,      # so that the first invocation is already allowed to log
   ]
+}
+
+# Optional HTTPS endpoint. With AWS_IAM, Lambda checks the caller's SigV4 signature and IAM
+# permissions before the code runs, so the URL is not a public endpoint. A caller in the
+# same account needs no resource-based policy on this function: an identity policy with
+# lambda:InvokeFunctionUrl and lambda:InvokeFunction is enough (AWS docs, "Control access to
+# Lambda function URLs"), so none is created here.
+resource "aws_lambda_function_url" "this" {
+  count = var.enable_function_url ? 1 : 0
+
+  function_name      = aws_lambda_function.this.function_name
+  authorization_type = "AWS_IAM"
 }

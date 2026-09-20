@@ -1,6 +1,7 @@
 import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { PartnerRequest, RequestStatus } from "../domain/request";
+import { ownerKey, requestKey } from "../domain/request-keys";
 import type { RequestRepository } from "./request-repository";
 
 // DynamoDB table `<project>-<env>-requests` (created by Terraform, see docs/api.md).
@@ -37,9 +38,6 @@ interface RequestItem {
   status: RequestStatus;
   createdAt: string;
 }
-
-const ownerKey = (ownerId: string): string => `USER#${ownerId}`;
-const requestKey = (id: string): string => `REQ#${id}`;
 
 // The reverse mapping. It copies fields one by one instead of returning the item, so `pk`
 // and `sk` (which contain the owner) can never end up in an API response.
