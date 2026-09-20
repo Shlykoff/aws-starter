@@ -42,7 +42,9 @@ Written down as they are made; each stage adds its own.
   name is passed through a git-ignored `backend.tfbackend`, so the account ID is not
   committed.
 - **GitHub Actions authenticates via OIDC**, not access keys. The trust policy is
-  pinned to this repository's `main` branch.
+  pinned to this repository's `main` branch, using GitHub's immutable subject claim (it
+  carries the numeric owner and repository IDs, so a renamed or re-created repository
+  does not inherit the trust).
 - **Cost guard first**: an account-wide budget with e-mail alerts is created before
   any application resources.
 - **DynamoDB in provisioned mode, small and fixed (5 RCU / 5 WCU, no autoscaling).**

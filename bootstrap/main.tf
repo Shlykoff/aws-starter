@@ -110,11 +110,13 @@ data "aws_iam_policy_document" "github_assume" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Only workflow runs on main of this exact repository can assume the role.
+    # Only workflow runs on main of this exact repository can assume the role. The prefix
+    # is GitHub's immutable form (it carries the numeric owner and repository IDs), so a
+    # renamed, deleted-and-recreated or transferred repository does not inherit this trust.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      values   = ["${var.github_oidc_subject_prefix}:ref:refs/heads/main"]
     }
   }
 }

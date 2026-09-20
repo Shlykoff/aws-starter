@@ -1,5 +1,7 @@
 # Copy to terraform.tfvars (git-ignored) and fill in.
-github_repo = "your-github-user/aws-starter"
+# Print the prefix with:
+#   gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix
+github_oidc_subject_prefix = "repo:your-github-user@<owner-id>/aws-starter@<repo-id>"
 alert_email = "you@example.com"
 
 # optional
