@@ -4,13 +4,25 @@ version: 2
 # and a merge deploys like any other merge.
 updates:
   - package-ecosystem: npm
-    directories: ["/", "/backend", "/frontend"] # one entry per workspace package
+    # One entry for the whole Yarn workspace: the root reads the workspace packages too and
+    # keeps the single yarn.lock consistent. One entry per package produced duplicate pull
+    # requests whose lockfile change failed `yarn install --immutable`.
+    directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
       minor-and-patch: # fewer pull requests: minor and patch updates arrive together
         update-types: [minor, patch]
+    # The major versions of these three are pinned on purpose: update them by hand, together
+    # with whatever they need, and drop the entry when that is done.
+    ignore:
+      - dependency-name: typescript # typescript-eslint supports TypeScript below 6.1 only (at the time of writing)
+        update-types: ["version-update:semver-major"]
+      - dependency-name: vitest # keep one major in both workspaces; Vitest 5 needs an explicit `vite`, which the backend does not have
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node" # must match the nodejs24.x Lambda runtime
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
