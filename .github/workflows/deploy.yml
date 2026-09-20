@@ -1,0 +1,122 @@
+name: Deploy
+
+# Runs after a pull request has been merged into main (branch protection makes a merge the
+# only way in). Nothing else deploys.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      allow_destroy:
+        description: Let the plan delete or replace resources (a normal deploy stops if it would)
+        type: boolean
+        default: false
+
+# One deploy at a time. Two quick merges queue up instead of fighting over the Terraform
+# state lock, and a running deploy is never cancelled halfway.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  TF_IN_AUTOMATION: "true" # Terraform prints less advice meant for a person at a terminal
+  AWS_REGION: eu-north-1
+  TF_DIR: infra/envs/dev
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      id-token: write # lets the job ask GitHub for an OIDC token, which AWS swaps for temporary credentials
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-node-yarn
+
+      # Terraform zips backend/dist into the Lambda packages, so it must exist before the plan.
+      - name: Build the backend
+        run: yarn workspace @aws-starter/backend build
+
+      # No access keys anywhere: the role trusts this repository's main branch only
+      # (bootstrap/main.tf). The account ID is masked in the logs from here on.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.3
+          terraform_wrapper: false # `terraform output -raw` below must print the bare value
+
+      - name: Terraform init
+        run: |
+          # The state bucket is named <project>-tfstate-<account id> (bootstrap/main.tf).
+          # Deriving it here keeps the account ID out of the repository and its settings.
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          terraform -chdir="$TF_DIR" init -input=false -backend-config="bucket=aws-starter-tfstate-${ACCOUNT_ID}"
+
+      - name: Terraform plan
+        env:
+          TF_VAR_cognito_domain_prefix: ${{ vars.COGNITO_DOMAIN_PREFIX }}
+        run: terraform -chdir="$TF_DIR" plan -input=false -out=tfplan
+
+      # A guard rail for unattended deploys: an automatic apply may create and change things
+      # but never delete or replace them (deleting a Cognito pool would delete its users).
+      # A destructive change has to be run on purpose: Run workflow -> allow_destroy.
+      - name: Refuse destructive changes
+        if: ${{ !inputs.allow_destroy }}
+        run: |
+          destructive="$(terraform -chdir="$TF_DIR" show -json tfplan \
+            | jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length')"
+          if [ "$destructive" -ne 0 ]; then
+            echo "::error::The plan deletes or replaces $destructive resource(s). Review it in the log above, then run this workflow by hand with allow_destroy."
+            exit 1
+          fi
+
+      - name: Terraform apply
+        run: terraform -chdir="$TF_DIR" apply -input=false tfplan
+
+      # The app is configured at build time with the addresses Terraform just produced.
+      - name: Build the frontend
+        run: |
+          tf_output() { terraform -chdir="$TF_DIR" output -raw "$1"; }
+
+          # Assign first, export afterwards: `export VAR="$(command)"` would hide a failing
+          # command, and the build would go on with an empty address.
+          VITE_API_URL="$(tf_output api_url)"
+          VITE_COGNITO_USER_POOL_ID="$(tf_output cognito_user_pool_id)"
+          VITE_COGNITO_CLIENT_ID="$(tf_output cognito_client_id)"
+          VITE_COGNITO_HOSTED_UI_URL="$(tf_output cognito_hosted_ui_url)"
+          export VITE_API_URL VITE_COGNITO_USER_POOL_ID VITE_COGNITO_CLIENT_ID VITE_COGNITO_HOSTED_UI_URL
+          export VITE_AWS_REGION="$AWS_REGION"
+
+          yarn workspace @aws-starter/frontend build
+
+      - name: Publish the frontend
+        run: |
+          BUCKET="$(terraform -chdir="$TF_DIR" output -raw site_bucket)"
+          DISTRIBUTION_ID="$(terraform -chdir="$TF_DIR" output -raw distribution_id)"
+
+          # Files in assets/ have a content hash in their name, so a name never changes its
+          # content: browsers and CloudFront may keep them for a year.
+          aws s3 sync frontend/dist/assets "s3://${BUCKET}/assets" \
+            --cache-control "public,max-age=31536000,immutable" --delete
+
+          # Everything else (index.html, ...) keeps its name, so it is re-checked every time.
+          # It is uploaded after assets/, so a new index.html never points at missing files.
+          aws s3 sync frontend/dist "s3://${BUCKET}" \
+            --exclude "assets/*" --cache-control "no-cache" --delete
+
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
