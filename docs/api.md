@@ -47,6 +47,11 @@ Errors produced by the Lambdas use one shape:
              "message": string, "details"?: unknown } }
 ```
 
+For `validation_error`, `details` is an array of `{ path: string, message: string }`
+(`path` is the dotted JSON path of the invalid field). Errors produced by API Gateway
+itself, such as a missing or invalid token, are `401` with `{ "message": "Unauthorized" }`:
+a different shape.
+
 CORS: allowed origins come from Terraform (`http://localhost:5173` and the site domain),
 headers `authorization` and `content-type`, methods `GET`, `POST`, `OPTIONS`.
 

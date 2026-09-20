@@ -1,0 +1,22 @@
+{
+  // Type-checking only: Vite (esbuild/Oxc) and Vitest strip types without checking them,
+  // so `yarn typecheck` (tsc --noEmit) is the one place where type errors are caught.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // vitest.config.ts imports "./vite.config.ts" with its extension (Node's native config
+    // loader wants it). Allowed because nothing is emitted: Vite and Vitest do the bundling.
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    // TypeScript 6 no longer loads every @types/* package by default; list what we use.
+    // "vite/client" types `import.meta.env` and CSS/asset imports. "node" is only needed
+    // by vite.config.ts (it runs in Node); no application code should touch Node APIs.
+    "types": ["vite/client", "node"],
+    // The `@` alias for `src`. Keep it in sync with vite.config.ts and components.json.
+    // `@test` points at shared test helpers (test/); it is only configured for Vitest,
+    // never used by application code.
+    "paths": { "@/*": ["./src/*"], "@test/*": ["./test/*"] }
+  },
+  "include": ["src", "test", "vite.config.ts", "vitest.config.ts"]
+}

@@ -6,7 +6,8 @@
     "node": ">=24"
   },
   "workspaces": [
-    "backend"
+    "backend",
+    "frontend"
   ],
   "scripts": {
     "build": "yarn workspaces foreach --all run build",
