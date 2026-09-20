@@ -1,0 +1,32 @@
+# personal study notes (not for the public repo)
+NOTES.md
+
+# dependencies / build
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# terraform (commit .terraform.lock.hcl, never state or real variable values)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+*.tfvars
+!*.tfvars.example
+*.tfbackend
+
+# secrets / local env
+.env
+.env.*
+!.env.example
+
+# claude code: personal overrides only; settings.json and agents are shared
+.claude/settings.local.json
+
+# os / editors
+.DS_Store
+.idea/
+.vscode/

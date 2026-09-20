@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+github_repo = "your-github-user/aws-starter"
+alert_email = "you@example.com"
+
+# optional
+# region             = "eu-north-1"
+# project            = "aws-starter"
+# monthly_budget_usd = 5
