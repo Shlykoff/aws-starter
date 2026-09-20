@@ -10,13 +10,13 @@ variable "project" {
   default     = "aws-starter"
 }
 
-variable "github_repo" {
-  description = "GitHub repository allowed to deploy, as owner/name."
+variable "github_oidc_subject_prefix" {
+  description = "Start of the `sub` claim in the tokens GitHub Actions issues for the repository that may deploy. Newer repositories use immutable IDs (repo:OWNER@OWNER_ID/REPO@REPO_ID), older ones repo:OWNER/REPO. Print it with: gh api repos/OWNER/REPO/actions/oidc/customization/sub --jq .sub_claim_prefix"
   type        = string
 
   validation {
-    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.github_repo))
-    error_message = "Use the owner/name format, e.g. my-user/serverless-starter."
+    condition     = can(regex("^repo:[A-Za-z0-9-]+(@[0-9]+)?/[A-Za-z0-9._-]+(@[0-9]+)?$", var.github_oidc_subject_prefix))
+    error_message = "Expected repo:OWNER@ID/REPO@ID or repo:OWNER/REPO, as printed by the gh command in the description."
   }
 }
 
