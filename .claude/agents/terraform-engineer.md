@@ -25,7 +25,10 @@ application-side change (an env var name, an event shape), put it in your report
   with resource-scoped statements.
 - SQS: FIFO queue names end in `.fifo`; a DLQ with a `redrive_policy` and a deliberate
   `maxReceiveCount`; visibility timeout at least 6x the consuming function's timeout.
-- DynamoDB: `PAY_PER_REQUEST`, encryption on, point-in-time recovery on.
+- DynamoDB: `PROVISIONED` with small fixed capacity (5 RCU / 5 WCU per table and per
+  GSI, no autoscaling) so it stays inside the Free Tier; encryption on (the default
+  AWS-owned key); point-in-time recovery off unless the brief asks for it (it costs
+  extra).
 - API Gateway: HTTP API with a Cognito JWT authorizer and stage throttling, unless the
   brief says a REST-only feature is needed.
 - S3: public access blocked, encryption on, versioning where the data matters.

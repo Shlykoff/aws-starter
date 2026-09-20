@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+
+# Hosted UI domain prefix: https://<prefix>.auth.eu-north-1.amazoncognito.com
+# Must be unique across all AWS accounts in the region, so add something of your own.
+# Lowercase letters, digits and hyphens; must not contain "aws", "amazon" or "cognito".
+cognito_domain_prefix = "starter-dev-x7k2q9"
+
+# optional
+# project            = "aws-starter"
+# env                = "dev"
+# region             = "eu-north-1"
+# backend_dist_dir   = "../../../backend/dist"   # build output, relative to this directory
+# enable_static_site = true                      # false = no S3 + CloudFront (API and Cognito only)

@@ -46,7 +46,7 @@ including the failure paths.
 
 ## Before you report
 
-Run typecheck, lint and tests (`pnpm typecheck`, `pnpm lint`, `pnpm test`, or the
+Run typecheck, lint and tests (`yarn typecheck`, `yarn lint`, `yarn test`, or the
 package equivalents) and fix what fails. Say which of them you actually ran.
 
 ## Report

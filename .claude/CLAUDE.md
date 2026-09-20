@@ -82,10 +82,12 @@ and say what is good too.
 - **Platform**: region `eu-north-1`; Terraform >= 1.10, AWS provider `~> 6.0`, state in
   S3 with `use_lockfile`; Lambda `nodejs24.x` on `arm64`, no VPC.
 - **Backend**: TypeScript strict, handlers -> services -> repositories, Inversify
-  container built once per cold start, AWS SDK v3, esbuild, Vitest, pnpm workspaces.
+  container built once per cold start, AWS SDK v3, esbuild, Vitest, Yarn workspaces.
 - **Frontend**: React 19, Vite, MobX, Tailwind, Feature-Sliced Design (a layer imports
   only from layers below it; every slice exposes an `index.ts`).
-- **DynamoDB**: on-demand; key design is explained in the README.
+- **DynamoDB**: provisioned, small and fixed (5 RCU / 5 WCU per table and per GSI, no
+  autoscaling) to stay inside the always-free limits; key design is explained in the
+  README.
 - **Decisions**: every non-obvious choice gets a line in README "Decisions", with the
   alternative that was rejected.
 

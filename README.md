@@ -14,17 +14,20 @@ All data is fake. The domain is deliberately neutral.
 ## Status
 
 - [x] Stage 0: bootstrap (state bucket, budget alert, GitHub OIDC role)
-- [ ] Stage 1: REST API (API Gateway, Lambda, DynamoDB), Cognito, React login + list/form, CI/CD
+- [ ] Stage 1: REST API (API Gateway, Lambda, DynamoDB), Cognito, React login + list/form, CI/CD.
+  Deployed and smoke-tested: API, Lambdas, DynamoDB, Cognito, static hosting. Pending:
+  React app, CI/CD.
 - [ ] Stage 2: async delivery (SQS FIFO, worker, DLQ, SNS), S3 for files
 - [ ] Stage 3: XML + XSD validation, PII masking in logs, CloudWatch/X-Ray, secrets in SSM, tests
 
 ## Layout
 
 ```
-bootstrap/   one-off Terraform: state bucket, budget, GitHub OIDC role (local state)
+bootstrap/   one-off Terraform: state bucket, budget, GitHub OIDC role
 infra/       main Terraform stack (remote state), modules per service   [stage 1]
 backend/     Node.js + TypeScript Lambda handlers                        [stage 1]
 frontend/    React app                                                   [stage 1]
+docs/        API contract (docs/api.md)
 ```
 
 ## Decisions
@@ -42,6 +45,19 @@ Written down as they are made; each stage adds its own.
   pinned to this repository's `main` branch.
 - **Cost guard first**: an account-wide budget with e-mail alerts is created before
   any application resources.
+- **DynamoDB in provisioned mode, small and fixed (5 RCU / 5 WCU, no autoscaling).**
+  The load is tiny and predictable, and this stays inside the always-free limits.
+  On-demand would be the choice for spiky or unknown traffic.
+- **Request statuses separate temporary from permanent failures:** `created` (stored)
+  -> `queued` (in SQS FIFO) -> `sent` (partner answered 2xx). `failed` means delivery
+  retries are exhausted and the message is in the DLQ; `rejected` means the XML failed
+  schema validation and is not retried. Stage 1 only ever sets `created`.
+- **HTTP API instead of REST API.** Cheaper, lower latency and it has a built-in JWT
+  authorizer, so no authorizer Lambda is needed. The REST-only features (API keys,
+  usage plans, request validation) are not needed here.
+- **Cognito: Essentials tier with the classic hosted UI** instead of managed login. The
+  classic UI covers login, logout and password reset, and managed login needs an extra
+  branding resource before it renders anything.
 
 ## Running bootstrap
 

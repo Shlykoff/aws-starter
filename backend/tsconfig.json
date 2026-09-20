@@ -1,0 +1,15 @@
+{
+  // Type-checking only: esbuild builds the bundles and Vitest runs the tests, and both
+  // strip types without checking them. So `yarn typecheck` (tsc --noEmit) is the one
+  // place where type errors are caught.
+  //
+  // No decorator options (experimentalDecorators / emitDecoratorMetadata): the Inversify
+  // container in src/container.ts uses `toResolvedValue` bindings, not @injectable()/@inject().
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // TypeScript 6 no longer loads every @types/* package by default; list what we use.
+    "types": ["node"]
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}
