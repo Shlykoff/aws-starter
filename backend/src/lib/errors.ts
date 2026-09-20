@@ -38,3 +38,14 @@ export class MisconfigurationError extends AppError {
     super("internal_error", message);
   }
 }
+
+/**
+ * What is safe and useful to log about a failure: the error type, its message and the stack.
+ * Never the event, the request or anything else that was being processed.
+ */
+export function describeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return { errorName: error.name, errorMessage: error.message, stack: error.stack };
+  }
+  return { errorName: "NonError", errorMessage: String(error) };
+}

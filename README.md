@@ -60,6 +60,26 @@ Written down as they are made; each stage adds its own.
 - **Cognito: Essentials tier with the classic hosted UI** instead of managed login. The
   classic UI covers login, logout and password reset, and managed login needs an extra
   branding resource before it renders anything.
+- **Outbox through DynamoDB Streams.** The API only writes to the table; the stream feeds
+  an `enqueuer` Lambda that puts the request on the queue. A request cannot be stored
+  without also being queued (at least once), and the API has no queue permissions. Rejected:
+  the API sending to SQS after the write, which leaves a gap when the send fails.
+- **SQS FIFO with a hashed partner as the message group, one message per invocation.** The
+  group id is a hash of the partner name (a group id may only hold letters, digits and
+  punctuation, and a partner is free text), so order is kept per partner. Batch size is 1:
+  in a FIFO batch a failing message drags the messages behind it, other partners' included,
+  into retries, and each retry is charged a receive, so they could reach the DLQ untried.
+- **The dead-letter queue is a quarantine, not a pipe.** The worker writes `failed` itself on
+  the last attempt (the number of attempts comes from Terraform, one source of truth), and the
+  message then moves to the DLQ, where it stays for inspection and raises an alarm. A function
+  reading the DLQ would delete exactly what the alarm is meant to show.
+- **A 401 or 403 from the partner is retried, not rejected.** It means our own credentials or
+  permissions are wrong, so it ends as `failed` with an alarm instead of a silent `rejected`.
+- **The partner stand-in is an IAM-protected Lambda Function URL.** The worker signs its
+  requests with SigV4: no public endpoint and no shared secret.
+- **Alarms treat missing data as fine, and the SNS topics are not KMS-encrypted.** An idle
+  queue publishes no metric, and encrypted topics can only receive CloudWatch alarms through a
+  customer-managed key. The messages hold ids and alarm data, never request text.
 
 ## Running bootstrap
 

@@ -1,12 +1,19 @@
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  QueryCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
 import type { AwsClientStub } from "aws-sdk-client-mock";
 
 // A tiny in-memory stand-in for the DynamoDB table, plugged in behind
 // aws-sdk-client-mock. It understands exactly the three calls the repository makes, and
 // it honours the same rules DynamoDB does: items are addressed by (pk, sk), a Query only
 // sees one partition, results are sorted by the sort key, `ScanIndexForward=false`
-// reverses them, and `Limit` cuts them.
+// reverses them, and `Limit` cuts them. For the delivery pipeline it also understands the
+// one conditional UpdateItem the repository makes (see below).
 //
 // Because it works from the real keys, a bug that used the wrong key (for example another
 // user's pk) would show up as a wrong result in the handler tests.
@@ -47,6 +54,43 @@ export function stubTable(mock: AwsClientStub<DynamoDBDocumentClient>): FakeTabl
     const item = table.get(keyOf(input.Key.pk, input.Key.sk));
     return item === undefined ? {} : { Item: structuredClone(item) };
   });
+
+  // The status update of the delivery pipeline: `SET #status = :to` guarded by
+  // `#status IN (:from0, ...)`. Like DynamoDB, a missing item fails the condition (it has no
+  // status) and is not created, and a failed condition writes nothing.
+  mock.on(UpdateCommand).callsFake(
+    (input: {
+      Key: { pk: string; sk: string };
+      UpdateExpression?: string;
+      ConditionExpression?: string;
+      ExpressionAttributeNames?: Record<string, string>;
+      ExpressionAttributeValues: Record<string, unknown>;
+    }) => {
+      if (input.UpdateExpression !== "SET #status = :to") {
+        throw new Error(`fake table: unsupported UpdateExpression "${input.UpdateExpression}"`);
+      }
+      if (input.ExpressionAttributeNames?.["#status"] !== "status") {
+        throw new Error("fake table: #status must be mapped to the attribute `status`");
+      }
+      const condition = /^#status IN \((.+)\)$/.exec(input.ConditionExpression ?? "");
+      if (condition?.[1] === undefined) {
+        throw new Error(`fake table: unsupported ConditionExpression "${input.ConditionExpression}"`);
+      }
+      const allowed = condition[1]
+        .split(",")
+        .map((placeholder) => input.ExpressionAttributeValues[placeholder.trim()]);
+
+      const item = table.get(keyOf(input.Key.pk, input.Key.sk));
+      if (item === undefined || !allowed.includes(item.status)) {
+        throw new ConditionalCheckFailedException({
+          message: "The conditional request failed",
+          $metadata: {},
+        });
+      }
+      item.status = input.ExpressionAttributeValues[":to"];
+      return {};
+    },
+  );
 
   mock.on(QueryCommand).callsFake(
     (input: {

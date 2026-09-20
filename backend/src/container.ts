@@ -1,16 +1,18 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { Container } from "inversify";
+import { bindDynamoDocumentClient } from "./container-dynamodb";
+import { bindLogger } from "./container-shared";
 import { DynamoRequestRepository } from "./repositories/dynamodb-request-repository";
 import type { RequestRepository } from "./repositories/request-repository";
 import { RequestService } from "./services/request-service";
 import { loadConfig } from "./lib/config";
 import type { Config } from "./lib/config";
-import { createLogger } from "./lib/logger";
-import type { Logger } from "./lib/logger";
 import { TOKENS } from "./tokens";
 
-// The dependency graph of the whole backend, wired in one place.
+// The dependency graph of the three API functions (create-request, list-requests,
+// get-request), wired in one place. The delivery pipeline has its own containers:
+// container-enqueuer.ts, container-worker.ts and container-mock.ts (see container-shared.ts
+// for why there is one per function).
 //
 // This module runs once per Lambda cold start (a Lambda execution environment imports it
 // during its init phase) and the container lives as long as that environment. Warm
@@ -34,13 +36,8 @@ export const container = new Container();
 
 container.bind<Config>(TOKENS.Config).toConstantValue(config);
 
-container.bind<Logger>(TOKENS.Logger).toConstantValue(createLogger(config.logLevel));
-
-// One SDK client per environment, created outside any handler. It reuses its HTTPS
-// connections between invocations. The region comes from AWS_REGION, which Lambda sets.
-container
-  .bind<DynamoDBDocumentClient>(TOKENS.DynamoDocumentClient)
-  .toConstantValue(DynamoDBDocumentClient.from(new DynamoDBClient({})));
+bindLogger(container, config.logLevel);
+bindDynamoDocumentClient(container);
 
 container
   .bind<RequestRepository>(TOKENS.RequestRepository)

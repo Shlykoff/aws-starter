@@ -75,6 +75,8 @@ jobs:
       - name: Terraform plan
         env:
           TF_VAR_cognito_domain_prefix: ${{ vars.COGNITO_DOMAIN_PREFIX }}
+          # A personal address, so it is a secret: it is masked in the (public) logs.
+          TF_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
         run: terraform -chdir="$TF_DIR" plan -input=false -out=tfplan
 
       # A guard rail for unattended deploys: an automatic apply may create and change things

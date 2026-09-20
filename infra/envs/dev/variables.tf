@@ -27,6 +27,17 @@ variable "cognito_domain_prefix" {
   type        = string
 }
 
+variable "notification_email" {
+  description = "Where the SNS topics send mail: notices about failed or rejected requests, and operational alarms. Each of the two subscriptions sends a confirmation mail whose link must be clicked. Not defaulted: set it in the git-ignored terraform.tfvars (in CI: TF_VAR_notification_email from a secret)."
+  type        = string
+
+  validation {
+    # A basic shape check (something@something.tld); the real test is the confirmation mail.
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.notification_email))
+    error_message = "Expected an e-mail address such as name@example.com."
+  }
+}
+
 variable "enable_static_site" {
   description = "Create the S3 bucket and CloudFront distribution for the frontend. Turn off if CloudFront is not available on the account."
   type        = bool

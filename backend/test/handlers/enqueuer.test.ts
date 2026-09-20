@@ -1,0 +1,288 @@
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
+import { mockClient } from "aws-sdk-client-mock";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { handler } from "../../src/handlers/enqueuer";
+import { stubTable } from "../helpers/fake-table";
+import type { FakeTable } from "../helpers/fake-table";
+import { captureLogs } from "../helpers/logs";
+import { lambdaContext } from "../helpers/events";
+import { sent } from "../helpers/sqs";
+import { streamEvent, streamRecord } from "../helpers/pipeline-events";
+
+// The real handler, service, repository and container. Only the AWS SDK's `send` is
+// replaced: DynamoDB by an in-memory table, SQS by a recorder. QUEUE_URL and TABLE_NAME come
+// from vitest.config.ts.
+const ddb = mockClient(DynamoDBDocumentClient);
+const sqs = mockClient(SQSClient);
+let table: FakeTable;
+let logs: ReturnType<typeof captureLogs>;
+
+const QUEUE_URL = "https://sqs.eu-north-1.amazonaws.com/000000000000/test-deliveries.fifo";
+// Reference values computed outside the code: printf 'acme' | shasum -a 256
+const ACME_GROUP = "822b33ad87c148a0a20a5ba7cd5ebcaa68d36a18e7aad165554903f52ca82757";
+
+const idNumber = (n: number): string => `01J8Z3K5W0ABCDEFGHJKMN${String(n).padStart(4, "0")}`;
+
+// A stored request in status "created", plus the stream record that announces it.
+function seededRecord(n: number, options: { partner?: string; ownerId?: string; status?: string } = {}) {
+  const ownerId = options.ownerId ?? "user-a";
+  table.seed({
+    pk: `USER#${ownerId}`,
+    sk: `REQ#${idNumber(n)}`,
+    id: idNumber(n),
+    partner: options.partner ?? "Acme",
+    subject: "Order 42",
+    body: "Please ship.",
+    status: options.status ?? "created",
+    createdAt: "2026-09-21T09:00:00.000Z",
+  });
+  return streamRecord({
+    sequenceNumber: `10000000000000000000${n}`,
+    id: idNumber(n),
+    ownerId,
+    partner: options.partner,
+  });
+}
+
+const statusOf = (n: number, ownerId = "user-a"): unknown =>
+  table.items().find((item) => item.pk === `USER#${ownerId}` && item.sk === `REQ#${idNumber(n)}`)?.status;
+
+const run = (...records: ReturnType<typeof streamRecord>[]) =>
+  handler(streamEvent(...records), lambdaContext());
+
+beforeEach(() => {
+  ddb.reset();
+  sqs.reset();
+  table = stubTable(ddb);
+  // By default SQS accepts every entry.
+  sqs.on(SendMessageBatchCommand).callsFake((input: { Entries: { Id: string }[] }) => ({
+    Successful: input.Entries.map((entry) => sent(entry.Id)),
+    Failed: [],
+  }));
+  logs = captureLogs();
+});
+afterAll(() => {
+  ddb.restore();
+  sqs.restore();
+});
+
+describe("enqueuer: a new request", () => {
+  it("sends one FIFO message and marks the request as queued", async () => {
+    const response = await run(seededRecord(1));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    const calls = sqs.commandCalls(SendMessageBatchCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.args[0].input).toEqual({
+      QueueUrl: QUEUE_URL,
+      Entries: [
+        {
+          Id: "100000000000000000001",
+          MessageBody: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
+          MessageGroupId: ACME_GROUP,
+          MessageDeduplicationId: idNumber(1),
+        },
+      ],
+    });
+    expect(statusOf(1)).toBe("queued");
+  });
+
+  it("takes the owner from the partition key, without the USER# prefix", async () => {
+    await run(seededRecord(1, { ownerId: "eu-north-1:abc-123" }));
+
+    const body = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries?.[0]?.MessageBody;
+    expect(JSON.parse(body ?? "") as unknown).toEqual({
+      requestId: idNumber(1),
+      ownerId: "eu-north-1:abc-123",
+    });
+  });
+
+  it("groups by partner: one group per partner, however it is spelled", async () => {
+    await run(seededRecord(1, { partner: "Acme" }), seededRecord(2, { partner: " ACME " }), seededRecord(3, { partner: "Globex" }));
+
+    const groups = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries?.map((e) => e.MessageGroupId);
+    expect(groups?.[0]).toBe(ACME_GROUP);
+    expect(groups?.[1]).toBe(ACME_GROUP);
+    expect(groups?.[2]).not.toBe(ACME_GROUP);
+  });
+
+  it("sends at most 10 messages per call", async () => {
+    const records = Array.from({ length: 25 }, (_, i) => seededRecord(i + 1));
+
+    const response = await run(...records);
+
+    const sizes = sqs.commandCalls(SendMessageBatchCommand).map((call) => call.args[0].input.Entries?.length);
+    expect(sizes).toEqual([10, 10, 5]);
+    expect(response.batchItemFailures).toEqual([]);
+  });
+});
+
+describe("enqueuer: records it must ignore", () => {
+  it.each(["MODIFY", "REMOVE"] as const)("ignores a %s record", async (eventName) => {
+    const response = await run(streamRecord({ eventName, sequenceNumber: "1", id: idNumber(1) }));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+  });
+
+  it("handles the INSERT records of a mixed batch and ignores the rest", async () => {
+    const response = await run(
+      seededRecord(1),
+      streamRecord({ eventName: "MODIFY", sequenceNumber: "2", id: idNumber(2) }),
+      seededRecord(3),
+    );
+
+    const entries = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries;
+    expect(entries?.map((entry) => entry.MessageDeduplicationId)).toEqual([idNumber(1), idNumber(3)]);
+    expect(response.batchItemFailures).toEqual([]);
+  });
+
+  it("skips a malformed record without failing the batch, and still handles the good ones", async () => {
+    const broken = streamRecord({
+      sequenceNumber: "200",
+      image: { pk: { S: "USER#user-a" }, id: { S: idNumber(2) }, subject: { S: "Secret subject" } }, // no partner
+    });
+
+    const response = await run(seededRecord(1), broken, seededRecord(3));
+
+    expect(response).toEqual({ batchItemFailures: [] }); // not reported: retrying cannot fix it
+    const entries = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries;
+    expect(entries?.map((entry) => entry.MessageDeduplicationId)).toEqual([idNumber(1), idNumber(3)]);
+  });
+
+  it.each([
+    ["a wrong owner key", { pk: { S: "OWNER#x" }, id: { S: "r" }, partner: { S: "Acme" } }],
+    ["an empty partner", { pk: { S: "USER#u" }, id: { S: "r" }, partner: { S: "" } }],
+    ["a partner of the wrong type", { pk: { S: "USER#u" }, id: { S: "r" }, partner: { N: "42" } }],
+    ["an empty image", {}],
+  ])("skips a record with %s", async (_label, image) => {
+    const response = await run(streamRecord({ sequenceNumber: "1", image }));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+  });
+
+  it("skips a record that has no NewImage or no sequence number", async () => {
+    const noImage = streamRecord({ sequenceNumber: "1" });
+    if (noImage.dynamodb) delete noImage.dynamodb.NewImage;
+    const noSequence = seededRecord(2);
+    if (noSequence.dynamodb) delete noSequence.dynamodb.SequenceNumber;
+
+    const response = await run(noImage, noSequence);
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+  });
+
+  it("logs a skipped record with its sequence number and the names of the bad fields, never the image", async () => {
+    const broken = streamRecord({
+      sequenceNumber: "200",
+      image: { pk: { S: "USER#user-a" }, id: { S: idNumber(2) }, subject: { S: "Secret subject" } },
+    });
+
+    await run(broken);
+
+    const skipped = logs.entries().find((line) => line.message === "Skipping a malformed stream record");
+    expect(skipped).toMatchObject({ level: "error", sequenceNumber: "200", reason: "invalid NewImage fields: partner" });
+    expect(logs.lines.join("\n")).not.toContain("Secret subject");
+  });
+});
+
+describe("enqueuer: failures are reported per record", () => {
+  it("reports only the records SQS refused (a partial SendMessageBatch failure)", async () => {
+    const records = [seededRecord(1), seededRecord(2), seededRecord(3)];
+    const refusedId = records[1]?.dynamodb?.SequenceNumber ?? "";
+    sqs.on(SendMessageBatchCommand).resolves({
+      Successful: [sent(records[0]?.dynamodb?.SequenceNumber), sent(records[2]?.dynamodb?.SequenceNumber)],
+      Failed: [{ Id: refusedId, Code: "InternalError", SenderFault: false }],
+    });
+
+    const response = await run(...records);
+
+    expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: refusedId }] });
+    expect(statusOf(1)).toBe("queued");
+    expect(statusOf(2)).toBe("created"); // not queued: its message was not sent
+    expect(statusOf(3)).toBe("queued");
+  });
+
+  it("reports every record of a call that failed as a whole", async () => {
+    sqs.on(SendMessageBatchCommand).rejects(new Error("AccessDenied"));
+    const records = [seededRecord(1), seededRecord(2)];
+
+    const response = await run(...records);
+
+    expect(response.batchItemFailures.map((failure) => failure.itemIdentifier)).toEqual(
+      records.map((record) => record.dynamodb?.SequenceNumber),
+    );
+    expect(statusOf(1)).toBe("created");
+  });
+
+  it("does not report a record whose conditional update lost the race: the request is already handled", async () => {
+    // The stream record still says "created", but the worker was faster and the stored item is "sent".
+    const record = seededRecord(1, { status: "sent" });
+
+    const response = await run(record);
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(statusOf(1)).toBe("sent"); // still sent, not moved back to queued
+  });
+
+  it("reports a record whose status update fails for another reason, so the record is retried", async () => {
+    const record = seededRecord(1);
+    ddb.reset();
+    ddb.rejects(new Error("ProvisionedThroughputExceededException"));
+
+    const response = await run(record);
+
+    expect(response).toEqual({
+      batchItemFailures: [{ itemIdentifier: record.dynamodb?.SequenceNumber }],
+    });
+  });
+});
+
+describe("enqueuer: logging", () => {
+  it("writes one info line per invocation with counts and the Lambda request id", async () => {
+    sqs.on(SendMessageBatchCommand).callsFake((input: { Entries: { Id: string }[] }) => ({
+      Successful: input.Entries.slice(0, 1).map((entry) => sent(entry.Id)),
+      Failed: input.Entries.slice(1).map((entry) => ({ Id: entry.Id, Code: "InternalError", SenderFault: false })),
+    }));
+
+    await handler(
+      streamEvent(
+        seededRecord(1),
+        seededRecord(2),
+        streamRecord({ eventName: "MODIFY", sequenceNumber: "3", id: idNumber(3) }),
+        streamRecord({ sequenceNumber: "4", image: {} }),
+      ),
+      lambdaContext("aws-request-1"),
+    );
+
+    const summaries = logs.entries().filter((line) => line.level === "info");
+    expect(summaries).toEqual([
+      {
+        level: "info",
+        message: "Stream batch handled",
+        awsRequestId: "aws-request-1",
+        records: 4,
+        ignored: 1,
+        malformed: 1,
+        sent: 1,
+        queued: 1,
+        alreadyMoved: 0,
+        failed: 1,
+      },
+    ]);
+  });
+
+  it("never logs the request text or the partner name", async () => {
+    sqs.on(SendMessageBatchCommand).rejects(new Error("AccessDenied"));
+
+    await run(seededRecord(1, { partner: "Acme" }), streamRecord({ sequenceNumber: "9", image: {} }));
+
+    const everything = logs.lines.join("\n");
+    expect(everything).not.toContain("Order 42");
+    expect(everything).not.toContain("Please ship.");
+    expect(everything).not.toContain("Acme");
+  });
+});

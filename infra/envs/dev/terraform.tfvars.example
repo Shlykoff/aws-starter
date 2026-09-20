@@ -5,6 +5,12 @@
 # Lowercase letters, digits and hyphens; must not contain "aws", "amazon" or "cognito".
 cognito_domain_prefix = "starter-dev-x7k2q9"
 
+# Receives the request-status notices (failed and rejected requests) and the alarms.
+# Two SNS subscriptions are created; each sends a confirmation mail, and the link in it must
+# be clicked (an unconfirmed subscription receives nothing). In CI the value comes from a
+# GitHub secret, passed as TF_VAR_notification_email.
+notification_email = "you@example.com"
+
 # optional
 # project            = "aws-starter"
 # env                = "dev"
