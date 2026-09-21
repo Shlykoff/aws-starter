@@ -20,7 +20,7 @@ export default defineConfig(
   // Application code logs through src/lib/logger.ts only (structured JSON, one place
   // that decides what is written). A stray console.log would bypass that.
   { files: ["src/**/*.ts"], rules: { "no-console": "error" } },
-  { files: ["src/lib/logger.ts"], rules: { "no-console": "off" } },
+  { files: ["src/lib/logger.ts", "src/lib/metrics.ts"], rules: { "no-console": "off" } },
 
   // Plain JavaScript files (this config, the build script) are not part of the
   // TypeScript project, so the rules that need type information cannot run on them.

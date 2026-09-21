@@ -43,5 +43,5 @@ variable "memory_size" {
 variable "log_retention_days" {
   description = "How long CloudWatch keeps the function logs."
   type        = number
-  default     = 14
+  default     = 30 # long enough to look back over a month of requests; storage beyond the free 5 GB is billed per GB-month
 }

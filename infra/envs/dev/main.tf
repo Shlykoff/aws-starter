@@ -150,7 +150,7 @@ module "static_site" {
 #   table stream -> enqueuer -> SQS FIFO -> delivery-worker -> HTTPS + API key -> the recipient
 # The recipient is another system, outside this stack: this file knows its base URL and its API
 # key only. Around the flow: an exchange record in S3 (the XML sent and the reply, read back by
-# get-exchange above), SNS notices and two alarms.
+# get-exchange above), SNS notices and the alarms of this file (the observability module adds more).
 # ---------------------------------------------------------------------------
 
 locals {
@@ -196,7 +196,7 @@ module "alerts_topic" {
 
   name                    = "${local.prefix}-alerts"
   email                   = var.notification_email
-  allow_cloudwatch_alarms = true # the two alarms below publish here
+  allow_cloudwatch_alarms = true # every alarm of the project publishes here (this file's and the observability module's)
 }
 
 # Holds the exchange records. The module keeps its first name (see the module).
@@ -361,6 +361,7 @@ module "delivery_worker" {
     TOPIC_ARN             = module.request_status_topic.arn
     AUDIT_BUCKET          = module.audit_bucket.name
     MAX_RECEIVE_COUNT     = tostring(local.delivery_max_receive_count) # environment variables are strings
+    METRICS_NAMESPACE     = "${var.project}/${var.env}"                # namespace of the latency metrics the worker writes (modules/observability)
   })
 
   policy_statements = [

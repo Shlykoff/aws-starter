@@ -31,5 +31,5 @@ variable "routes" {
 variable "log_retention_days" {
   description = "How long CloudWatch keeps the access logs."
   type        = number
-  default     = 14
+  default     = 30 # the same as the functions' logs, so an API call and its function's lines expire together
 }
