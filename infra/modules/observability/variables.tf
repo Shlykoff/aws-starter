@@ -48,8 +48,13 @@ variable "archiver_function_name" {
   type        = string
 }
 
-variable "api_id" {
-  description = "ID of the HTTP API (dimension of its metrics)."
+variable "api_name" {
+  description = "Name of the REST API (dimension ApiName of its metrics)."
+  type        = string
+}
+
+variable "stage_name" {
+  description = "Name of the API stage (dimension Stage of its metrics)."
   type        = string
 }
 

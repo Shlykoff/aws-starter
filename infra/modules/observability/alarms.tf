@@ -75,16 +75,16 @@ resource "aws_cloudwatch_metric_alarm" "worker_duration" {
 
 # --- API Gateway ---------------------------------------------------------------------------------
 
-# An HTTP API reports its metrics as `Count`, `4xx`, `5xx`, `Latency` and `IntegrationLatency`
-# (a REST API has 4XXError and 5XXError instead). Dimension ApiId alone covers the whole API, and
-# there is only the $default stage; the dimension pair ApiId + Stage also exists.
+# A REST API reports its metrics as `Count`, `4XXError`, `5XXError`, `Latency` and
+# `IntegrationLatency`. The two error metrics count requests (the Sum is the number of requests
+# that failed), they are not rates. The dimensions ApiName + Stage pick one stage of one API.
 resource "aws_cloudwatch_metric_alarm" "api_5xx" {
   alarm_name        = "${var.name_prefix}-api-5xx"
-  alarm_description = "The API answered a request with a 5xx status. Look at the API access log (status, routeKey) and at the log group of that route's function."
+  alarm_description = "The API answered a request with a 5xx status. Look at the API access log (status, httpMethod, resourcePath) and at the log group of that route's function."
 
   namespace   = "AWS/ApiGateway"
-  metric_name = "5xx"
-  dimensions  = { ApiId = var.api_id }
+  metric_name = "5XXError"
+  dimensions  = { ApiName = var.api_name, Stage = var.stage_name }
   statistic   = "Sum"
 
   period              = 300

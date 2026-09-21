@@ -1,27 +1,43 @@
-import type {
-  APIGatewayProxyEventV2WithJWTAuthorizer,
-  APIGatewayProxyStructuredResultV2,
-  Context,
-} from "aws-lambda";
+import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from "aws-lambda";
 import type { z } from "zod";
 import { AppError, MisconfigurationError, ValidationError, describeError } from "./errors";
 import type { ErrorCode } from "./errors";
 import type { Logger } from "./logger";
 
-// API Gateway HTTP API, payload format 2.0, with a JWT authorizer in front (docs/api.md).
-export type ApiEvent = APIGatewayProxyEventV2WithJWTAuthorizer;
-export type ApiResult = APIGatewayProxyStructuredResultV2;
+// API Gateway REST API, Lambda proxy integration (payload format 1.0), with a Cognito user pool
+// authorizer in front (docs/api.md). The plain event type on purpose: its `authorizer` is loosely
+// typed, so `getOwnerId` has to check the claim instead of trusting a type that says "always there".
+export type ApiEvent = APIGatewayProxyEvent;
+export type ApiResult = APIGatewayProxyResult;
+
+// With a proxy integration the gateway adds NO header to what the function returns, so the CORS
+// header is ours to write, and it is written here, on every response, error responses included:
+// a browser that is refused CORS on a 404 or a 500 cannot even read the error. "*" is safe because
+// the API is authorized by a bearer token in the `Authorization` header, never by a cookie: a page
+// of another origin has no token to send. (The preflight OPTIONS request is answered by the
+// gateway itself, not by these functions.)
+const CORS_HEADERS = { "Access-Control-Allow-Origin": "*" };
+
+// The one place where a response is built, so that none can be built without the CORS header
+// (it comes last: a route cannot replace it by passing a header of the same name).
+function buildResponse(statusCode: number, body: string, headers: Record<string, string>): ApiResult {
+  return { statusCode, headers: { ...headers, ...CORS_HEADERS }, body };
+}
 
 export function jsonResponse(
   statusCode: number,
   body: unknown,
   extraHeaders: Record<string, string> = {},
 ): ApiResult {
-  return {
-    statusCode,
-    headers: { "content-type": "application/json", ...extraHeaders },
-    body: JSON.stringify(body),
-  };
+  return buildResponse(statusCode, JSON.stringify(body), {
+    "content-type": "application/json",
+    ...extraHeaders,
+  });
+}
+
+/** A response with no body: the answer of the webhook, which carries only a status code. */
+export function emptyResponse(statusCode: number): ApiResult {
+  return buildResponse(statusCode, "", {});
 }
 
 // The ONE place where error codes become HTTP status codes.
@@ -48,15 +64,19 @@ function toErrorResponse(error: unknown): ApiResult {
 }
 
 /**
- * The owner of the request: the `sub` claim that API Gateway's JWT authorizer verified.
- * This is the only source of the owner. Nothing the client sends is ever used for it.
+ * The owner of the request: the `sub` claim that API Gateway's Cognito authorizer verified (it
+ * arrives in `requestContext.authorizer.claims`). This is the only source of the owner. Nothing
+ * the client sends is ever used for it.
  */
 export function getOwnerId(event: ApiEvent): string {
-  const sub = event.requestContext.authorizer?.jwt?.claims?.sub;
+  // The type of `authorizer` is loosely typed (`any` inside): take the claims as `unknown` and
+  // check every step. No authorizer block, no `claims` and no `sub` all end in the same error.
+  const claims: unknown = event.requestContext.authorizer?.claims;
+  const sub = typeof claims === "object" && claims !== null && "sub" in claims ? claims.sub : undefined;
   if (typeof sub !== "string" || sub === "") {
     // A protected route must always carry the claim. If it does not, the API Gateway
-    // route or authorizer is misconfigured: that is our fault, so it is a 500.
-    throw new MisconfigurationError("JWT authorizer did not provide a sub claim");
+    // method or authorizer is misconfigured: that is our fault, so it is a 500.
+    throw new MisconfigurationError("Cognito authorizer did not provide a sub claim");
   }
   return sub;
 }
@@ -66,7 +86,8 @@ export function parseJsonBody<T>(
   event: Pick<ApiEvent, "body" | "isBase64Encoded">,
   schema: z.ZodType<T>,
 ): T {
-  if (event.body === undefined || event.body === "") {
+  // A REST API event has `body: null` when the client sent none.
+  if (event.body === null || event.body === "") {
     throw new ValidationError("Request body is required");
   }
 
@@ -122,7 +143,8 @@ export function createHandler(
     }
 
     requestLogger.info("Request handled", {
-      route: event.routeKey,
+      // The template, never the real path: "POST /requests/{id}/retry", not "POST /requests/01ABC...".
+      route: `${event.httpMethod} ${event.resource}`,
       statusCode: response.statusCode,
       durationMs: Date.now() - startedAt,
     });

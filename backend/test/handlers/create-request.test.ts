@@ -2,7 +2,8 @@ import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { handler } from "../../src/handlers/create-request";
-import { createRequestEvent, eventWithoutSub, lambdaContext } from "../helpers/events";
+import type { MissingSubKind } from "../helpers/events";
+import { CORS_HEADERS, createRequestEvent, eventWithoutSub, lambdaContext } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -33,7 +34,7 @@ describe("POST /requests", () => {
       const response = await call();
 
       expect(response.statusCode).toBe(201);
-      expect(response.headers).toEqual({ "content-type": "application/json" });
+      expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
       expect(json(response)).toEqual({
         id: expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/) as string,
         ...validBody,
@@ -76,6 +77,12 @@ describe("POST /requests", () => {
       expect(response.statusCode).toBe(201);
     });
 
+    it("does not need any header: `headers` may be null", async () => {
+      const response = await call(createRequestEvent({ body: JSON.stringify(validBody), headers: null }));
+
+      expect(response.statusCode).toBe(201);
+    });
+
     it("gives two requests two different ids", async () => {
       const first = json(await call()) as { id: string };
       const second = json(await call()) as { id: string };
@@ -90,7 +97,8 @@ describe("POST /requests", () => {
       const response = await call(event);
 
       expect(response.statusCode).toBe(400);
-      expect(response.headers).toEqual({ "content-type": "application/json" });
+      // The error response carries the CORS header too: a browser could not read it otherwise.
+      expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
       const payload = json(response) as { error: { code: string; message: string; details?: unknown } };
       expect(payload.error.code).toBe("validation_error");
       // Nothing may be written for a request that failed validation.
@@ -139,17 +147,19 @@ describe("POST /requests", () => {
 
   describe("500 internal_error", () => {
     it("fails when the token has no sub claim, and writes nothing", async () => {
-      for (const kind of ["empty-claims", "no-authorizer"] as const) {
+      const kinds: MissingSubKind[] = ["empty-claims", "no-claims", "empty-sub", "no-authorizer"];
+      for (const kind of kinds) {
         const response = await call(eventWithoutSub("POST /requests", kind));
 
         expect(response.statusCode).toBe(500);
+        expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
         expect(json(response)).toEqual({
           error: { code: "internal_error", message: "Internal server error" },
         });
       }
       expect(ddb.calls()).toHaveLength(0);
       expect(logs.entries()).toContainEqual(
-        expect.objectContaining({ level: "error", errorMessage: "JWT authorizer did not provide a sub claim" }),
+        expect.objectContaining({ level: "error", errorMessage: "Cognito authorizer did not provide a sub claim" }),
       );
     });
 

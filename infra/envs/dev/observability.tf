@@ -32,7 +32,8 @@ module "observability" {
 
   archiver_function_name = module.log_archive.archiver_function_name
 
-  api_id     = module.api.api_id
+  api_name   = module.api.api_name
+  stage_name = module.api.stage_name
   queue_name = module.deliveries_queue.name
   dlq_name   = module.deliveries_queue.dlq_name
   table_name = module.requests_table.name

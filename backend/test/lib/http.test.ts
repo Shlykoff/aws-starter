@@ -1,17 +1,51 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { NotFoundError, ValidationError, MisconfigurationError } from "../../src/lib/errors";
-import { createHandler, getOwnerId, jsonResponse, parseJsonBody } from "../../src/lib/http";
+import { createHandler, emptyResponse, getOwnerId, jsonResponse, parseJsonBody } from "../../src/lib/http";
 import { createLogger } from "../../src/lib/logger";
-import { createRequestEvent, eventWithoutSub, lambdaContext, listRequestsEvent } from "../helpers/events";
+import type { MissingSubKind } from "../helpers/events";
+import {
+  CORS_HEADERS,
+  createRequestEvent,
+  eventWithoutSub,
+  getExchangeEvent,
+  getRequestEvent,
+  lambdaContext,
+  listRequestsEvent,
+  retryRequestEvent,
+} from "../helpers/events";
 import { captureLogs } from "../helpers/logs";
 
 describe("jsonResponse", () => {
-  it("builds an API Gateway v2 response with a JSON body", () => {
+  it("builds an API Gateway proxy response with a JSON body and the CORS header", () => {
     expect(jsonResponse(201, { ok: true })).toEqual({
       statusCode: 201,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...CORS_HEADERS },
       body: '{"ok":true}',
+    });
+  });
+
+  it("keeps the extra headers of the route next to the CORS header", () => {
+    expect(jsonResponse(200, {}, { "cache-control": "no-store" }).headers).toEqual({
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      ...CORS_HEADERS,
+    });
+  });
+
+  it("does not let a route replace the CORS header", () => {
+    const headers = jsonResponse(200, {}, { "Access-Control-Allow-Origin": "https://elsewhere.example.test" }).headers;
+
+    expect(headers).toMatchObject(CORS_HEADERS);
+  });
+});
+
+describe("emptyResponse", () => {
+  it("has a status, an empty body and the CORS header", () => {
+    expect(emptyResponse(204)).toEqual({
+      statusCode: 204,
+      headers: CORS_HEADERS,
+      body: "",
     });
   });
 });
@@ -21,16 +55,22 @@ describe("getOwnerId", () => {
     expect(getOwnerId(listRequestsEvent({ sub: "user-42" }))).toBe("user-42");
   });
 
-  it("throws a misconfiguration error when the claims have no sub", () => {
-    expect(() => getOwnerId(eventWithoutSub("GET /requests", "empty-claims"))).toThrow(
-      MisconfigurationError,
+  it.each<[string, MissingSubKind]>([
+    ["the claims have no sub", "empty-claims"],
+    ["the authorizer block has no claims", "no-claims"],
+    ["the sub is empty", "empty-sub"],
+    ["the route has no authorizer at all", "no-authorizer"],
+  ])("throws a misconfiguration error when %s", (_label, kind) => {
+    expect(() => getOwnerId(eventWithoutSub("GET /requests", kind))).toThrow(
+      new MisconfigurationError("Cognito authorizer did not provide a sub claim"),
     );
   });
 
-  it("throws a misconfiguration error when the route has no authorizer at all", () => {
-    expect(() => getOwnerId(eventWithoutSub("GET /requests", "no-authorizer"))).toThrow(
-      MisconfigurationError,
-    );
+  it("throws a misconfiguration error when the sub is not a string", () => {
+    const event = listRequestsEvent();
+    event.requestContext.authorizer = { claims: { sub: 42 } };
+
+    expect(() => getOwnerId(event)).toThrow(MisconfigurationError);
   });
 });
 
@@ -48,7 +88,9 @@ describe("parseJsonBody", () => {
     expect(parse(encoded, true)).toEqual({ name: "x" });
   });
 
-  it("rejects a missing or empty body", () => {
+  it("rejects a missing (null) or empty body", () => {
+    // A REST API event has `body: null` when the client sent none: `undefined` in the helper.
+    expect(createRequestEvent().body).toBeNull();
     expect(() => parse(undefined)).toThrow(new ValidationError("Request body is required"));
     expect(() => parse("")).toThrow(new ValidationError("Request body is required"));
   });
@@ -94,6 +136,52 @@ describe("createHandler", () => {
     ]);
   });
 
+  it("logs the route template of every API route, never the real path", async () => {
+    const logs = captureLogs();
+    const handler = createHandler(logger, () => Promise.resolve(jsonResponse(200, {})));
+    const id = "01M30JDSMHY8CRX59V35WV731S";
+
+    await handler(createRequestEvent(), context);
+    await handler(listRequestsEvent(), context);
+    await handler(getRequestEvent({ id }), context);
+    await handler(retryRequestEvent({ id }), context);
+    await handler(getExchangeEvent({ id }), context);
+
+    // The logger would write "[rejected]" for a route that does not fit the shape of log-fields.ts.
+    expect(logs.entries().map((entry) => entry.route)).toEqual([
+      "POST /requests",
+      "GET /requests",
+      "GET /requests/{id}",
+      "POST /requests/{id}/retry",
+      "GET /requests/{id}/exchange",
+    ]);
+    expect(logs.lines.join("\n")).not.toContain(id);
+  });
+
+  it("puts the CORS header on the response of the route", async () => {
+    captureLogs();
+    const handler = createHandler(logger, () => Promise.resolve(jsonResponse(200, { items: [] })));
+
+    const response = await handler(listRequestsEvent(), context);
+
+    expect(response.headers).toMatchObject(CORS_HEADERS);
+  });
+
+  it.each<[string, () => Promise<never>, number]>([
+    ["a ValidationError", () => Promise.reject(new ValidationError("bad")), 400],
+    ["a NotFoundError", () => Promise.reject(new NotFoundError()), 404],
+    ["a MisconfigurationError", () => Promise.reject(new MisconfigurationError("x")), 500],
+    ["an unexpected error", () => Promise.reject(new Error("boom")), 500],
+  ])("puts the CORS header on the error response for %s", async (_label, fail, statusCode) => {
+    captureLogs();
+    const handler = createHandler(logger, fail);
+
+    const response = await handler(listRequestsEvent(), context);
+
+    expect(response.statusCode).toBe(statusCode);
+    expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
+  });
+
   it("maps a ValidationError to 400 validation_error with its details", async () => {
     captureLogs();
     const handler = createHandler(logger, () => {
@@ -127,7 +215,7 @@ describe("createHandler", () => {
   it("maps a MisconfigurationError to a generic 500 and logs the real reason", async () => {
     const logs = captureLogs();
     const handler = createHandler(logger, () => {
-      throw new MisconfigurationError("JWT authorizer did not provide a sub claim");
+      throw new MisconfigurationError("Cognito authorizer did not provide a sub claim");
     });
 
     const response = await handler(listRequestsEvent(), context);
@@ -139,7 +227,7 @@ describe("createHandler", () => {
     expect(logs.entries()[0]).toMatchObject({
       level: "error",
       errorName: "MisconfigurationError",
-      errorMessage: "JWT authorizer did not provide a sub claim",
+      errorMessage: "Cognito authorizer did not provide a sub claim",
     });
   });
 

@@ -5,7 +5,7 @@ import { ulid } from "ulid";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { Exchange } from "../../src/domain/exchange";
 import { handler } from "../../src/handlers/get-exchange";
-import { eventWithoutSub, getExchangeEvent, lambdaContext } from "../helpers/events";
+import { CORS_HEADERS, eventWithoutSub, getExchangeEvent, lambdaContext } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -60,7 +60,7 @@ describe("GET /requests/{id}/exchange", () => {
 
     const response = await get({ sub: "user-a", id: ID });
 
-    expect(response.headers).toEqual({ "content-type": "application/json", "cache-control": "no-store" });
+    expect(response.headers).toEqual({ "content-type": "application/json", "cache-control": "no-store", ...CORS_HEADERS });
   });
 
   it("checks the owner in the table with the token's sub, then reads the object of that request", async () => {
@@ -120,7 +120,7 @@ describe("GET /requests/{id}/exchange", () => {
 
     expect(response.statusCode).toBe(404);
     expect(json(response)).toEqual({ error: { code: "not_found", message: "No delivery attempt recorded yet" } });
-    expect(response.headers).toEqual({ "content-type": "application/json" });
+    expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
   });
 
   it("returns 500, not 404, when S3 says AccessDenied: a missing permission is our problem", async () => {
@@ -154,6 +154,7 @@ describe("GET /requests/{id}/exchange", () => {
     const response = await handler(eventWithoutSub("GET /requests/{id}/exchange", "no-authorizer"), lambdaContext());
 
     expect(response.statusCode).toBe(500);
+    expect(response.headers).toMatchObject(CORS_HEADERS);
     expect(json(response)).toEqual({ error: { code: "internal_error", message: "Internal server error" } });
     expect(ddb.calls()).toHaveLength(0);
     expect(s3.calls()).toHaveLength(0);

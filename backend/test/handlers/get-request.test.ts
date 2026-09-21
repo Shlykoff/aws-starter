@@ -3,7 +3,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { ulid } from "ulid";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { handler } from "../../src/handlers/get-request";
-import { eventWithoutSub, getRequestEvent, lambdaContext } from "../helpers/events";
+import { CORS_HEADERS, eventWithoutSub, getRequestEvent, lambdaContext } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -41,7 +41,7 @@ describe("GET /requests/{id}", () => {
     const response = await get({ sub: "user-a", id: ID });
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers).toEqual({ "content-type": "application/json" });
+    expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
     expect(json(response)).toEqual(stored);
     expect(response.body).not.toContain("user-a");
   });
@@ -82,6 +82,7 @@ describe("GET /requests/{id}", () => {
     const response = await handler(eventWithoutSub("GET /requests/{id}", "no-authorizer"), lambdaContext());
 
     expect(response.statusCode).toBe(500);
+    expect(response.headers).toMatchObject(CORS_HEADERS);
     expect(json(response)).toEqual({ error: { code: "internal_error", message: "Internal server error" } });
     expect(ddb.calls()).toHaveLength(0);
   });

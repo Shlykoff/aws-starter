@@ -1,12 +1,13 @@
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { mockClient } from "aws-sdk-client-mock";
 import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApiEvent } from "../../src/lib/http";
 import type { ApiKeyProvider } from "../../src/repositories/api-key-provider";
 import { TOKENS } from "../../src/tokens";
-import { lambdaContext } from "../helpers/events";
+import { lambdaContext, restEvent } from "../helpers/events";
+import { answer } from "../helpers/webhook";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -62,29 +63,18 @@ afterAll(() => {
 
 const REQUEST_ID = "01M30JDSMHY8CRX59V35WV731S";
 
-/** POST /webhooks/partner as API Gateway's HTTP API (payload 2.0) hands it to the function. */
-function apiGatewayEvent(headers: Record<string, string>, bytes: Buffer, base64: boolean): APIGatewayProxyEventV2 {
-  return {
-    version: "2.0",
-    routeKey: "POST /webhooks/partner",
-    rawPath: "/webhooks/partner",
-    rawQueryString: "",
+/**
+ * POST /webhooks/partner as API Gateway's REST API (proxy integration, payload 1.0) hands it to
+ * the function. The header names are the ones the sender wrote, whatever their case.
+ */
+function apiGatewayEvent(headers: Record<string, string>, bytes: Buffer, base64: boolean): ApiEvent {
+  return restEvent({
+    httpMethod: "POST",
+    resource: "/webhooks/partner",
     headers,
-    requestContext: {
-      accountId: "000000000000",
-      apiId: "qa",
-      domainName: "api.example.test",
-      domainPrefix: "api",
-      http: { method: "POST", path: "/webhooks/partner", protocol: "HTTP/1.1", sourceIp: "192.0.2.1", userAgent: "qa" },
-      requestId: "qa-request",
-      routeKey: "POST /webhooks/partner",
-      stage: "$default",
-      time: "21/Sep/2026:10:15:40 +0000",
-      timeEpoch: 0,
-    },
     body: base64 ? bytes.toString("base64") : bytes.toString("utf8"),
     isBase64Encoded: base64,
-  };
+  });
 }
 
 /** Both ways API Gateway can carry the bytes; the text form only when it is lossless. */
@@ -132,7 +122,7 @@ describe("cross-side: requests signed by partner-sim's own code", () => {
       async ({ base64 }) => {
         const response = await run(v, base64);
 
-        expect(response).toEqual({ statusCode: 200 }); // no body, no headers
+        expect(response).toEqual(answer(200)); // no body; only the CORS header
         const decision = stored()?.clientDecision as Record<string, unknown> | undefined;
         expect(decision, "a decision is stored on the request").toBeDefined();
         const e = v.expect!;
@@ -167,7 +157,7 @@ describe("cross-side: requests signed by partner-sim's own code", () => {
       ddb.resetHistory();
       const response = await run(v, base64);
 
-      expect(response).toEqual({ statusCode: 401 });
+      expect(response).toEqual(answer(401));
       expect(stored()).not.toHaveProperty("clientDecision");
       // "nothing expensive happens before the signature is right": the table is not touched.
       expect(ddb.calls()).toHaveLength(0);

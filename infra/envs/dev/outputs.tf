@@ -1,12 +1,12 @@
 # The frontend build and CI read these (`terraform output -raw <name>`).
 
 output "api_url" {
-  description = "Base URL of the API, without a trailing slash."
+  description = "Base URL of the API including the stage (/v1), without a trailing slash: paths such as /requests are appended to it."
   value       = module.api.api_url
 }
 
 output "webhook_url" {
-  description = "Public address of the webhook (POST, signed): the recipient's WEBHOOK_URL. Give it to the recipient together with the webhook token."
+  description = "Public address of the webhook (POST, signed), stage included: the recipient's WEBHOOK_URL. Give it to the recipient together with the webhook token."
   value       = "${module.api.api_url}${local.webhook_path}"
 }
 

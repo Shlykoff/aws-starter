@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
-import type { APIGatewayProxyEventV2 } from "aws-lambda";
+import type { ApiEvent, ApiResult } from "../../src/lib/http";
+import { CORS_HEADERS, restEvent } from "./events";
 
 // Builders for the events of the webhook: a DecisionEvent document and the API Gateway
 // event that carries it, signed the way contracts/webhook-api.md says. All values are fake.
@@ -37,6 +38,16 @@ export function eventXml(
 `;
 }
 
+/**
+ * What the webhook answers with a status: no body, and the CORS header that every response of
+ * the API carries (src/lib/http.ts).
+ */
+export const answer = (statusCode: number): ApiResult => ({
+  statusCode,
+  headers: CORS_HEADERS,
+  body: "",
+});
+
 interface WebhookEventOptions {
   /** The bytes of the body. `undefined` = the event has no body at all. */
   body?: Buffer | string | undefined;
@@ -46,12 +57,24 @@ interface WebhookEventOptions {
   signature?: string | null;
   contentType?: string | null; // null: the header is not sent
   isBase64Encoded?: boolean;
-  /** Extra headers, written as they are (the tests use them to check case-insensitivity). */
-  headers?: Record<string, string>;
+  /**
+   * Extra headers, written as they are (the tests use them to check case-insensitivity).
+   * `null`: the event has no headers at all (`headers: null`), the signature ones included.
+   */
+  headers?: Record<string, string> | null;
 }
 
-/** A signed POST /webhooks/partner, as API Gateway's HTTP API (payload 2.0) delivers it. */
-export function webhookEvent(options: WebhookEventOptions = {}): APIGatewayProxyEventV2 {
+/** The same event with one header set. Any case of the name replaces the one that was there. */
+export function withHeader(event: ApiEvent, name: string, value: string): ApiEvent {
+  const kept = Object.entries(event.headers ?? {}).filter(([key]) => key.toLowerCase() !== name.toLowerCase());
+  return { ...event, headers: { ...Object.fromEntries(kept), [name]: value } };
+}
+
+/**
+ * A signed POST /webhooks/partner, as a REST API delivers it. The header names are written the
+ * way a sender usually writes them (Title-Case); a REST API passes them on with that case.
+ */
+export function webhookEvent(options: WebhookEventOptions = {}): ApiEvent {
   const bytes = options.body === undefined ? Buffer.alloc(0) : Buffer.from(options.body);
   const timestamp = options.timestamp === undefined ? String(NOW_SECONDS) : options.timestamp;
   const signature =
@@ -61,31 +84,21 @@ export function webhookEvent(options: WebhookEventOptions = {}): APIGatewayProxy
   const contentType = options.contentType === undefined ? "application/xml" : options.contentType;
 
   const headers: Record<string, string> = { ...options.headers };
-  if (timestamp !== null) headers["x-webhook-timestamp"] = timestamp;
-  if (signature !== null) headers["x-webhook-signature"] = signature;
-  if (contentType !== null) headers["content-type"] = contentType;
+  if (timestamp !== null) headers["X-Webhook-Timestamp"] = timestamp;
+  if (signature !== null) headers["X-Webhook-Signature"] = signature;
+  if (contentType !== null) headers["Content-Type"] = contentType;
 
-  return {
-    version: "2.0",
-    routeKey: "POST /webhooks/partner",
-    rawPath: "/webhooks/partner",
-    rawQueryString: "",
-    headers,
-    requestContext: {
-      accountId: "test-account",
-      apiId: "test-api",
-      domainName: "api.example.test",
-      domainPrefix: "api",
-      http: { method: "POST", path: "/webhooks/partner", protocol: "HTTP/1.1", sourceIp: "192.0.2.1", userAgent: "vitest" },
-      requestId: "test-gateway-request-id",
-      routeKey: "POST /webhooks/partner",
-      stage: "$default",
-      time: "21/Sep/2026:10:15:40 +0000",
-      timeEpoch: NOW_SECONDS * 1000,
-    },
-    ...(options.body === undefined
-      ? {}
-      : { body: options.isBase64Encoded ? bytes.toString("base64") : bytes.toString("utf8") }),
-    isBase64Encoded: options.isBase64Encoded ?? false,
-  };
+  return restEvent({
+    httpMethod: "POST",
+    resource: "/webhooks/partner",
+    headers: options.headers === null ? null : headers,
+    body:
+      options.body === undefined
+        ? null
+        : options.isBase64Encoded
+          ? bytes.toString("base64")
+          : bytes.toString("utf8"),
+    isBase64Encoded: options.isBase64Encoded,
+    requestTimeEpoch: NOW_SECONDS * 1000,
+  });
 }

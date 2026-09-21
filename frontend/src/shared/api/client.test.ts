@@ -26,8 +26,12 @@ const firstCall = (fetchImpl: ReturnType<typeof setup>["fetchImpl"]) => {
   return { url, init };
 };
 
+// The X-Amzn-Trace-Id sent with a call. Exact values are tested with trace-header.ts.
+const TRACE_FORMAT = /^Root=1-[0-9a-f]{8}-[0-9a-f]{24};Parent=[0-9a-f]{16};Sampled=1$/;
+const traceHeaderOf = (init: RequestInit | undefined) => (init?.headers as Record<string, string>)["X-Amzn-Trace-Id"];
+
 describe("createApiClient", () => {
-  it("sends the access token as a Bearer header and returns the parsed body", async () => {
+  it("sends the raw access token in the Authorization header (no Bearer prefix) and returns the parsed body", async () => {
     const { client, fetchImpl } = setup({ response: json({ items: [] }) });
 
     const data = await client.get("/requests");
@@ -35,7 +39,7 @@ describe("createApiClient", () => {
     const { url, init } = firstCall(fetchImpl);
     expect(url).toBe("https://api.example.com/requests");
     expect(init?.method).toBe("GET");
-    expect(init?.headers).toMatchObject({ Authorization: "Bearer access-token-123" });
+    expect(init?.headers).toMatchObject({ Authorization: "access-token-123" });
     expect(data).toEqual({ items: [] });
   });
 
@@ -59,6 +63,36 @@ describe("createApiClient", () => {
     expect(init?.method).toBe("POST");
     expect(init?.body).toBeUndefined();
     expect(init?.headers).not.toHaveProperty("Content-Type");
+  });
+
+  it("starts an X-Ray trace in the browser on a POST, with a new id for every request", async () => {
+    const { client, fetchImpl } = setup();
+
+    await client.post("/requests", { partner: "Acme" });
+    await client.post("/requests", { partner: "Acme" });
+
+    const [first, second] = fetchImpl.mock.calls.map(([, init]) => traceHeaderOf(init));
+    expect(first).toMatch(TRACE_FORMAT);
+    expect(second).toMatch(TRACE_FORMAT);
+    expect(first).not.toBe(second);
+  });
+
+  it("sends the trace header with the POST that retries a request too", async () => {
+    const { client, fetchImpl } = setup();
+
+    await client.post("/requests/1/retry");
+
+    const { url, init } = firstCall(fetchImpl);
+    expect(url).toBe("https://api.example.com/requests/1/retry");
+    expect(traceHeaderOf(init)).toMatch(TRACE_FORMAT);
+  });
+
+  it("sends no trace header on a GET", async () => {
+    const { client, fetchImpl } = setup();
+
+    await client.get("/requests");
+
+    expect(firstCall(fetchImpl).init?.headers).not.toHaveProperty("X-Amzn-Trace-Id");
   });
 
   it("maps the API error shape to an ApiError", async () => {

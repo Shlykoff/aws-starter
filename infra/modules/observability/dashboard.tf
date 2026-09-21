@@ -201,6 +201,8 @@ locals {
     },
 
     # --- API and log-based signals ------------------------------------------------------------
+    # The API metrics of a REST API carry the dimensions ApiName + Stage. 4XXError and 5XXError
+    # count requests, so the statistic is Sum (their Average would be a rate).
     {
       type = "metric", x = 0, y = 25, width = 8, height = 6
       properties = {
@@ -211,9 +213,9 @@ locals {
         period = 300
         yAxis  = { left = { min = 0 } }
         metrics = [
-          ["AWS/ApiGateway", "Count", "ApiId", var.api_id, { label = "All requests" }],
-          ["AWS/ApiGateway", "4xx", "ApiId", var.api_id, { label = "4xx", color = "#ff7f0e" }],
-          ["AWS/ApiGateway", "5xx", "ApiId", var.api_id, { label = "5xx", color = "#d62728" }],
+          ["AWS/ApiGateway", "Count", "ApiName", var.api_name, "Stage", var.stage_name, { label = "All requests" }],
+          ["AWS/ApiGateway", "4XXError", "ApiName", var.api_name, "Stage", var.stage_name, { label = "4xx", color = "#ff7f0e" }],
+          ["AWS/ApiGateway", "5XXError", "ApiName", var.api_name, "Stage", var.stage_name, { label = "5xx", color = "#d62728" }],
         ]
       }
     },
@@ -226,8 +228,8 @@ locals {
         period = 300
         yAxis  = { left = { min = 0 } }
         metrics = [
-          ["AWS/ApiGateway", "Latency", "ApiId", var.api_id, { stat = "p50", label = "p50" }],
-          ["AWS/ApiGateway", "Latency", "ApiId", var.api_id, { stat = "p95", label = "p95" }],
+          ["AWS/ApiGateway", "Latency", "ApiName", var.api_name, "Stage", var.stage_name, { stat = "p50", label = "p50" }],
+          ["AWS/ApiGateway", "Latency", "ApiName", var.api_name, "Stage", var.stage_name, { stat = "p95", label = "p95" }],
         ]
       }
     },
