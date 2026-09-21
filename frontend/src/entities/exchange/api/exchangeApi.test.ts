@@ -19,6 +19,13 @@ describe("createExchangeApi", () => {
     expect(client.get).toHaveBeenCalledWith("/requests/a%2Fb/exchange");
   });
 
+  it("maps an answer without a body (a 204: no delivery attempt yet) to null", async () => {
+    const { client, api } = setup();
+    client.get.mockResolvedValue(undefined);
+
+    await expect(api.get("id")).resolves.toBeNull();
+  });
+
   it("accepts a refusal with problems and a reply that has no body", async () => {
     const { client, api } = setup();
     const exchange = makeExchange({

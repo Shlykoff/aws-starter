@@ -32,7 +32,7 @@ export interface ApiClientOptions {
 }
 
 // Responses are returned as `unknown`: the caller validates the shape (with zod) because
-// only the caller knows what it expects.
+// only the caller knows what it expects. A response without a body (204) gives `undefined`.
 export interface ApiClient {
   get(path: string): Promise<unknown>;
   // `body` is left out for a POST that carries no data (POST /requests/{id}/retry).
@@ -86,8 +86,11 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     // API Gateway answers 401 itself, before any Lambda runs, with its own body shape.
     if (response.status === 401) return rejectUnauthorized();
 
-    // A body that is not JSON becomes `undefined` instead of throwing here.
-    const data: unknown = await response.json().catch(() => undefined);
+    // A 204 has no body at all (GET /requests/{id}/exchange answers it when there is no delivery
+    // attempt yet): it is a success that carries nothing, so it gives `undefined` and the caller
+    // decides what that means. A body that is not JSON also becomes `undefined` instead of
+    // throwing here.
+    const data: unknown = response.status === 204 ? undefined : await response.json().catch(() => undefined);
 
     if (!response.ok) {
       const parsed = errorBodySchema.safeParse(data);

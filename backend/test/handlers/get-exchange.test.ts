@@ -112,15 +112,40 @@ describe("GET /requests/{id}/exchange", () => {
     expect(ddb.calls()).toHaveLength(0);
   });
 
-  it("returns 404 for a request that has no exchange yet, and says why", async () => {
+  it("returns 204 with no body for the caller's own request that has no exchange yet: not an error", async () => {
     seedRequest();
     s3.on(GetObjectCommand).rejects(new NoSuchKey({ message: "no such key", $metadata: {} }));
 
     const response = await get({ sub: "user-a", id: ID });
 
+    expect(response.statusCode).toBe(204);
+    expect(response.body).toBe("");
+    expect(response.headers).toEqual({ "cache-control": "no-store", ...CORS_HEADERS });
+    // The owner was checked first, then S3 was asked once: 204 is not a shortcut around either.
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(1);
+    expect(s3.commandCalls(GetObjectCommand)).toHaveLength(1);
+  });
+
+  it("logs the 204 as an ordinary answer: the route and the status, no error line", async () => {
+    seedRequest();
+    s3.on(GetObjectCommand).rejects(new NoSuchKey({ message: "no such key", $metadata: {} }));
+
+    await get({ sub: "user-a", id: ID });
+
+    expect(logs.entries()).toEqual([
+      expect.objectContaining({ level: "info", route: "GET /requests/{id}/exchange", statusCode: 204 }),
+    ]);
+  });
+
+  it("still returns 404, not 204, for the request of another user that has no exchange yet, without touching S3", async () => {
+    seedRequest("user-a");
+    s3.on(GetObjectCommand).rejects(new NoSuchKey({ message: "no such key", $metadata: {} }));
+
+    const response = await get({ sub: "user-b", id: ID });
+
     expect(response.statusCode).toBe(404);
-    expect(json(response)).toEqual({ error: { code: "not_found", message: "No delivery attempt recorded yet" } });
-    expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
+    expect(json(response)).toEqual({ error: { code: "not_found", message: "Request not found" } });
+    expect(s3.calls()).toHaveLength(0);
   });
 
   it("returns 500, not 404, when S3 says AccessDenied: a missing permission is our problem", async () => {

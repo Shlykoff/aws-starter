@@ -48,6 +48,16 @@ describe("emptyResponse", () => {
       body: "",
     });
   });
+
+  it("carries extra headers, and the CORS header cannot be replaced by them", () => {
+    expect(emptyResponse(204, { "cache-control": "no-store" }).headers).toEqual({
+      "cache-control": "no-store",
+      ...CORS_HEADERS,
+    });
+    expect(emptyResponse(204, { "Access-Control-Allow-Origin": "https://elsewhere.example.test" }).headers).toEqual(
+      CORS_HEADERS,
+    );
+  });
 });
 
 describe("getOwnerId", () => {

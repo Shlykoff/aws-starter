@@ -23,7 +23,16 @@ describe("ExchangeStore.load", () => {
     expect(store.stateFor("r1")).toEqual({ id: "r1", status: "ready", exchange });
   });
 
-  it("treats a 404 as empty, not as an error: no delivery attempt yet", async () => {
+  it("treats a null answer (a 204) as empty, not as an error: no delivery attempt yet", async () => {
+    const { api, store } = setup();
+    api.get.mockResolvedValue(null);
+
+    await store.load("r1");
+
+    expect(store.stateFor("r1")).toEqual({ id: "r1", status: "empty" });
+  });
+
+  it("still treats a 404 as empty, not as an error", async () => {
     const { api, store } = setup();
     api.get.mockRejectedValue(new ApiError(404, "not_found", "Request not found"));
 
@@ -103,12 +112,24 @@ describe("ExchangeStore.refresh", () => {
 
   it("turns empty into ready once the first attempt has been recorded", async () => {
     const { api, store } = setup();
-    api.get.mockRejectedValueOnce(new ApiError(404, "not_found", "Request not found"));
+    api.get.mockResolvedValueOnce(null);
     await store.load("r1");
     expect(store.stateFor("r1")?.status).toBe("empty");
 
     const exchange = makeExchange();
     api.get.mockResolvedValue(exchange);
+    await store.refresh("r1");
+
+    expect(store.stateFor("r1")).toEqual({ id: "r1", status: "ready", exchange });
+  });
+
+  it("keeps the exchange on screen when a refresh answers 204", async () => {
+    const { api, store } = setup();
+    const exchange = makeExchange();
+    api.get.mockResolvedValue(exchange);
+    await store.load("r1");
+
+    api.get.mockResolvedValueOnce(null);
     await store.refresh("r1");
 
     expect(store.stateFor("r1")).toEqual({ id: "r1", status: "ready", exchange });
@@ -130,7 +151,7 @@ describe("ExchangeStore.refresh", () => {
 
   it("shows the failure when there is nothing better on screen", async () => {
     const { api, store } = setup();
-    api.get.mockRejectedValueOnce(new ApiError(404, "not_found", "Request not found"));
+    api.get.mockResolvedValueOnce(null);
     await store.load("r1");
 
     api.get.mockRejectedValue(new ApiError(500, "internal_error", "Internal server error"));

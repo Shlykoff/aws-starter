@@ -32,7 +32,7 @@ locals {
         },
         {
           # Without s3:ListBucket, S3 answers a missing key with 403 instead of 404, and the
-          # handler could not tell "no exchange yet" (404) from broken permissions (500).
+          # handler could not tell "no exchange yet" (204) from broken permissions (500).
           # No `s3:prefix` condition on purpose: S3 decides 404 or 403 for a GetObject on a
           # missing key by asking whether the caller may list the bucket, and a GetObject
           # request carries no prefix, so a prefix condition could never match and the answer

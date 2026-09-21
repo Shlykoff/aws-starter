@@ -60,10 +60,11 @@ describe("ExchangeService.get", () => {
     expect(journal).toEqual([]);
   });
 
-  it("answers not found, with its own message, when nothing was recorded yet", async () => {
-    const { service } = setup({ stored: undefined });
+  it("returns undefined, not an error, when the caller's own request has no record yet", async () => {
+    const { journal, service } = setup({ stored: undefined });
 
-    await expect(service.get("user-a", ID)).rejects.toThrow("No delivery attempt recorded yet");
+    expect(await service.get("user-a", ID)).toBeUndefined();
+    expect(journal).toEqual(["requests.findById:user-a", `exchanges.find:${ID}`]);
   });
 
   it("lets a failure of the store through: it must not look like 'no exchange yet'", async () => {

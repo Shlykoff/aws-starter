@@ -35,9 +35,9 @@ export function jsonResponse(
   });
 }
 
-/** A response with no body: the answer of the webhook, which carries only a status code. */
-export function emptyResponse(statusCode: number): ApiResult {
-  return buildResponse(statusCode, "", {});
+/** A response with no body: the answer of the webhook (only a status code) and a 204. */
+export function emptyResponse(statusCode: number, extraHeaders: Record<string, string> = {}): ApiResult {
+  return buildResponse(statusCode, "", extraHeaders);
 }
 
 // The ONE place where error codes become HTTP status codes.
