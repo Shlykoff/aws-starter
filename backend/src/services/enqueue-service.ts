@@ -1,4 +1,4 @@
-import { encodeDeliveryMessage, messageGroupId } from "../domain/delivery-message";
+import { deduplicationId, encodeDeliveryMessage, messageGroupId } from "../domain/delivery-message";
 import type { EnqueueRequest } from "../domain/request-image";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
@@ -28,11 +28,12 @@ export interface EnqueueResult {
   alreadyMoved: number;
 }
 
-// Step 1 of the delivery pipeline (docs/api.md): a stored request goes onto the queue.
+// Step 1 of the delivery pipeline (docs/api.md): a stored request goes onto the queue, and so
+// does one that the owner has sent again (the same steps, another deduplication id).
 //
 // For every request: send the message, THEN mark the request as queued. If we crash or the
 // update fails after sending, the whole stream record is retried and the message is sent a
-// second time. That is safe: the queue deduplicates by request id (for 5 minutes) and the
+// second time. That is safe: the queue deduplicates by its deduplication id (for 5 minutes) and the
 // worker ignores a request that is already finished. The other order could lose a request
 // (marked queued, never sent), so it is not used.
 export class EnqueueService {
@@ -78,9 +79,10 @@ export class EnqueueService {
       id: key,
       body: encodeDeliveryMessage({ requestId: request.requestId, ownerId: request.ownerId }),
       groupId: messageGroupId(request.partner),
-      // The request id is the deduplication id, so a message sent twice is delivered once.
-      // (Content-based deduplication is off: the body is only two ids.)
-      deduplicationId: request.requestId,
+      // The request id is the deduplication id (plus the retry number for a request sent
+      // again), so a message sent twice is delivered once. (Content-based deduplication is
+      // off: the body is only two ids.)
+      deduplicationId: deduplicationId(request.requestId, request.retryCount),
     }));
 
     try {

@@ -28,6 +28,7 @@ export function jsonResponse(
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   validation_error: 400,
   not_found: 404,
+  not_retryable: 409,
   internal_error: 500,
 };
 

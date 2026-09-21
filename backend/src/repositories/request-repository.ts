@@ -1,4 +1,10 @@
-import type { PartnerRequest } from "../domain/request";
+import type { PartnerRequest, RequestStatus } from "../domain/request";
+
+// What `retry` found.
+export type RetryOutcome =
+  | { kind: "restarted"; request: PartnerRequest } // it was failed and is `created` again
+  | { kind: "not_found" } // no such request for this owner
+  | { kind: "not_failed"; status: RequestStatus }; // it exists, but has this other status
 
 // What the service needs from storage. The service depends on this interface, never on
 // DynamoDB, so it can be tested with an in-memory fake and the storage can change without
@@ -15,4 +21,11 @@ export interface RequestRepository {
 
   /** One of the owner's requests, or `undefined` if there is none with that id. */
   findById(ownerId: string, id: string): Promise<PartnerRequest | undefined>;
+
+  /**
+   * Sends a request again: one conditional update that moves it from `failed` back to
+   * `created` and counts the send. It answers "not found" and "not failed" as values, not as
+   * errors: they are answers for the caller, not failures of the storage.
+   */
+  retry(ownerId: string, id: string): Promise<RetryOutcome>;
 }

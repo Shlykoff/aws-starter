@@ -38,6 +38,23 @@ describe("createRequestsApi", () => {
     expect(client.post).toHaveBeenCalledWith("/requests", input);
   });
 
+  it("sends a failed request again with POST /requests/{id}/retry, without a body", async () => {
+    const { client, api } = setup();
+    const request = makeRequest({ status: "created" });
+    client.post.mockResolvedValue(request);
+
+    await expect(api.retry(request.id)).resolves.toEqual(request);
+    expect(client.post).toHaveBeenCalledWith(`/requests/${request.id}/retry`);
+  });
+
+  it("escapes the id in the retry path and rejects an answer that does not match the shape", async () => {
+    const { client, api } = setup();
+    client.post.mockResolvedValue({ id: "1", status: "teleported" });
+
+    await expect(api.retry("a/b")).rejects.toThrow();
+    expect(client.post).toHaveBeenCalledWith("/requests/a%2Fb/retry");
+  });
+
   it("rejects a response that does not match the documented shape", async () => {
     const { client, api } = setup();
     client.get.mockResolvedValue({ items: [{ id: "1", status: "teleported" }] });

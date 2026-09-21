@@ -472,7 +472,7 @@ describe("DeliveryService: the exchange record of a retry is diagnostics only", 
     });
   });
 
-  it("still writes failed on the last attempt when the record cannot be written", async () => {
+  it("still writes failed on the last attempt when the record cannot be written, and acknowledges the message", async () => {
     const { repository, notifier, exchanges, partner, deliver } = setup();
     partner.answer = () => unavailableAnswer;
     exchanges.failWith = new Error("S3 down");
@@ -481,7 +481,7 @@ describe("DeliveryService: the exchange record of a retry is diagnostics only", 
 
     expect(repository.statusOf(idNumber(1))).toBe("failed");
     expect(notifier.published).toHaveLength(1);
-    expect(result.failedMessageIds).toEqual(["msg-1"]);
+    expect(result.failedMessageIds).toEqual([]);
   });
 
   it("each attempt overwrites the record: it describes the latest attempt", async () => {
@@ -499,7 +499,7 @@ describe("DeliveryService: the exchange record of a retry is diagnostics only", 
 });
 
 describe("DeliveryService: the last attempt", () => {
-  it("writes failed and publishes first, and STILL reports the message so SQS moves it to the DLQ", async () => {
+  it("writes failed, publishes it and ACKNOWLEDGES the message: it is not reported, so it does not go to the DLQ", async () => {
     const { journal, repository, notifier, partner, deliver } = setup();
     partner.answer = () => unavailableAnswer;
 
@@ -518,7 +518,7 @@ describe("DeliveryService: the last attempt", () => {
     expect(notifier.published).toEqual([
       { requestId: idNumber(1), status: "failed", at: "2026-09-21T10:00:00.000Z" },
     ]);
-    expect(result.failedMessageIds).toEqual(["msg-1"]);
+    expect(result.failedMessageIds).toEqual([]);
     expect(result.counts.failed).toBe(1);
   });
 
@@ -538,7 +538,7 @@ describe("DeliveryService: the last attempt", () => {
     const result = await deliver(job(1, MAX_RECEIVE_COUNT + 1));
 
     expect(repository.statusOf(idNumber(1))).toBe("failed");
-    expect(result.failedMessageIds).toEqual(["msg-1"]);
+    expect(result.failedMessageIds).toEqual([]);
   });
 
   it("does not write failed when the last attempt succeeds", async () => {
@@ -573,7 +573,7 @@ describe("DeliveryService: the last attempt", () => {
     expect(result.counts.alreadyDone).toBe(1);
   });
 
-  it("still reports the message when the notification fails", async () => {
+  it("still acknowledges the message when the notification fails (the status is saved)", async () => {
     const { repository, notifier, partner, deliver } = setup();
     partner.answer = () => unavailableAnswer;
     notifier.failWith = new Error("SNS down");
@@ -581,10 +581,10 @@ describe("DeliveryService: the last attempt", () => {
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
 
     expect(repository.statusOf(idNumber(1))).toBe("failed");
-    expect(result.failedMessageIds).toEqual(["msg-1"]);
+    expect(result.failedMessageIds).toEqual([]);
   });
 
-  it("still reports the message when writing failed itself throws", async () => {
+  it("still reports the message (it ends in the DLQ) when writing failed itself throws", async () => {
     const { repository, notifier, partner, deliver } = setup();
     partner.answer = () => unavailableAnswer;
     repository.failures.set("markFailed", new Error("throttled"));
@@ -696,15 +696,27 @@ describe("DeliveryService: a batch of several messages", () => {
     expect(repository.statusOf(idNumber(4))).toBe("sent");
   });
 
-  it("stops after a last-attempt failure too: that message and the rest are reported", async () => {
+  it("does not stop after a last-attempt failure: that message is acknowledged and the next one is tried", async () => {
     const { repository, partner, deliver } = setup(2);
     partner.answer = () => unavailableAnswer;
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT), job(2, 1));
 
     expect(repository.statusOf(idNumber(1))).toBe("failed");
-    expect(repository.statusOf(idNumber(2))).toBe("queued");
-    expect(result.failedMessageIds).toEqual(["msg-1", "msg-2"]);
+    expect(partner.sent.map((sent) => sent.idempotencyKey)).toEqual([idNumber(1), idNumber(2)]);
+    expect(repository.statusOf(idNumber(2))).toBe("queued"); // its own turn: a retry, so it is reported
+    expect(result.failedMessageIds).toEqual(["msg-2"]);
+    expect(result.counts).toMatchObject({ failed: 1, retry: 1, notAttempted: 0 });
+  });
+
+  it("acknowledges the whole batch when one message fails for the last time and the others succeed", async () => {
+    const { repository, partner, deliver } = setup(3);
+    partner.answer = (submission) => (submission.idempotencyKey === idNumber(2) ? unavailableAnswer : acceptedAnswer(submission));
+
+    const result = await deliver(job(1), job(2, MAX_RECEIVE_COUNT), job(3));
+
+    expect([1, 2, 3].map((n) => repository.statusOf(idNumber(n)))).toEqual(["sent", "failed", "sent"]);
+    expect(result.failedMessageIds).toEqual([]);
   });
 });
 

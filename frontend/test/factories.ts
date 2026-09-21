@@ -71,6 +71,7 @@ export function makeRequestsApi() {
     list: vi.fn<RequestsApi["list"]>(() => Promise.resolve([])),
     get: vi.fn<RequestsApi["get"]>(() => Promise.reject(new Error("get: no result set by the test"))),
     create: vi.fn<RequestsApi["create"]>(() => Promise.reject(new Error("create: no result set by the test"))),
+    retry: vi.fn<RequestsApi["retry"]>(() => Promise.reject(new Error("retry: no result set by the test"))),
   };
 }
 
@@ -100,6 +101,15 @@ export function makeExchange(overrides: Partial<Exchange> = {}): Exchange {
     },
     ...overrides,
   };
+}
+
+// A promise that a test settles by hand, to look at the screen while a call is still running.
+export function makeDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 // By default the request has not been tried yet (the API answers 404), which is the calm

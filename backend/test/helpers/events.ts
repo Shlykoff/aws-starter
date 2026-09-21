@@ -74,6 +74,13 @@ export const getRequestEvent = (options: { sub?: string; id?: string } = {}): Ap
     pathParameters: options.id === undefined ? undefined : { id: options.id },
   });
 
+export const retryRequestEvent = (options: { sub?: string; id?: string } = {}): ApiEvent =>
+  buildEvent({
+    routeKey: "POST /requests/{id}/retry",
+    sub: options.sub,
+    pathParameters: options.id === undefined ? undefined : { id: options.id },
+  });
+
 export const getExchangeEvent = (options: { sub?: string; id?: string } = {}): ApiEvent =>
   buildEvent({
     routeKey: "GET /requests/{id}/exchange",

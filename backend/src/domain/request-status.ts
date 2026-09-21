@@ -6,8 +6,12 @@ import type { RequestStatus } from "./request";
 //
 //   created --> queued --> sent | rejected | failed
 //      `-------------------^  (the worker may see a request before the enqueuer wrote "queued")
+//   failed --> created         (the owner sends a failed request again: POST /requests/{id}/retry)
 
-/** Final states: a request in one of them never changes again. */
+/**
+ * Final states for the delivery worker: it never touches a request in one of them. `sent` and
+ * `rejected` never change again; only the owner can move a `failed` request, back to `created`.
+ */
 export const TERMINAL_STATUSES = ["sent", "rejected", "failed"] as const;
 export type TerminalStatus = (typeof TERMINAL_STATUSES)[number];
 
@@ -20,7 +24,7 @@ export function isTerminal(status: RequestStatus): status is TerminalStatus {
 
 // For each target status: the statuses a request may be in right before the change.
 const PREVIOUS_STATUSES: Record<RequestStatus, readonly RequestStatus[]> = {
-  created: [], // the start: nothing leads to it
+  created: ["failed"], // the start of a new request, or the owner sending a failed one again
   queued: ["created"], // only from created, so a late "queued" never overwrites a result
   sent: DELIVERABLE_STATUSES,
   rejected: DELIVERABLE_STATUSES,

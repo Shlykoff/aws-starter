@@ -5,7 +5,7 @@ import type { RequestStatus } from "../model/types";
 const EXPLANATIONS: Partial<Record<RequestStatus, string>> = {
   // "Rejected" also covers a message that failed our own schema check: it was then never sent.
   rejected: "The request was refused, by the partner or by our own check of the message. It was not retried.",
-  failed: "Delivery was attempted several times and did not succeed. The request needs attention.",
+  failed: "Delivery was attempted several times and did not succeed. You can send it again.",
 };
 
 export function getStatusExplanation(status: RequestStatus): string | undefined {

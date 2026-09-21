@@ -35,8 +35,19 @@ export function decodeDeliveryMessage(body: string): DeliveryMessage | undefined
  * make "Acme", "acme" and " ACME " the same partner.
  *
  * Trade-off: a message that keeps failing blocks the later messages of its own partner
- * until it lands in the dead-letter queue.
+ * until it is acknowledged (its last attempt) or lands in the dead-letter queue.
  */
 export function messageGroupId(partner: string): string {
   return createHash("sha256").update(partner.trim().toLowerCase()).digest("hex");
+}
+
+/**
+ * The FIFO `MessageDeduplicationId`: the request id for the first send. A FIFO queue drops a
+ * message whose deduplication id it has seen in the last 5 minutes, so a request sent again
+ * gets `<requestId>-r<retryCount>`: never the same as the first send or an earlier retry, and
+ * the same when the enqueuer repeats one send (a retried stream record), which is what the
+ * queue must drop.
+ */
+export function deduplicationId(requestId: string, retryCount: number): string {
+  return retryCount === 0 ? requestId : `${requestId}-r${retryCount}`;
 }

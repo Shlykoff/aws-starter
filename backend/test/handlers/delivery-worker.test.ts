@@ -282,7 +282,7 @@ describe("delivery-worker: the recipient refuses or is unavailable", () => {
     expect(recordsWritten()[0]?.exchange.reply).toEqual({ httpStatus: 200, xml: null, valid: false });
   });
 
-  it("on the last attempt sets failed, publishes it, and still reports the message", async () => {
+  it("on the last attempt sets failed, publishes it, and acknowledges the message (it is not reported)", async () => {
     seed(1);
     respondWith(503);
 
@@ -291,8 +291,22 @@ describe("delivery-worker: the recipient refuses or is unavailable", () => {
     expect(statusOf(1)).toBe("failed");
     const publish = sns.commandCalls(PublishCommand)[0]?.args[0].input;
     expect(publish?.MessageAttributes?.status?.StringValue).toBe("failed");
-    expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: "msg-1" }] });
+    expect(response).toEqual({ batchItemFailures: [] });
     expect(recordsWritten()[0]?.exchange).toMatchObject({ attempt: 5, outcome: "retry" });
+  });
+
+  it("in a larger batch a message that fails for the last time is acknowledged and the next ones are still tried", async () => {
+    seed(1);
+    seed(2);
+    respondWith(503);
+
+    // Message 1 is on its last attempt, message 2 on its first: only message 2 goes back.
+    const response = await run(message(1, 5), message(2, 1));
+
+    expect(statusOf(1)).toBe("failed");
+    expect(statusOf(2)).toBe("queued");
+    expect(fetchFake).toHaveBeenCalledTimes(2);
+    expect(response).toEqual({ batchItemFailures: [{ itemIdentifier: "msg-2" }] });
   });
 });
 

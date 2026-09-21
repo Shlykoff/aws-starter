@@ -118,6 +118,110 @@ describe("enqueuer: a new request", () => {
   });
 });
 
+// The owner sent a failed request again: the API set status `created` and counted the send
+// (`retryCount`) in one update, which the stream shows as a MODIFY record. Only that kind of
+// MODIFY goes onto the queue.
+describe("enqueuer: a request sent again (MODIFY with status created and a retryCount)", () => {
+  // The stored item is what the API left behind: created again, with the count.
+  function retriedRecord(n: number, retryCount: number) {
+    table.seed({
+      pk: "USER#user-a",
+      sk: `REQ#${idNumber(n)}`,
+      id: idNumber(n),
+      partner: "Acme",
+      status: "created",
+      retryCount,
+    });
+    return streamRecord({
+      eventName: "MODIFY",
+      sequenceNumber: `10000000000000000000${n}`,
+      id: idNumber(n),
+      retryCount,
+    });
+  }
+
+  it("sends a message with the deduplication id <requestId>-r<retryCount> and marks the request queued", async () => {
+    const response = await run(retriedRecord(1, 1));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries).toEqual([
+      {
+        Id: "100000000000000000001",
+        MessageBody: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
+        MessageGroupId: ACME_GROUP,
+        MessageDeduplicationId: `${idNumber(1)}-r1`,
+      },
+    ]);
+    expect(statusOf(1)).toBe("queued");
+  });
+
+  it("uses the next number each time the request is sent again", async () => {
+    await run(retriedRecord(1, 2));
+
+    const entry = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries?.[0];
+    expect(entry?.MessageDeduplicationId).toBe(`${idNumber(1)}-r2`);
+  });
+
+  it("handles it together with new requests in one batch: INSERT keeps the plain request id", async () => {
+    await run(seededRecord(1), retriedRecord(2, 1));
+
+    const entries = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries;
+    expect(entries?.map((entry) => entry.MessageDeduplicationId)).toEqual([idNumber(1), `${idNumber(2)}-r1`]);
+  });
+
+  it.each(["queued", "sent", "failed", "rejected"])(
+    "ignores a MODIFY whose new status is %s, even with a retryCount (a status update of the pipeline)",
+    async (status) => {
+      const response = await run(
+        streamRecord({ eventName: "MODIFY", sequenceNumber: "1", id: idNumber(1), status, retryCount: 1 }),
+      );
+
+      expect(response).toEqual({ batchItemFailures: [] });
+      expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+    },
+  );
+
+  it("ignores a MODIFY with status created but no retryCount", async () => {
+    const response = await run(streamRecord({ eventName: "MODIFY", sequenceNumber: "1", id: idNumber(1) }));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+  });
+
+  it("ignores a MODIFY whose retryCount is not a number", async () => {
+    const record = streamRecord({ eventName: "MODIFY", sequenceNumber: "1", id: idNumber(1) });
+    if (record.dynamodb?.NewImage) record.dynamodb.NewImage.retryCount = { S: "1" };
+
+    const response = await run(record);
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+  });
+
+  it("ignores a REMOVE, whatever its image looks like", async () => {
+    const response = await run(
+      streamRecord({ eventName: "REMOVE", sequenceNumber: "1", id: idNumber(1), status: "created", retryCount: 1 }),
+    );
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+  });
+
+  it("counts an ignored MODIFY as ignored and a retry MODIFY as sent in the log line", async () => {
+    await run(
+      retriedRecord(1, 1),
+      streamRecord({ eventName: "MODIFY", sequenceNumber: "2", id: idNumber(2), status: "sent", retryCount: 1 }),
+    );
+
+    expect(logs.entries().find((line) => line.message === "Stream batch handled")).toMatchObject({
+      records: 2,
+      ignored: 1,
+      sent: 1,
+      queued: 1,
+    });
+  });
+});
+
 describe("enqueuer: records it must ignore", () => {
   it.each(["MODIFY", "REMOVE"] as const)("ignores a %s record", async (eventName) => {
     const response = await run(streamRecord({ eventName, sequenceNumber: "1", id: idNumber(1) }));

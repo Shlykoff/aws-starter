@@ -1,8 +1,8 @@
 import { ulid } from "ulid";
 import { describe, expect, it } from "vitest";
 import type { PartnerRequest } from "../../src/domain/request";
-import { NotFoundError } from "../../src/lib/errors";
-import type { RequestRepository } from "../../src/repositories/request-repository";
+import { NotFoundError, NotRetryableError } from "../../src/lib/errors";
+import type { RequestRepository, RetryOutcome } from "../../src/repositories/request-repository";
 import { MAX_LIST_ITEMS, RequestService } from "../../src/services/request-service";
 
 // An in-memory repository. Like the real one, it keeps each owner's requests apart.
@@ -27,6 +27,21 @@ class FakeRequestRepository implements RequestRepository {
   findById(ownerId: string, id: string): Promise<PartnerRequest | undefined> {
     if (this.failWith) return Promise.reject(this.failWith);
     return Promise.resolve(this.byOwner.get(ownerId)?.find((request) => request.id === id));
+  }
+
+  // Like the real one: only a failed request of THIS owner is moved back to created.
+  readonly retryCalls: [ownerId: string, id: string][] = [];
+  retry(ownerId: string, id: string): Promise<RetryOutcome> {
+    this.retryCalls.push([ownerId, id]);
+    if (this.failWith) return Promise.reject(this.failWith);
+    const requests = this.byOwner.get(ownerId) ?? [];
+    const index = requests.findIndex((request) => request.id === id);
+    const found = requests[index];
+    if (found === undefined) return Promise.resolve({ kind: "not_found" });
+    if (found.status !== "failed") return Promise.resolve({ kind: "not_failed", status: found.status });
+    const restarted: PartnerRequest = { ...found, status: "created" };
+    requests[index] = restarted;
+    return Promise.resolve({ kind: "restarted", request: restarted });
   }
 }
 
@@ -161,5 +176,63 @@ describe("RequestService.get", () => {
     repository.failWith = new Error("storage is down");
 
     await expect(service.get("user-a", ulid(2_000_000))).rejects.toThrow("storage is down");
+  });
+});
+
+describe("RequestService.retry", () => {
+  // A stored request that the pipeline has moved to `status`.
+  async function storedWithStatus(status: PartnerRequest["status"]) {
+    const context = setup();
+    const created = await context.service.create("user-a", input);
+    const items = context.repository.byOwner.get("user-a") ?? [];
+    items[0] = { ...created, status };
+    return { ...context, id: created.id };
+  }
+
+  it("moves a failed request back to created and returns it", async () => {
+    const { service, id } = await storedWithStatus("failed");
+
+    const restarted = await service.retry("user-a", id);
+
+    expect(restarted).toMatchObject({ id, status: "created", ...input });
+  });
+
+  it.each(["created", "queued", "sent", "rejected"] as const)(
+    "refuses a %s request with not_retryable, and the message names the status",
+    async (status) => {
+      const { service, repository, id } = await storedWithStatus(status);
+
+      const error = await service.retry("user-a", id).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(NotRetryableError);
+      expect(error).toMatchObject({
+        code: "not_retryable",
+        message: `Only a failed request can be sent again (it is ${status})`,
+      });
+      expect(repository.byOwner.get("user-a")?.[0]?.status).toBe(status); // unchanged
+    },
+  );
+
+  it("answers not found for an id the owner does not have, and for another owner's request", async () => {
+    const { service, id } = await storedWithStatus("failed");
+
+    await expect(service.retry("user-a", ulid(5_000))).rejects.toBeInstanceOf(NotFoundError);
+    await expect(service.retry("user-b", id)).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("answers not found for a malformed id without asking the repository", async () => {
+    const { service, repository } = setup();
+
+    for (const id of ["", "nope", "../../etc", "x".repeat(3000)]) {
+      await expect(service.retry("user-a", id)).rejects.toBeInstanceOf(NotFoundError);
+    }
+    expect(repository.retryCalls).toEqual([]);
+  });
+
+  it("does not swallow a storage failure", async () => {
+    const { service, repository, id } = await storedWithStatus("failed");
+    repository.failWith = new Error("storage is down");
+
+    await expect(service.retry("user-a", id)).rejects.toThrow("storage is down");
   });
 });

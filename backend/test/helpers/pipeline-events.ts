@@ -18,6 +18,10 @@ export function streamRecord(options: {
   partner?: string;
   subject?: string;
   body?: string;
+  /** The status in the image (default "created"). */
+  status?: string;
+  /** Adds `retryCount` to the image: the request has been sent again this many times. */
+  retryCount?: number;
   /** Replaces the whole image, for malformed records. */
   image?: Record<string, AttributeValue>;
 }): DynamoDBRecord {
@@ -36,8 +40,9 @@ export function streamRecord(options: {
         partner: { S: options.partner ?? "Acme" },
         subject: { S: options.subject ?? "Order 42" },
         body: { S: options.body ?? "Please ship." },
-        status: { S: "created" },
+        status: { S: options.status ?? "created" },
         createdAt: { S: "2026-09-21T09:00:00.000Z" },
+        ...(options.retryCount !== undefined && { retryCount: { N: String(options.retryCount) } }),
       },
     },
   };

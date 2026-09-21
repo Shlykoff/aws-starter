@@ -23,19 +23,22 @@ export interface DeliveryJob {
   receiveCount: number;
 }
 
-// What happened to one message. The first three acknowledge the message (SQS deletes it);
-// the others report it as failed, so SQS hands it out again or moves it to the DLQ.
+// What happened to one message. The first four acknowledge the message (SQS deletes it);
+// the others report it as failed, so SQS hands it out again or, in the end, moves it to the DLQ.
 export type DeliveryOutcome =
   | "sent" // the partner accepted it; status "sent"
   | "rejected" // it will never be accepted (refused, invalid, or not writable as XML); status "rejected"
+  | "failed" // last attempt: status "failed" written and announced; the owner can send it again
   | "alreadyDone" // it was finished before (or a parallel run finished it): nothing to do
   | "retry" // the partner could not take it now; SQS will hand it out again
-  | "failed" // last attempt: status "failed" written, SQS moves the message to the DLQ
   | "error" // something on our side broke (DynamoDB, S3, SSM, a bug); SQS will hand it out again
   | "undeliverable" // a malformed message or an unknown request; goes to the DLQ in the end
   | "notAttempted"; // an earlier message of the batch failed, so this one was not tried
 
-const ACKNOWLEDGED: readonly DeliveryOutcome[] = ["sent", "rejected", "alreadyDone"];
+// `failed` is acknowledged: the failure is handled (recorded, announced, and the owner sees it
+// with a "Send again" button), the partner's group is not held back, and the DLQ stays for
+// what could not be processed at all (docs/api.md, "delivery-worker", steps 7 and 10).
+const ACKNOWLEDGED: readonly DeliveryOutcome[] = ["sent", "rejected", "failed", "alreadyDone"];
 
 export type DeliveryCounts = Record<DeliveryOutcome, number>;
 
@@ -48,8 +51,9 @@ export interface DeliveryResult {
 export interface DeliverySettings {
   /** SENDER_NAME: the name in `Sender/Name` of every submission. */
   senderName: string;
-  // The queue's maxReceiveCount: the receive on which SQS gives up and moves the message
-  // to the DLQ. Terraform passes the same number to the queue and to this function.
+  // The queue's maxReceiveCount: the receive after which SQS would give up on the message. It
+  // is this function's LAST attempt: on it the worker writes "failed" and acknowledges the
+  // message itself. Terraform passes the same number to the queue and to this function.
   maxReceiveCount: number;
 }
 
@@ -90,9 +94,10 @@ export class DeliveryService {
     };
     const failedMessageIds: string[] = [];
 
-    // Stop at the first failure. The queue is FIFO: if message 2 failed, message 3 (which
-    // may belong to the same partner) must not be delivered before message 2 is. So the
-    // failed message and everything after it go back to the queue, untouched.
+    // Stop at the first message that goes back to the queue. The queue is FIFO: if message 2
+    // is to be tried again, message 3 (which may belong to the same partner) must not be
+    // delivered before it. So that message and everything after it go back, untouched.
+    // A message whose last attempt ended as `failed` is acknowledged, so it does not stop the batch.
     let stopped = false;
     for (const job of jobs) {
       const outcome = stopped ? "notAttempted" : await this.deliverOne(job, log);
@@ -303,10 +308,10 @@ export class DeliveryService {
 
     if (!isLastAttempt) return "retry";
 
-    // The last attempt: once this message is reported as failed, SQS moves it to the DLQ.
-    // Record that in the request and notify FIRST. The message is still reported as failed
-    // afterwards (the outcome "failed" is not acknowledged), because that is what sends it
-    // to the DLQ, where it is kept for inspection.
+    // The last attempt: write "failed" and announce it. The message is then acknowledged (the
+    // outcome "failed" is in ACKNOWLEDGED), not left to move to the DLQ: the failure is handled
+    // and the owner can send the request again. If writing "failed" throws, the outcome is
+    // "error", the message goes back to the queue and ends in the DLQ, with the alarm.
     return this.finish(message, "failed", log);
   }
 

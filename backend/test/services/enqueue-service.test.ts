@@ -16,8 +16,8 @@ const GLOBEX_GROUP = "5bc1a08d28e40fe79ca3ecb077b3bd14ff00df9bad0c4a0d74ecd0805e
 
 const idNumber = (n: number): string => `01J8Z3K5W0ABCDEFGHJKMN${String(n).padStart(4, "0")}`;
 
-function entry(n: number, partner = "Acme", ownerId = "user-a"): EnqueueEntry {
-  return { key: `seq-${n}`, request: { requestId: idNumber(n), ownerId, partner } };
+function entry(n: number, partner = "Acme", ownerId = "user-a", retryCount = 0): EnqueueEntry {
+  return { key: `seq-${n}`, request: { requestId: idNumber(n), ownerId, partner, retryCount } };
 }
 
 function setup(requestCount = 0) {
@@ -47,6 +47,21 @@ describe("EnqueueService: the message", () => {
         },
       ],
     ]);
+  });
+
+  it("sends a request that was sent again with its own deduplication id: <requestId>-r<retryCount>", async () => {
+    const { queue, enqueue } = setup(2);
+
+    await enqueue([entry(1, "Acme", "user-a", 1), entry(2, "Acme", "user-a", 12)]);
+
+    // The body and the group are those of a first send; only the deduplication id differs,
+    // so the queue does not take the message for a duplicate of the first one.
+    expect(queue.calls[0]?.map((message) => message.deduplicationId)).toEqual([
+      `${idNumber(1)}-r1`,
+      `${idNumber(2)}-r12`,
+    ]);
+    expect(queue.calls[0]?.map((message) => message.groupId)).toEqual([ACME_GROUP, ACME_GROUP]);
+    expect(queue.calls[0]?.[0]?.body).toBe(JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }));
   });
 
   it("puts the same partner in the same group however it is spelled, and other partners elsewhere", async () => {

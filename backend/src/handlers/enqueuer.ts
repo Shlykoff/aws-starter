@@ -7,12 +7,31 @@ import type { Logger } from "../lib/logger";
 import type { EnqueueEntry, EnqueueService } from "../services/enqueue-service";
 import { TOKENS } from "../tokens";
 
-// The DynamoDB stream of the requests table: every new request goes onto the SQS queue
-// (docs/api.md, "Delivery pipeline"). Resolved once at module scope (see create-request.ts).
+// The DynamoDB stream of the requests table: every new request, and every request the owner
+// sends again, goes onto the SQS queue (docs/api.md, "Delivery pipeline"). Resolved once at
+// module scope (see create-request.ts).
 const service = container.get<EnqueueService>(TOKENS.EnqueueService);
 const logger = container.get<Logger>(TOKENS.Logger);
 
 type ParsedRecord = { entry: EnqueueEntry } | { skipReason: string };
+
+// Is this stream record for the queue? Two kinds are:
+//   - INSERT: a new request;
+//   - MODIFY of a request sent again: the new image has status `created` and a numeric
+//     `retryCount` (the API set both in one update). Only the new image is in the stream, so
+//     "it was failed before" cannot be tested; `created` with a `retryCount` is the state of a
+//     request sent again, and a stray record of that state is harmless: the queue drops the
+//     message (same deduplication id) and the worker skips a finished request.
+// Every other MODIFY (a status change of the pipeline, a stored decision) and every REMOVE is
+// not. This is the same test as the filter of the event source mapping (infra), on the raw
+// record (DynamoDB's typed format: `{ S: "created" }`, `{ N: "1" }`).
+function isForTheQueue(record: DynamoDBRecord): boolean {
+  if (record.eventName === "INSERT") return true;
+  if (record.eventName !== "MODIFY") return false;
+
+  const image = record.dynamodb?.NewImage;
+  return image?.status?.S === "created" && image.retryCount?.N !== undefined;
+}
 
 // Turns one stream record into an entry for the service, or says why it cannot be used.
 // It never returns or logs the image itself: it holds the request text.
@@ -52,10 +71,10 @@ export const handler = async (
   let malformed = 0;
 
   for (const record of event.Records) {
-    // The event source mapping already filters for INSERT. Checking again costs nothing and
-    // protects against a mapping that was changed by hand: an update record must never
-    // enqueue a request a second time.
-    if (record.eventName !== "INSERT") {
+    // The event source mapping already applies the same filter. Checking again costs nothing
+    // and protects against a mapping that was changed by hand: a status update of the
+    // pipeline must never enqueue a request a second time.
+    if (!isForTheQueue(record)) {
       ignored += 1;
       continue;
     }

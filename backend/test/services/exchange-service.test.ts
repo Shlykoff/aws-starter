@@ -22,6 +22,7 @@ function setup(options: { ownedBy?: string; stored?: Exchange; storeFails?: Erro
   const requests: RequestRepository = {
     create: () => Promise.reject(new Error("not used")),
     listByOwner: () => Promise.reject(new Error("not used")),
+    retry: () => Promise.reject(new Error("not used")),
     findById: (ownerId, id) => {
       journal.push(`requests.findById:${ownerId}`);
       return Promise.resolve(ownerId === (options.ownedBy ?? "user-a") ? aRequest({ id }) : undefined);

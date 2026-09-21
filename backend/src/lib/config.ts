@@ -32,7 +32,7 @@ function parseEnvironment<T>(schema: z.ZodType<T>, env: Record<string, string | 
   return result.data;
 }
 
-// ---- API functions: create-request, list-requests, get-request ----
+// ---- API functions: create-request, list-requests, get-request, retry-request ----
 
 export interface Config {
   tableName: string;

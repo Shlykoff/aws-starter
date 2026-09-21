@@ -1,10 +1,17 @@
-import { act, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeClientDecision, makeExchange, makeExchangeApi, makeRequest, makeRequestsApi } from "@test/factories";
+import {
+  makeClientDecision,
+  makeDeferred,
+  makeExchange,
+  makeExchangeApi,
+  makeRequest,
+  makeRequestsApi,
+} from "@test/factories";
 import { renderWithProviders } from "@test/render";
 import { ApiError } from "@/shared/api";
 import { ExchangeStore } from "@/entities/exchange";
-import { DECISION_POLL_INTERVAL_MS, RequestsStore, STATUS_POLL_INTERVAL_MS } from "@/entities/request";
+import { DECISION_POLL_INTERVAL_MS, RequestsStore, STATUS_POLL_INTERVAL_MS, type PartnerRequest } from "@/entities/request";
 import { RequestDetailsPage } from "./RequestDetailsPage";
 
 function setup() {
@@ -86,7 +93,7 @@ describe("RequestDetailsPage status explanation", () => {
     open(request.id);
 
     expect(
-      await screen.findByText("Delivery was attempted several times and did not succeed. The request needs attention."),
+      await screen.findByText("Delivery was attempted several times and did not succeed. You can send it again."),
     ).toBeInTheDocument();
   });
 
@@ -133,7 +140,7 @@ describe("RequestDetailsPage status polling", () => {
 
     await advance(STATUS_POLL_INTERVAL_MS);
     expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.getByText(/The request needs attention/)).toBeInTheDocument();
+    expect(screen.getByText(/You can send it again/)).toBeInTheDocument();
     expect(api.get).toHaveBeenCalledTimes(3);
 
     await advance(60_000);
@@ -599,5 +606,199 @@ describe("RequestDetailsPage decision polling", () => {
     await advance(10 * DECISION_POLL_INTERVAL_MS);
 
     expect(api.get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("RequestDetailsPage send again", () => {
+  const sendAgain = () => screen.getByRole("button", { name: "Send again" });
+  // Lets the promises settle after a call answered by hand (real timers: nothing to advance).
+  const settle = () => act(() => Promise.resolve());
+
+  it("offers the button, with a sentence, only for a failed request", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+
+    expect(await screen.findByRole("button", { name: "Send again" })).toBeEnabled();
+    expect(screen.getByText("It goes through delivery again, with up to five attempts.")).toBeInTheDocument();
+  });
+
+  it.each(["created", "queued", "sent", "rejected"] as const)("offers no button for a %s request", async (status) => {
+    const { api, open } = setup();
+    const request = makeRequest({ status, subject: "Not failed" });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+
+    await screen.findByRole("heading", { name: "Not failed" });
+    expect(screen.queryByRole("button", { name: /Send again|Sending/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/up to five attempts/)).not.toBeInTheDocument();
+  });
+
+  it("calls the API once, then shows the request as created and takes the button away", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValue(request);
+    api.retry.mockResolvedValue({ ...request, status: "created" });
+
+    const { user } = open(request.id);
+    await user.click(await screen.findByRole("button", { name: "Send again" }));
+
+    expect(await screen.findByText("Created")).toBeInTheDocument();
+    expect(api.retry).toHaveBeenCalledTimes(1);
+    expect(api.retry).toHaveBeenCalledWith(request.id);
+    expect(screen.queryByRole("button", { name: /Send again|Sending/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/You can send it again/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("disables the button while the call runs, so a double click sends once", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValue(request);
+    const answer = makeDeferred<PartnerRequest>();
+    api.retry.mockReturnValue(answer.promise);
+
+    const { user } = open(request.id);
+    await user.dblClick(await screen.findByRole("button", { name: "Send again" }));
+
+    expect(screen.getByRole("button", { name: "Sending..." })).toBeDisabled();
+    expect(api.retry).toHaveBeenCalledTimes(1);
+
+    answer.resolve({ ...request, status: "created" });
+    await settle();
+    expect(screen.getByText("Created")).toBeInTheDocument();
+    expect(api.retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a 409 with a calm note, no alert, and shows what the request is now", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValueOnce(request).mockResolvedValue({ ...request, status: "queued" });
+    api.retry.mockRejectedValue(new ApiError(409, "not_retryable", "The request cannot be sent again"));
+
+    const { user } = open(request.id);
+    await user.click(await screen.findByRole("button", { name: "Send again" }));
+
+    expect(await screen.findByText("This request was already sent again")).toBeInTheDocument();
+    expect(screen.getByText("Queued")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Send again|Sending/ })).not.toBeInTheDocument();
+  });
+
+  it("shows the error and lets the user press the button again", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValue(request);
+    api.retry.mockRejectedValueOnce(new ApiError(500, "internal_error", "Internal server error"));
+
+    const { user } = open(request.id);
+    await user.click(await screen.findByRole("button", { name: "Send again" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Internal server error");
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(sendAgain()).toBeEnabled();
+
+    api.retry.mockResolvedValue({ ...request, status: "created" });
+    await user.click(sendAgain());
+
+    expect(await screen.findByText("Created")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("RequestDetailsPage send again, polling", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("follows the status again after sending, until it is sent", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValueOnce(request);
+    api.retry.mockResolvedValue({ ...request, status: "created" });
+
+    open(request.id);
+    await advance(0);
+    // A failed request is not polled.
+    await advance(60_000);
+    expect(api.get).toHaveBeenCalledTimes(1);
+
+    api.get.mockResolvedValueOnce({ ...request, status: "queued" }).mockResolvedValue({ ...request, status: "sent" });
+    fireEvent.click(screen.getByRole("button", { name: "Send again" }));
+    await advance(0);
+    expect(screen.getByText("Created")).toBeInTheDocument();
+
+    await advance(STATUS_POLL_INTERVAL_MS);
+    expect(screen.getByText("Queued")).toBeInTheDocument();
+    await advance(STATUS_POLL_INTERVAL_MS);
+    expect(screen.getByText("Sent")).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("RequestDetailsPage earlier attempt", () => {
+  const note = "This is the earlier attempt; the new one replaces it when it has run.";
+
+  it.each(["created", "queued"] as const)("says the exchange is an earlier attempt for a %s request", async (status) => {
+    const { api, exchangeApi, open } = setup();
+    const request = makeRequest({ status });
+    api.get.mockResolvedValue(request);
+    exchangeApi.get.mockResolvedValue(makeExchange({ attempt: 5, outcome: "retry", reply: null }));
+
+    open(request.id);
+
+    expect(await screen.findByText("Attempt 5")).toBeInTheDocument();
+    expect(screen.getByText(note)).toBeInTheDocument();
+  });
+
+  it.each(["failed", "sent", "rejected"] as const)("does not say it for a %s request", async (status) => {
+    const { api, exchangeApi, open } = setup();
+    const request = makeRequest({ status });
+    api.get.mockResolvedValue(request);
+    exchangeApi.get.mockResolvedValue(makeExchange());
+
+    open(request.id);
+
+    expect(await screen.findByText("Attempt 1")).toBeInTheDocument();
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+  });
+
+  it("does not say it when there is no exchange yet", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "created" });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+
+    expect(await screen.findByText("No delivery attempt to show")).toBeInTheDocument();
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+  });
+
+  it("keeps the last attempt on screen, with the note, right after the request is sent again", async () => {
+    const { api, exchangeApi, open } = setup();
+    const request = makeRequest({ status: "failed" });
+    api.get.mockResolvedValue(request);
+    exchangeApi.get.mockResolvedValue(makeExchange({ attempt: 5, outcome: "retry", reply: null }));
+    api.retry.mockResolvedValue({ ...request, status: "created" });
+
+    const { user } = open(request.id);
+    expect(await screen.findByText("Attempt 5")).toBeInTheDocument();
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Send again" }));
+
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    expect(screen.getByText("Attempt 5")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { observer } from "mobx-react-lite";
 import { ArrowLeft, CircleAlert } from "lucide-react";
@@ -9,16 +9,68 @@ import {
   getStatusExplanation,
   isAwaitingDecision,
   isTerminalStatus,
+  type PartnerRequest,
   RequestStatusBadge,
   STATUS_POLL_INTERVAL_MS,
   useRequestsStore,
 } from "@/entities/request";
+import { getErrorMessage } from "@/shared/api";
 import { formatDateTime, useDocumentTitle, usePolling } from "@/shared/lib";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Button } from "@/shared/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Separator } from "@/shared/ui/separator";
 import { Skeleton } from "@/shared/ui/skeleton";
+
+// What the last press of "Send again" leaves to tell the user. Local state and not a store field:
+// it is a message about one click on this screen, nobody else needs it. (The `retrying` flag is in
+// the store: it must survive leaving the page and coming back while the call is still running.)
+type RetryFeedback = { kind: "already-sent" } | { kind: "error"; message: string };
+
+// Under the explanation of a failed request: the way out. Also draws the answer to the last press
+// after the status has changed and the button is gone (the calm note), so it is not tied to `failed`.
+const SendAgain = observer(function SendAgain({ request }: { request: PartnerRequest }) {
+  const requests = useRequestsStore();
+  const [feedback, setFeedback] = useState<RetryFeedback | null>(null);
+  const retrying = requests.isRetrying(request.id);
+
+  async function sendAgain() {
+    setFeedback(null);
+    try {
+      const outcome = await requests.retry(request.id);
+      // 409: somebody sent it again first (a double press, another tab). The store has read the
+      // request again, so the page already shows what it is now.
+      if (outcome === "not-retryable") setFeedback({ kind: "already-sent" });
+    } catch (error) {
+      setFeedback({ kind: "error", message: getErrorMessage(error) });
+    }
+  }
+
+  return (
+    <>
+      {request.status === "failed" && (
+        <div className="space-y-2">
+          <Button onClick={() => void sendAgain()} disabled={retrying}>
+            {retrying ? "Sending..." : "Send again"}
+          </Button>
+          <p className="text-sm text-muted-foreground">It goes through delivery again, with up to five attempts.</p>
+        </div>
+      )}
+      {feedback?.kind === "already-sent" && (
+        <p role="status" className="text-sm text-muted-foreground">
+          This request was already sent again
+        </p>
+      )}
+      {feedback?.kind === "error" && (
+        <Alert variant="destructive">
+          <CircleAlert aria-hidden="true" />
+          <AlertTitle>Could not send the request again</AlertTitle>
+          <AlertDescription>{feedback.message}</AlertDescription>
+        </Alert>
+      )}
+    </>
+  );
+});
 
 export const RequestDetailsPage = observer(function RequestDetailsPage() {
   // The route is /requests/:id, so `id` is always there; the fallback only satisfies the type.
@@ -83,6 +135,8 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
             <RequestStatusBadge status={request.status} />
           </div>
           {explanation && <p className="text-sm">{explanation}</p>}
+          {/* `key`: the feedback of one request must not follow the user to another one. */}
+          <SendAgain key={request.id} request={request} />
           <Separator />
           <p className="text-sm break-words whitespace-pre-wrap">{request.body}</p>
         </CardContent>
@@ -134,7 +188,10 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
           draws nothing when no decision is expected. */}
       {request && <ClientDecisionCard request={request} />}
       {/* Only for a request that exists: the exchange belongs to it. */}
-      {request && <ExchangePanel state={exchanges.stateFor(id)} onRetry={() => void exchanges.load(id)} />}
+      {/* While the request is created or queued (`polling`) the record shown is an earlier attempt. */}
+      {request && (
+        <ExchangePanel state={exchanges.stateFor(id)} onRetry={() => void exchanges.load(id)} earlierAttempt={polling} />
+      )}
     </div>
   );
 });

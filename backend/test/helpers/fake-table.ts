@@ -8,7 +8,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import type { AwsClientStub } from "aws-sdk-client-mock";
-import { applySet, evaluateCondition } from "./dynamo-condition";
+import { applyUpdate, evaluateCondition } from "./dynamo-condition";
 
 // A tiny in-memory stand-in for the DynamoDB table, plugged in behind
 // aws-sdk-client-mock. It understands exactly the three calls the repository makes, and
@@ -23,8 +23,10 @@ import { applySet, evaluateCondition } from "./dynamo-condition";
 // For the webhook it also understands the index `by-request-id` (partition key `sk`, KEYS_ONLY:
 // the answer holds pk and sk and nothing else) and a conditional UpdateItem that it EVALUATES
 // (see dynamo-condition.ts). Like DynamoDB, that update creates the item when the condition
-// lets it through and the item is missing, and a failed condition hands the old item back,
-// in DynamoDB's typed format, when the request asks for it (ReturnValuesOnConditionCheckFailure).
+// lets it through and the item is missing, a failed condition hands the old item back, in
+// DynamoDB's typed format, when the request asks for it (ReturnValuesOnConditionCheckFailure),
+// and a successful one hands the new item back as a plain object for ReturnValues ALL_NEW
+// (the retry of a failed request, which also counts with `ADD retryCount :one`).
 
 export interface StoredItem {
   pk: string;
@@ -74,6 +76,7 @@ export function stubTable(mock: AwsClientStub<DynamoDBDocumentClient>): FakeTabl
       ConditionExpression?: string;
       ExpressionAttributeNames?: Record<string, string>;
       ExpressionAttributeValues: Record<string, unknown>;
+      ReturnValues?: string;
       ReturnValuesOnConditionCheckFailure?: string;
     }) => {
       if (input.UpdateExpression !== "SET #status = :to") return evaluatedUpdate(input);
@@ -107,8 +110,9 @@ export function stubTable(mock: AwsClientStub<DynamoDBDocumentClient>): FakeTabl
     ConditionExpression?: string;
     ExpressionAttributeNames?: Record<string, string>;
     ExpressionAttributeValues: Record<string, unknown>;
+    ReturnValues?: string;
     ReturnValuesOnConditionCheckFailure?: string;
-  }): Record<string, never> {
+  }): Record<string, unknown> {
     const stored = table.get(keyOf(input.Key.pk, input.Key.sk));
     const context = {
       item: stored,
@@ -126,9 +130,10 @@ export function stubTable(mock: AwsClientStub<DynamoDBDocumentClient>): FakeTabl
     }
     // UpdateItem CREATES an item that does not exist: only a condition can prevent it.
     const item = stored ?? { pk: input.Key.pk, sk: input.Key.sk };
-    applySet(item, input.UpdateExpression ?? "", context);
+    applyUpdate(item, input.UpdateExpression ?? "", context);
     table.set(keyOf(input.Key.pk, input.Key.sk), item);
-    return {};
+    // The document client hands the new item back as a plain object when asked (ALL_NEW).
+    return input.ReturnValues === "ALL_NEW" ? { Attributes: structuredClone(item) } : {};
   }
 
   mock.on(QueryCommand).callsFake(

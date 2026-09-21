@@ -7,14 +7,17 @@ import { handler as create } from "../../src/handlers/create-request";
 import { handler as getExchange } from "../../src/handlers/get-exchange";
 import { handler as get } from "../../src/handlers/get-request";
 import { handler as list } from "../../src/handlers/list-requests";
+import { handler as retry } from "../../src/handlers/retry-request";
 import {
   createRequestEvent,
   getExchangeEvent,
   getRequestEvent,
   lambdaContext,
   listRequestsEvent,
+  retryRequestEvent,
 } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
+import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
 
 // The central security property of the API: what one user creates, no other user can see.
@@ -34,10 +37,12 @@ const recordWithSecret = JSON.stringify({
   reply: null,
 });
 
+let table: FakeTable;
+
 beforeEach(() => {
   ddb.reset();
   s3.reset();
-  stubTable(ddb);
+  table = stubTable(ddb);
   s3.on(GetObjectCommand).resolves({ Body: { transformToString: () => Promise.resolve(recordWithSecret) } as never });
   captureLogs();
 });
@@ -68,6 +73,26 @@ describe("user isolation", () => {
     expect(asB.statusCode).toBe(404);
     expect(asB).toEqual(unknown); // same status, headers and body: existence is not leaked
     expect(asB.body).not.toContain("secret");
+  });
+
+  it("user B cannot send user A's failed request again: 404 like an unknown request, and it stays failed", async () => {
+    const requestOfA = await createAs("user-a", "A's secret subject");
+    const item = table.items().find((stored) => stored.sk === `REQ#${requestOfA.id}`);
+    if (item === undefined) throw new Error("the request of A was not stored");
+    table.seed({ ...item, status: "failed" }); // the pipeline gave up on it
+
+    const asB = await retry(retryRequestEvent({ sub: "user-b", id: requestOfA.id }), context);
+    const unknown = await retry(retryRequestEvent({ sub: "user-b", id: ulid(1_000) }), context);
+    const stored = table.items().find((other) => other.sk === `REQ#${requestOfA.id}`);
+
+    expect(asB.statusCode).toBe(404);
+    expect(asB).toEqual(unknown); // same status, headers and body: existence is not leaked
+    expect(asB.body).not.toContain("secret");
+    expect(stored).toMatchObject({ status: "failed" }); // not moved, not counted
+    expect(stored).not.toHaveProperty("retryCount");
+
+    const asA = await retry(retryRequestEvent({ sub: "user-a", id: requestOfA.id }), context);
+    expect(asA.statusCode).toBe(200); // the owner can
   });
 
   it("user B cannot read user A's exchange, even though the object exists in S3: 404, like an unknown request", async () => {
