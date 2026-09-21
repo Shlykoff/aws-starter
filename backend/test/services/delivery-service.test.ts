@@ -22,8 +22,8 @@ import {
 } from "../helpers/fakes";
 import type { Journal } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
-import { parentIdOf, recordSpans, wholeSpan } from "../helpers/tracing";
-import { withSpan } from "../../src/lib/tracing";
+import { STORED_SPAN_ID, STORED_TRACE_ID, parentIdOf, recordSpans, wholeSpan } from "../helpers/tracing";
+import { toXRayTraceHeader, withSpan } from "../../src/lib/tracing";
 
 const MAX_RECEIVE_COUNT = 5;
 const idNumber = (n: number): string => `01J8Z3K5W0ABCDEFGHJKMN${String(n).padStart(4, "0")}`;
@@ -1176,8 +1176,7 @@ describe("DeliveryService: request events", () => {
 });
 
 // The span `call recipient` (lib/tracing.ts): the part of the request's trace that the recipient
-// answers for. The worker has no code to join the trace: the queue message brings it (Lambda's
-// tracing), so here the span is simply a child of whatever span is active.
+// answers for. It sits in `deliver request`, the span of one attempt.
 describe("DeliveryService: the span `call recipient`", () => {
   const spans = recordSpans();
 
@@ -1192,12 +1191,13 @@ describe("DeliveryService: the span `call recipient`", () => {
     expect(span.status.code).toBe(SpanStatusCode.UNSET);
   });
 
-  it("is a child of the active span, so it belongs to the trace of the message", async () => {
+  it("is inside the span of the attempt, which is inside whatever span is active", async () => {
     const { deliver } = setup();
 
     await withSpan("invocation", {}, () => deliver(job(1)));
 
-    expect(parentIdOf(spans.only("call recipient"))).toBe(spans.only("invocation").spanContext().spanId);
+    expect(parentIdOf(spans.only("call recipient"))).toBe(spans.only("deliver request").spanContext().spanId);
+    expect(parentIdOf(spans.only("deliver request"))).toBe(spans.only("invocation").spanContext().spanId);
   });
 
   it("has the status of a refusal or of an outage as they came, and the partnerMs of the call", async () => {
@@ -1247,6 +1247,53 @@ describe("DeliveryService: the span `call recipient`", () => {
 
     expect(result.counts.error).toBe(1);
     const span = spans.only("call recipient");
+    expect(span.status).toEqual({ code: SpanStatusCode.ERROR, message: "TypeError" });
+    expect(wholeSpan(span)).not.toContain("canary-key");
+  });
+});
+
+// The span `deliver request`: one attempt, in the trace of the request. Lambda's own tracing only
+// LINKS the invocation to the trace that the queue message carries, so the code makes its spans a
+// part of it, from the AWSTraceHeader of the message.
+describe("DeliveryService: the span `deliver request`", () => {
+  const spans = recordSpans();
+  const HEADER = toXRayTraceHeader(`00-${STORED_TRACE_ID}-${STORED_SPAN_ID}-01`);
+
+  it("is in the trace named by the header of the message, as a child of the span in it", async () => {
+    const { deliver } = setup();
+
+    await deliver({ ...job(1, 2), traceHeader: HEADER });
+
+    const span = spans.only("deliver request");
+    expect(span.spanContext().traceId).toBe(STORED_TRACE_ID);
+    expect(parentIdOf(span)).toBe(STORED_SPAN_ID);
+    expect(span.attributes).toEqual({ requestId: idNumber(1), attempt: 2 });
+    // Everything the attempt does is in the same trace.
+    expect(spans.only("call recipient").spanContext().traceId).toBe(STORED_TRACE_ID);
+  });
+
+  it("starts a trace of its own for a message without a header, or with one that is not a trace", async () => {
+    const { deliver } = setup(3);
+
+    await deliver(job(1));
+    await deliver({ ...job(2), traceHeader: "Root=garbage" });
+
+    for (const span of spans.named("deliver request")) {
+      expect(span.spanContext().traceId).not.toBe(STORED_TRACE_ID);
+      expect(parentIdOf(span)).toBeUndefined();
+    }
+    expect(spans.named("deliver request")).toHaveLength(2);
+  });
+
+  it("ends the span and marks it failed when the attempt crashes, and the message is still reported as error", async () => {
+    const { partner, deliver } = setup();
+    partner.send = () => Promise.reject(new TypeError("fetch failed canary-key"));
+
+    const result = await deliver({ ...job(1), traceHeader: HEADER });
+
+    expect(result.counts.error).toBe(1);
+    const span = spans.only("deliver request");
+    expect(span.ended).toBe(true);
     expect(span.status).toEqual({ code: SpanStatusCode.ERROR, message: "TypeError" });
     expect(wholeSpan(span)).not.toContain("canary-key");
   });

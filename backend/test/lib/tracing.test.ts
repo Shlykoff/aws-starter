@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LogGuardError } from "../../src/lib/log-fields";
 import {
   contextFromTraceparent,
+  contextFromXRayTraceHeader,
   currentTraceId,
   currentTraceparent,
   startSpan,
@@ -282,6 +283,47 @@ describe("the traceparent", () => {
     // Only the lowest flag bit is "sampled".
     expect(toXRayTraceHeader("00-5759e988bd862e3fe1be46a994272793-53995c3f42cd8ad8-02")).toContain("Sampled=0");
     expect(toXRayTraceHeader("00-5759e988bd862e3fe1be46a994272793-53995c3f42cd8ad8-03")).toContain("Sampled=1");
+  });
+});
+
+describe("contextFromXRayTraceHeader: the AWSTraceHeader of a queue message, read back", () => {
+  const HEADER = toXRayTraceHeader(STORED_TRACEPARENT) as string;
+
+  it("gives the trace and the span that toXRayTraceHeader wrote", () => {
+    const spanContext = trace.getSpanContext(contextFromXRayTraceHeader(HEADER) as never);
+
+    expect(spanContext).toEqual({ traceId: STORED_TRACE_ID, spanId: STORED_SPAN_ID, traceFlags: 1, isRemote: true });
+  });
+
+  it("keeps the sampled flag as it was", () => {
+    const unsampled = toXRayTraceHeader(`00-${STORED_TRACE_ID}-${STORED_SPAN_ID}-00`) as string;
+
+    expect(trace.getSpanContext(contextFromXRayTraceHeader(unsampled) as never)?.traceFlags).toBe(0);
+  });
+
+  it("ignores the fields it does not know and the order and spaces they come in", () => {
+    const header = `Self=1-5759e988-bd862e3fe1be46a994272793; Sampled=1 ;Parent=${STORED_SPAN_ID};Root=1-${STORED_TRACE_ID.slice(0, 8)}-${STORED_TRACE_ID.slice(8)}`;
+
+    expect(trace.getSpanContext(contextFromXRayTraceHeader(header) as never)?.traceId).toBe(STORED_TRACE_ID);
+  });
+
+  const NOT_A_HEADER: [string, unknown][] = [
+    ["no Root", `Parent=${STORED_SPAN_ID};Sampled=1`],
+    ["no Parent", `Root=1-${STORED_TRACE_ID.slice(0, 8)}-${STORED_TRACE_ID.slice(8)};Sampled=1`],
+    ["no Sampled", HEADER.replace(";Sampled=1", "")],
+    ["a Sampled that is neither 0 nor 1", HEADER.replace("Sampled=1", "Sampled=2")],
+    ["upper case", HEADER.toUpperCase()],
+    ["a Root that is not 1-<8>-<24>", HEADER.replace("Root=1-", "Root=2-")],
+    ["a short Parent", HEADER.replace(STORED_SPAN_ID, STORED_SPAN_ID.slice(1))],
+    ["a Parent of zeros", HEADER.replace(STORED_SPAN_ID, "0".repeat(16))],
+    ["a Root of zeros", `Root=1-00000000-${"0".repeat(24)};Parent=${STORED_SPAN_ID};Sampled=1`],
+    ["an empty string", ""],
+    ["undefined", undefined],
+    ["a number", 7],
+  ];
+
+  it.each(NOT_A_HEADER)("is not a trace: %s", (_name, value) => {
+    expect(contextFromXRayTraceHeader(value)).toBeUndefined();
   });
 });
 

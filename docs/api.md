@@ -463,15 +463,20 @@ delivery, the call to the recipient and the decision webhook. It takes two halve
   OpenTelemetry SDK before our code, makes a span for every invocation and sends the spans to the
   X-Ray OTLP endpoint, signed with the function's role: no collector. The calls made through `http` and
   `fetch` (DynamoDB, SQS, SNS, S3, SSM, the recipient) become client spans with the host and the
-  status. These functions have 512 MB, and Lambda's active tracing stays on (it hands the trace header of
-  a queue message to the function).
+  status. The spans of an invocation that Lambda itself records (`Init` and `Overhead`, that is the
+  start-up) stay in the trace of the invocation, not in the request's. These functions have 512 MB. Lambda's active tracing stays on: it records the invocation
+  itself (`Init`, `Overhead`) and, for a queue message, links the invocation to the message's trace.
 - **The trace context is carried by our code** (`src/lib/tracing.ts`, the OpenTelemetry API only: without
   the layer every call does nothing), because the stream and the HTTP webhook carry no trace:
   - `create-request` and `retry-request` store a W3C `traceparent` in the request item, in the same
     write (a retry replaces it: it starts a new trace). It is never returned by the API.
   - The enqueuer reads it from the stream image, records a span `enqueue request` in that trace and
     puts the X-Ray form of it into the queue message (the system attribute `AWSTraceHeader`, which needs
-    no permission beyond `sqs:SendMessage`). The worker's invocation joins the trace by itself.
+    no permission beyond `sqs:SendMessage`).
+  - The worker reads that header from the record. Lambda's own tracing does not join a consumer to the
+    trace of the message: it starts a trace of the invocation and only links it (seen on AWS). So the
+    worker makes a span `deliver request` for each attempt, with the header as its parent, and the calls
+    of the attempt are nested in it.
   - The webhook gets the stored `traceparent` with the answer of its update (`ReturnValues: ALL_OLD`: no
     extra read, and only that attribute is used) and records a span `record decision` in that trace after
     the fact, from the moment its call began.
