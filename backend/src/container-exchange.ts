@@ -5,6 +5,7 @@ import { bindDynamoDocumentClient } from "./container-dynamodb";
 import { bindLogger } from "./container-shared";
 import { loadExchangeConfig } from "./lib/config";
 import type { ExchangeConfig } from "./lib/config";
+import { tracedPort } from "./lib/tracing";
 import { DynamoRequestRepository } from "./repositories/dynamodb-request-repository";
 import type { ExchangeStore } from "./repositories/exchange-store";
 import type { RequestRepository } from "./repositories/request-repository";
@@ -30,7 +31,7 @@ container
   .bind<RequestRepository>(TOKENS.RequestRepository)
   .toResolvedValue(
     (client: DynamoDBDocumentClient, { tableName }: ExchangeConfig) =>
-      new DynamoRequestRepository(client, tableName),
+      tracedPort(new DynamoRequestRepository(client, tableName), "requests"),
     [TOKENS.DynamoDocumentClient, TOKENS.ExchangeConfig],
   )
   .inSingletonScope();
@@ -38,7 +39,8 @@ container
 container
   .bind<ExchangeStore>(TOKENS.ExchangeStore)
   .toResolvedValue(
-    (client: S3Client, { auditBucket }: ExchangeConfig) => new S3ExchangeStore(client, auditBucket),
+    (client: S3Client, { auditBucket }: ExchangeConfig) =>
+      tracedPort(new S3ExchangeStore(client, auditBucket), "exchanges"),
     [TOKENS.S3Client, TOKENS.ExchangeConfig],
   )
   .inSingletonScope();

@@ -4,7 +4,7 @@ import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import type { StoredClientDecision } from "../domain/client-decision";
 import { requestKey } from "../domain/request-keys";
-import type { DecisionRepository, RecordOutcome } from "./decision-repository";
+import type { DecisionRepository, RecordOutcome, RecordResult } from "./decision-repository";
 
 // The same table and keys as DynamoRequestRepository (pk = USER#<sub>, sk = REQ#<ULID>; see
 // the comment above that class). Access patterns of the webhook:
@@ -24,6 +24,10 @@ import type { DecisionRepository, RecordOutcome } from "./decision-repository";
 //   clientDecision  map: decision, reason?, at, receivedAt, eventId
 //   decisionAtMs    number: `at` as epoch milliseconds. It is what is compared, because ISO
 //                   strings with different offsets do not sort by time.
+//
+// The update also reads one attribute, `traceparent` (the trace of the request, written by
+// DynamoRequestRepository), from the old item that DynamoDB hands back with the answer: no
+// extra read. The webhook uses it to record its span in that trace.
 //
 // The update touches only these two attributes, so it never interferes with the status
 // changes of the delivery pipeline (DynamoDeliveryRepository), and the other way round.
@@ -45,12 +49,12 @@ export class DynamoDecisionRepository implements DecisionRepository {
     requestId: string,
     decision: StoredClientDecision,
     occurredAtMs: number,
-  ): Promise<RecordOutcome> {
+  ): Promise<RecordResult> {
     const pk = await this.findOwnerKey(requestId);
-    if (pk === undefined) return "unknown_request";
+    if (pk === undefined) return { outcome: "unknown_request" };
 
     try {
-      await this.client.send(
+      const result = await this.client.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key: { pk, sk: requestKey(requestId) },
@@ -75,9 +79,12 @@ export class DynamoDecisionRepository implements DecisionRepository {
           // tell "same event" from "older event" from "no such item" without a second read
           // (which could see a different item than the one that failed the condition).
           ReturnValuesOnConditionCheckFailure: "ALL_OLD",
+          // When it succeeds, the item as it was before: only its `traceparent` is used (the
+          // rest holds the request text and goes nowhere). It costs no read and no permission.
+          ReturnValues: "ALL_OLD",
         }),
       );
-      return "applied";
+      return { outcome: "applied", ...storedTrace(result.Attributes) };
     } catch (error) {
       if (error instanceof ConditionalCheckFailedException) return classify(error, decision.eventId);
       throw error;
@@ -100,14 +107,20 @@ export class DynamoDecisionRepository implements DecisionRepository {
   }
 }
 
+// The trace of an item, if it has one. A value that is not a string is not a trace.
+function storedTrace(item: { traceparent?: unknown } | undefined): { traceparent?: string } {
+  return typeof item?.traceparent === "string" ? { traceparent: item.traceparent } : {};
+}
+
 // Why did the condition fail?
-function classify(error: ConditionalCheckFailedException, eventId: string): RecordOutcome {
+function classify(error: ConditionalCheckFailedException, eventId: string): RecordResult {
   // No item came back: attribute_exists(pk) failed, the request is gone (the index was stale).
-  if (error.Item === undefined) return "unknown_request";
+  if (error.Item === undefined) return { outcome: "unknown_request" };
 
   // The document client does not convert what is in an exception, so it is in DynamoDB's
   // typed format ({ S: "..." }) and is unmarshalled here.
-  const stored = unmarshall(error.Item) as { clientDecision?: { eventId?: string } };
+  const stored = unmarshall(error.Item) as { clientDecision?: { eventId?: string }; traceparent?: unknown };
   // The same event again (a repeated delivery), or another event that is not newer.
-  return stored.clientDecision?.eventId === eventId ? "duplicate" : "ignored";
+  const outcome: RecordOutcome = stored.clientDecision?.eventId === eventId ? "duplicate" : "ignored";
+  return { outcome, ...storedTrace(stored) };
 }

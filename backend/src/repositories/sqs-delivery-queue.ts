@@ -17,6 +17,11 @@ export class SqsDeliveryQueue implements DeliveryQueue {
           MessageBody: message.body,
           MessageGroupId: message.groupId,
           MessageDeduplicationId: message.deduplicationId,
+          // A SYSTEM attribute (not a message attribute): SQS hands it to Lambda's tracing, which
+          // makes the invocation a part of the request's trace. Only sent when there is one.
+          ...(message.traceHeader !== undefined && {
+            MessageSystemAttributes: { AWSTraceHeader: { DataType: "String", StringValue: message.traceHeader } },
+          }),
         })),
       }),
     );

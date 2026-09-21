@@ -4,6 +4,7 @@ import type { PartnerRequest } from "../domain/request";
 import { NotFoundError, NotRetryableError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
 import { logRequestEvent } from "../lib/request-events";
+import { currentTraceparent, withSpan } from "../lib/tracing";
 import type { RequestRepository } from "../repositories/request-repository";
 
 // docs/api.md: GET /requests returns at most 50 items, newest first.
@@ -29,8 +30,13 @@ export class RequestService {
       status: "created", // stage 1 never moves a request past "created"
       createdAt: this.now().toISOString(), // always UTC, e.g. 2026-09-20T12:00:00.000Z
     };
-    await this.repository.create(ownerId, request);
-    logRequestEvent(log, { event: "request_created", role: "user", requestId: request.id, toStatus: "created" });
+    // The span is the start of the request's trace: its traceparent is stored with the item, in
+    // the same write, and the enqueuer and the webhook continue from it (lib/tracing.ts). The
+    // event is logged inside it, so its line carries the trace id.
+    await withSpan("create request", { requestId: request.id }, async () => {
+      await this.repository.create(ownerId, request, currentTraceparent());
+      logRequestEvent(log, { event: "request_created", role: "user", requestId: request.id, toStatus: "created" });
+    });
     return request;
   }
 
@@ -58,17 +64,25 @@ export class RequestService {
     // A malformed id cannot exist: 404 without touching the database (see `get`).
     if (!isUlid(id)) throw new NotFoundError();
 
-    const outcome = await this.repository.retry(ownerId, id);
-    switch (outcome.kind) {
-      case "restarted":
+    // A retry starts a NEW trace: its traceparent replaces the stored one, in the same update.
+    // The span ends before the errors below are thrown: "not found" and "not failed" are answers
+    // of the API, not failures of this span.
+    const outcome = await withSpan("retry request", { requestId: id }, async () => {
+      const result = await this.repository.retry(ownerId, id, currentTraceparent());
+      if (result.kind === "restarted") {
         logRequestEvent(log, {
           event: "retry_requested",
           role: "user",
           requestId: id,
           fromStatus: "failed",
           toStatus: "created",
-          retryCount: outcome.retryCount,
+          retryCount: result.retryCount,
         });
+      }
+      return result;
+    });
+    switch (outcome.kind) {
+      case "restarted":
         return outcome.request;
       case "not_found":
         throw new NotFoundError();

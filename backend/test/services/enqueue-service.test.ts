@@ -1,7 +1,9 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { describe, expect, it } from "vitest";
 import { EnqueueService } from "../../src/services/enqueue-service";
 import type { EnqueueEntry } from "../../src/services/enqueue-service";
 import { createLogger } from "../../src/lib/logger";
+import { tracedPort, withSpan } from "../../src/lib/tracing";
 import {
   FakeDeliveryQueue,
   FakeDeliveryRepository,
@@ -9,6 +11,7 @@ import {
 } from "../helpers/fakes";
 import type { Journal } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
+import { STORED_SPAN_ID, STORED_TRACEPARENT, STORED_TRACE_ID, parentIdOf, recordSpans } from "../helpers/tracing";
 
 // Reference values computed outside the code: printf 'acme' | shasum -a 256
 const ACME_GROUP = "822b33ad87c148a0a20a5ba7cd5ebcaa68d36a18e7aad165554903f52ca82757";
@@ -236,5 +239,145 @@ describe("EnqueueService: request events", () => {
     await enqueue([entry(1), entry(2), entry(3)]);
 
     expect(requestEvents(logs)).toEqual([]);
+  });
+});
+
+// The trace of a request (lib/tracing.ts): a span per request in the trace that is stored with it,
+// and the message hands that trace to the queue as the X-Ray trace header.
+describe("EnqueueService: the trace of each request", () => {
+  const spans = recordSpans();
+
+  const withTrace = (n: number, traceparent: string | undefined): EnqueueEntry => {
+    const plain = entry(n);
+    return { ...plain, request: { ...plain.request, ...(traceparent !== undefined && { traceparent }) } };
+  };
+  const xray = (traceId: string, spanId: string) =>
+    `Root=1-${traceId.slice(0, 8)}-${traceId.slice(8)};Parent=${spanId};Sampled=1`;
+
+  it("makes one span `enqueue request` per request, a child of the stored span, and puts its trace into the message", async () => {
+    const { queue, enqueue } = setup(1);
+
+    await enqueue([withTrace(1, STORED_TRACEPARENT)]);
+
+    const span = spans.only("enqueue request");
+    expect(span.attributes).toMatchObject({ requestId: idNumber(1) });
+    expect(parentIdOf(span)).toBe(STORED_SPAN_ID);
+    expect(span.spanContext().traceId).toBe(STORED_TRACE_ID);
+    // The parent of the worker's invocation will be THIS span, not the one that was stored.
+    expect(queue.calls[0]?.[0]?.traceHeader).toBe(xray(STORED_TRACE_ID, span.spanContext().spanId));
+  });
+
+  it("keeps the requests of one batch apart: each has its own span, its own trace and its own header", async () => {
+    const { queue, enqueue } = setup(2);
+    const otherTrace = "00-11111111111111111111111111111111-2222222222222222-01";
+
+    await enqueue([withTrace(1, STORED_TRACEPARENT), withTrace(2, otherTrace)]);
+
+    expect(queue.calls).toHaveLength(1); // still one SendMessageBatch call
+    const [first, second] = spans.named("enqueue request");
+    expect(first?.spanContext().traceId).toBe(STORED_TRACE_ID);
+    expect(second?.spanContext().traceId).toBe("11111111111111111111111111111111");
+    expect(parentIdOf(second as NonNullable<typeof second>)).toBe("2222222222222222");
+    expect(queue.calls[0]?.map((message) => message.traceHeader)).toEqual([
+      xray(STORED_TRACE_ID, (first as NonNullable<typeof first>).spanContext().spanId),
+      xray("11111111111111111111111111111111", (second as NonNullable<typeof second>).spanContext().spanId),
+    ]);
+  });
+
+  it.each([
+    ["no stored trace", undefined],
+    ["a stored trace that is not valid", "00-not-a-trace"],
+  ])("with %s: no parent from the request, the span belongs to the invocation's trace", async (_name, traceparent) => {
+    const { queue, enqueue } = setup(1);
+
+    await withSpan("invocation", {}, () => enqueue([withTrace(1, traceparent)]));
+
+    const invocation = spans.only("invocation");
+    const span = spans.only("enqueue request");
+    expect(parentIdOf(span)).toBe(invocation.spanContext().spanId);
+    expect(queue.calls[0]?.[0]?.traceHeader).toBe(xray(invocation.spanContext().traceId, span.spanContext().spanId));
+  });
+
+  it("keeps the span open until the request is marked, so that the update of the table is one of its spans", async () => {
+    const journal: Journal = [];
+    const queue = new FakeDeliveryQueue(journal);
+    const repository = new FakeDeliveryRepository(journal);
+    repository.seed(aRequest({ id: idNumber(1), status: "created" }));
+    const service = new EnqueueService(queue, tracedPort(repository, "deliveries"));
+
+    await service.enqueue([withTrace(1, STORED_TRACEPARENT)], createLogger("debug"));
+
+    const span = spans.only("enqueue request");
+    expect(parentIdOf(spans.only("deliveries.markQueued"))).toBe(span.spanContext().spanId);
+    expect(span.attributes).toEqual({ requestId: idNumber(1), outcome: "queued" });
+    expect(span.ended).toBe(true);
+  });
+
+  it("says what became of each request in the span, and ends every span whatever happens", async () => {
+    const { queue, repository, enqueue } = setup(4);
+    queue.refuse.add("seq-2"); // the queue refuses request 2
+    repository.setStatus(idNumber(3), "sent"); // the worker was faster with request 3
+    const markQueued = repository.markQueued;
+    // Only the update of request 4 fails.
+    repository.markQueued = (ownerId, id) =>
+      id === idNumber(4) ? Promise.reject(new Error("throttled")) : markQueued(ownerId, id);
+
+    await enqueue([entry(1), entry(2), entry(3), entry(4)]);
+
+    const enqueueSpans = spans.named("enqueue request");
+    expect(enqueueSpans.map((span) => span.attributes.outcome)).toEqual(["queued", "send_failed", "already_moved", "mark_failed"]);
+    expect(enqueueSpans.every((span) => span.ended)).toBe(true);
+    expect(enqueueSpans[3]?.status).toEqual({ code: SpanStatusCode.ERROR, message: "Error" });
+    expect(enqueueSpans[0]?.status.code).toBe(SpanStatusCode.UNSET);
+  });
+
+  it("marks every span of a batch as failed when the whole call fails, by the type of the error only", async () => {
+    const { queue, enqueue } = setup(2);
+    queue.failCalls.set(0, new TypeError("SQS said canary-secret-text"));
+
+    await enqueue([entry(1), entry(2)]);
+
+    for (const span of spans.named("enqueue request")) {
+      expect(span.status).toEqual({ code: SpanStatusCode.ERROR, message: "TypeError" });
+      expect(span.attributes.outcome).toBe("send_failed");
+      expect(JSON.stringify([span.attributes, span.status, span.events])).not.toContain("canary-secret-text");
+    }
+  });
+
+  it("does not change the rest of the message: the body, the group and the deduplication id are those of a message without a trace", async () => {
+    const { queue, enqueue } = setup(2);
+
+    await enqueue([withTrace(1, STORED_TRACEPARENT), entry(2)]);
+
+    const [traced, plain] = queue.calls[0] ?? [];
+    const withoutHeader = ({ traceHeader, ...message }: NonNullable<typeof traced>) => {
+      expect(traceHeader).toBeDefined();
+      return message;
+    };
+    expect(withoutHeader(traced as NonNullable<typeof traced>)).toEqual({
+      id: "seq-1",
+      body: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
+      groupId: ACME_GROUP,
+      deduplicationId: idNumber(1),
+    });
+    expect(withoutHeader(plain as NonNullable<typeof plain>)).toMatchObject({ id: "seq-2", groupId: ACME_GROUP });
+  });
+});
+
+describe("EnqueueService without an SDK", () => {
+  it("sends no trace header for a request without a stored trace", async () => {
+    const { queue, enqueue } = setup(1);
+
+    await enqueue([entry(1)]);
+
+    expect(queue.calls[0]?.[0]).not.toHaveProperty("traceHeader");
+  });
+
+  it("hands on the stored trace as it is: the worker's invocation becomes a child of the creation", async () => {
+    const { queue, enqueue } = setup(1);
+
+    await enqueue([{ ...entry(1), request: { ...entry(1).request, traceparent: STORED_TRACEPARENT } }]);
+
+    expect(queue.calls[0]?.[0]?.traceHeader).toBe(`Root=1-4bf92f35-77b34da6a3ce929d0e0e4736;Parent=${STORED_SPAN_ID};Sampled=1`);
   });
 });

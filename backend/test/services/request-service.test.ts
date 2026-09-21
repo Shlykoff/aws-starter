@@ -1,19 +1,26 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { ulid } from "ulid";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { PartnerRequest } from "../../src/domain/request";
 import { NotFoundError, NotRetryableError } from "../../src/lib/errors";
 import { createLogger } from "../../src/lib/logger";
+import { withSpan } from "../../src/lib/tracing";
 import type { RequestRepository, RetryOutcome } from "../../src/repositories/request-repository";
 import { MAX_LIST_ITEMS, RequestService } from "../../src/services/request-service";
 import { captureLogs } from "../helpers/logs";
+import { parentIdOf, recordSpans, traceparentOf } from "../helpers/tracing";
 
 // An in-memory repository. Like the real one, it keeps each owner's requests apart.
 class FakeRequestRepository implements RequestRepository {
   readonly byOwner = new Map<string, PartnerRequest[]>();
   readonly listLimits: number[] = [];
+  /** The traceparent that each call of `create` / `retry` was given (undefined: none). */
+  readonly createTraceparents: (string | undefined)[] = [];
+  readonly retryTraceparents: (string | undefined)[] = [];
   failWith: Error | undefined;
 
-  create(ownerId: string, request: PartnerRequest): Promise<void> {
+  create(ownerId: string, request: PartnerRequest, traceparent?: string): Promise<void> {
+    this.createTraceparents.push(traceparent);
     if (this.failWith) return Promise.reject(this.failWith);
     this.byOwner.set(ownerId, [...(this.byOwner.get(ownerId) ?? []), request]);
     return Promise.resolve();
@@ -34,8 +41,9 @@ class FakeRequestRepository implements RequestRepository {
   // Like the real one: only a failed request of THIS owner is moved back to created.
   readonly retryCalls: [ownerId: string, id: string][] = [];
   private readonly retryCounts = new Map<string, number>();
-  retry(ownerId: string, id: string): Promise<RetryOutcome> {
+  retry(ownerId: string, id: string, traceparent?: string): Promise<RetryOutcome> {
     this.retryCalls.push([ownerId, id]);
+    this.retryTraceparents.push(traceparent);
     if (this.failWith) return Promise.reject(this.failWith);
     const requests = this.byOwner.get(ownerId) ?? [];
     const index = requests.findIndex((request) => request.id === id);
@@ -305,5 +313,75 @@ describe("RequestService: request events (docs/api.md, Logs)", () => {
 
     const written = logs.lines.join("\n");
     for (const secret of ["user-a", input.partner, input.subject, input.body]) expect(written).not.toContain(secret);
+  });
+});
+
+describe("RequestService: the trace of a request", () => {
+  const spans = recordSpans();
+
+  it("create: the request is stored with the traceparent of the span `create request`, which has the request id", async () => {
+    const { service, repository } = setup();
+
+    const created = await service.create("user-a", input, log);
+
+    const span = spans.only("create request");
+    expect(span.attributes).toEqual({ requestId: created.id });
+    expect(repository.createTraceparents).toEqual([traceparentOf(span)]);
+  });
+
+  it("create: the span is a child of the active span (the invocation), in the same trace", async () => {
+    const { service } = setup();
+
+    await withSpan("invocation", {}, () => service.create("user-a", input, log));
+
+    expect(parentIdOf(spans.only("create request"))).toBe(spans.only("invocation").spanContext().spanId);
+  });
+
+  it("create: a storage failure marks the span as failed and is still thrown", async () => {
+    const { service, repository } = setup();
+    repository.failWith = new Error("storage is down");
+
+    await expect(service.create("user-a", input, log)).rejects.toThrow("storage is down");
+
+    expect(spans.only("create request").status).toEqual({ code: SpanStatusCode.ERROR, message: "Error" });
+  });
+
+  it("retry: the traceparent of the span `retry request` is given to the update, to replace the stored one", async () => {
+    const { service, repository, id } = await storedWithStatus("failed");
+
+    await service.retry("user-a", id, log);
+
+    const span = spans.only("retry request");
+    expect(span.attributes).toEqual({ requestId: id });
+    expect(repository.retryTraceparents).toEqual([traceparentOf(span)]);
+  });
+
+  it("retry: an answer of the API (not found, not failed) is not a failure of the span", async () => {
+    const { service, id } = await storedWithStatus("sent");
+
+    await expect(service.retry("user-a", id, log)).rejects.toBeInstanceOf(NotRetryableError);
+    await expect(service.retry("user-b", id, log)).rejects.toBeInstanceOf(NotFoundError);
+
+    expect(spans.named("retry request").map((span) => span.status.code)).toEqual([SpanStatusCode.UNSET, SpanStatusCode.UNSET]);
+  });
+
+  it("retry: a malformed id makes no span (the database is not touched either)", async () => {
+    const { service } = setup();
+
+    await expect(service.retry("user-a", "nope", log)).rejects.toBeInstanceOf(NotFoundError);
+
+    expect(spans.named("retry request")).toEqual([]);
+  });
+});
+
+describe("RequestService without an SDK", () => {
+  it("gives no traceparent to the repository", async () => {
+    const { service, repository, id } = await storedWithStatus("failed");
+
+    await service.retry("user-a", id, log);
+
+    // [0] is the create of the setup.
+    expect(repository.createTraceparents).toEqual([undefined]);
+    expect(repository.retryTraceparents).toEqual([undefined]);
   });
 });

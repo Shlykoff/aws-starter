@@ -7,6 +7,7 @@ import type { RequestRepository } from "./repositories/request-repository";
 import { RequestService } from "./services/request-service";
 import { loadConfig } from "./lib/config";
 import type { Config } from "./lib/config";
+import { tracedPort } from "./lib/tracing";
 import { TOKENS } from "./tokens";
 
 // The dependency graph of the four request functions (create-request, list-requests,
@@ -28,6 +29,8 @@ import { TOKENS } from "./tokens";
 //     `reflect-metadata/lite`), so we never import it. It is listed in package.json only
 //     because Inversify declares it as a peer dependency.
 //   - Everything is a singleton, so one repository and one service serve all invocations.
+//   - Every port that talks to AWS or to the partner is wrapped once, here, by `tracedPort`
+//     (lib/tracing.ts): each call of its methods becomes a span named `<label>.<method>`.
 
 // Fail fast: if TABLE_NAME is missing this throws while the function initialises.
 const config = loadConfig(process.env);
@@ -43,7 +46,7 @@ container
   .bind<RequestRepository>(TOKENS.RequestRepository)
   .toResolvedValue(
     (client: DynamoDBDocumentClient, { tableName }: Config) =>
-      new DynamoRequestRepository(client, tableName),
+      tracedPort(new DynamoRequestRepository(client, tableName), "requests"),
     [TOKENS.DynamoDocumentClient, TOKENS.Config],
   )
   .inSingletonScope();

@@ -42,6 +42,31 @@ describe("newRequestImageSchema", () => {
     });
   });
 
+  it("passes on the traceparent of the request when the image has one", () => {
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    expect(newRequestImageSchema.parse({ ...image, traceparent }).traceparent).toBe(traceparent);
+    expect(newRequestImageSchema.parse(image)).not.toHaveProperty("traceparent");
+  });
+
+  // A trace is a help, not a condition: whatever is stored in the attribute, the request is read.
+  it.each([
+    ["not a string", 42],
+    ["null", null],
+    ["a map", { S: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" }],
+    ["far too long", "0".repeat(10_000)],
+  ])("drops a traceparent that is %s, and still reads the request", (_name, traceparent) => {
+    const parsed = newRequestImageSchema.safeParse({ ...image, traceparent });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.data).toEqual({
+      requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
+      ownerId: "user-a",
+      partner: "Acme",
+      retryCount: 0,
+    });
+  });
+
   it("reads an owner id that itself contains a # or a dash", () => {
     const parsed = newRequestImageSchema.parse({ ...image, pk: "USER#us#er-1" });
 

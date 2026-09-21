@@ -65,7 +65,7 @@ describe("DynamoDecisionRepository.recordDecision", () => {
     found();
     ddb.on(UpdateCommand).resolves({});
 
-    expect(await record()).toBe("applied");
+    expect(await record()).toEqual({ outcome: "applied" });
 
     expect(ddb.commandCalls(UpdateCommand).map((call) => call.args[0].input)).toEqual([
       {
@@ -80,6 +80,8 @@ describe("DynamoDecisionRepository.recordDecision", () => {
           "(decisionAtMs < :ms AND clientDecision.eventId <> :eventId))",
         ExpressionAttributeValues: { ":decision": decision, ":ms": AT_MS, ":eventId": decision.eventId },
         ReturnValuesOnConditionCheckFailure: "ALL_OLD",
+        // The item as it was, for its `traceparent` (no second read).
+        ReturnValues: "ALL_OLD",
       },
     ]);
   });
@@ -106,14 +108,14 @@ describe("DynamoDecisionRepository.recordDecision", () => {
   it("answers unknown_request, without an update, when the index has no such request", async () => {
     ddb.on(QueryCommand).resolves({ Items: [] });
 
-    expect(await record()).toBe("unknown_request");
+    expect(await record()).toEqual({ outcome: "unknown_request" });
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   it("answers unknown_request when the query returns no Items at all", async () => {
     ddb.on(QueryCommand).resolves({});
 
-    expect(await record()).toBe("unknown_request");
+    expect(await record()).toEqual({ outcome: "unknown_request" });
   });
 
   describe("when the condition fails", () => {
@@ -121,7 +123,7 @@ describe("DynamoDecisionRepository.recordDecision", () => {
       found();
       ddb.on(UpdateCommand).rejects(conditionFailed({ pk: "USER#user-a", decisionAtMs: AT_MS, clientDecision: decision }));
 
-      expect(await record()).toBe("duplicate");
+      expect(await record()).toEqual({ outcome: "duplicate" });
     });
 
     it("answers ignored when the stored decision is from another event (an older one, or one at the same moment)", async () => {
@@ -134,21 +136,71 @@ describe("DynamoDecisionRepository.recordDecision", () => {
         }),
       );
 
-      expect(await record()).toBe("ignored");
+      expect(await record()).toEqual({ outcome: "ignored" });
     });
 
     it("answers unknown_request when no old item came back (the request is gone: the index was stale)", async () => {
       found();
       ddb.on(UpdateCommand).rejects(conditionFailed());
 
-      expect(await record()).toBe("unknown_request");
+      expect(await record()).toEqual({ outcome: "unknown_request" });
     });
 
     it("answers ignored when the old item has no readable decision (it cannot be this event)", async () => {
       found();
       ddb.on(UpdateCommand).rejects(conditionFailed({ pk: "USER#user-a", decisionAtMs: AT_MS + 1 }));
 
-      expect(await record()).toBe("ignored");
+      expect(await record()).toEqual({ outcome: "ignored" });
+    });
+  });
+
+  describe("the trace of the request (no extra read: it comes with the answers of the update)", () => {
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    it("hands back the traceparent of the old item when the decision was stored", async () => {
+      found();
+      ddb.on(UpdateCommand).resolves({ Attributes: { pk: "USER#user-a", sk: `REQ#${ID}`, status: "sent", traceparent } });
+
+      expect(await record()).toEqual({ outcome: "applied", traceparent });
+      expect(ddb.commandCalls(QueryCommand)).toHaveLength(1);
+      expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
+    });
+
+    it("hands back nothing for an item without one, or with something that is not a string", async () => {
+      found();
+      ddb
+        .on(UpdateCommand)
+        .resolvesOnce({ Attributes: { pk: "USER#user-a", status: "sent" } })
+        .resolvesOnce({ Attributes: { pk: "USER#user-a", status: "sent", traceparent: 42 } })
+        .resolvesOnce({});
+
+      expect(await record()).toEqual({ outcome: "applied" });
+      expect(await record()).toEqual({ outcome: "applied" });
+      expect(await record()).toEqual({ outcome: "applied" });
+    });
+
+    it("hands it back for a duplicate and for an ignored event too, from the item of the failed condition", async () => {
+      found();
+      ddb
+        .on(UpdateCommand)
+        .rejectsOnce(conditionFailed({ pk: "USER#user-a", decisionAtMs: AT_MS, clientDecision: decision, traceparent }))
+        .rejectsOnce(
+          conditionFailed({
+            pk: "USER#user-a",
+            decisionAtMs: AT_MS + 1000,
+            clientDecision: { ...decision, eventId: "aaaaaaaa-5a4d-4e7b-9c1a-2d6e8f0a1b3c" },
+            traceparent,
+          }),
+        );
+
+      expect(await record()).toEqual({ outcome: "duplicate", traceparent });
+      expect(await record()).toEqual({ outcome: "ignored", traceparent });
+    });
+
+    it("hands back no trace, and no other attribute of the item, for a request that does not exist", async () => {
+      ddb.on(QueryCommand).resolves({ Items: [] });
+
+      expect(await record()).toEqual({ outcome: "unknown_request" });
     });
   });
 

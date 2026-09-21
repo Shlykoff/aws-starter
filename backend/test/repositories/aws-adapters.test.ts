@@ -52,6 +52,25 @@ describe("SqsDeliveryQueue", () => {
     });
   });
 
+  it("sends the trace of a message as the system attribute AWSTraceHeader, and nothing for a message without one", async () => {
+    sqs.on(SendMessageBatchCommand).resolves({ Successful: [], Failed: [] });
+    const traceHeader = "Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1";
+
+    await queue.sendBatch([{ ...(messages[0] as (typeof messages)[number]), traceHeader }, messages[1] as (typeof messages)[number]]);
+
+    const entries = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries;
+    // A SYSTEM attribute, not a message attribute: the consumer's tracing reads it, the body is untouched.
+    expect(entries?.[0]).toEqual({
+      Id: "seq-1",
+      MessageBody: messages[0]?.body,
+      MessageGroupId: "g1",
+      MessageDeduplicationId: "r1",
+      MessageSystemAttributes: { AWSTraceHeader: { DataType: "String", StringValue: traceHeader } },
+    });
+    expect(entries?.[1]).not.toHaveProperty("MessageSystemAttributes");
+    expect(entries?.[0]).not.toHaveProperty("MessageAttributes");
+  });
+
   it("returns no failed ids when SQS accepted everything", async () => {
     sqs.on(SendMessageBatchCommand).resolves({ Successful: [sent("seq-1"), sent("seq-2")] });
 

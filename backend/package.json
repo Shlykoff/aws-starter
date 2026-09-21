@@ -17,6 +17,7 @@
     "@aws-sdk/client-ssm": "^3.1136.0",
     "@aws-sdk/lib-dynamodb": "^3.1136.0",
     "@aws-sdk/util-dynamodb": "^3.996.9",
+    "@opentelemetry/api": "1.9.0",
     "@xmldom/xmldom": "^0.9.12",
     "inversify": "^8.2.3",
     "reflect-metadata": "~0.2.2",
@@ -25,6 +26,8 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@types/aws-lambda": "^8.10.163",
     "@types/node": "^24.13.6",
     "aws-sdk-client-mock": "^4.1.0",
