@@ -18,7 +18,7 @@ All data is fake. The domain is deliberately neutral. It runs inside the AWS Fre
 flowchart LR
   subgraph AWS["AWS account: infra/, backend/, frontend/"]
     B["Browser: React app,<br/>Cognito login"] -->|"HTTPS + JWT"| API["API Gateway<br/>HTTP API"]
-    API --> F["Lambda: create, list,<br/>get, get-exchange"]
+    API --> F["Lambda: create, list, get,<br/>retry, get-exchange"]
     F --> T[("DynamoDB<br/>requests")]
     T -->|"stream"| E["Lambda: enqueuer"]
     E --> Q[["SQS FIFO<br/>+ DLQ"]]
@@ -82,7 +82,7 @@ Where each outcome ends:
 | The recipient answers `Rejected` (`400`/`422`) | `rejected` | no |
 | Our own message fails `submission.xsd`, or holds a character XML cannot carry | `rejected`, nobody is called | no |
 | Timeout, `5xx`, `429`, `401`/`403`, an unreadable or contradictory answer | stays `queued` | yes, up to 5 receives |
-| The 5th attempt fails | `failed`, the message goes to the DLQ, an alarm and an e-mail | no |
+| The 5th attempt fails | `failed`, an e-mail, and a **Send again** button on the request page | no, until the owner sends it again |
 
 The status only says whether the message was **delivered**. What the client then does with it
 (approves, for example pays; declines, for example out of stock) arrives later, by a webhook, as
@@ -94,8 +94,8 @@ nothing waits for it and nothing expires.
 - [x] Stage 0: bootstrap (state bucket, budget alert, GitHub OIDC role)
 - [x] Stage 1: REST API (API Gateway, Lambda, DynamoDB), Cognito, React login + list/form, CI/CD
 - [x] Stage 2: async delivery (stream outbox, SQS FIFO, worker, DLQ, SNS). Checked on AWS
-  with three requests: delivered, refused and failing (five attempts, then `failed`, the
-  DLQ and the alarm).
+  with three requests: delivered, refused and failing (five attempts, then `failed`; at that
+  stage the message also went to the DLQ, which stage 5 changed).
 - [x] Stage 3: the recipient as a separate system, XML + XSD validation on both sides, the
   exchange record and its panel in the UI, the API key in SSM. Checked on AWS through an ngrok
   tunnel to the recipient running in Docker on a laptop: a request delivered in about two
@@ -111,6 +111,11 @@ nothing waits for it and nothing expires.
   logs of those calls contain no reason text and no token. A second `terraform plan` after the
   deploy shows no changes.
   Still to do: a full review of the logs for personal data.
+- [x] Stage 5: send a failed request again (a button on the request page). Checked on AWS: with the
+  recipient stopped a request went through five attempts to `failed` and the DLQ stayed empty;
+  with the recipient back, Send again delivered it (`sent`, the exchange counts from attempt 1);
+  pressing again, or on a delivered request, gets `409`; another user's or a malformed id gets
+  `404`. A second `terraform plan` after the deploy shows no changes.
 
 ## Try it
 
@@ -182,9 +187,10 @@ and `. , ' & -` only, because the recipient's schema says so):
 |---|---|
 | any subject, partner `Acme Ltd` | `sent` within seconds; the Exchange panel shows the XML and the `Accepted` reply |
 | `[reject]` in the subject | `rejected`; the reply says `RECIPIENT_REJECTED` |
-| `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed`; the message goes to the DLQ, which raises an alarm and an e-mail |
+| `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed` with an e-mail; press **Send again** and it goes through delivery again (and fails again, the subject says so) |
 | partner `Acme #1` | `rejected` at once: our own schema check refuses it and nobody is called |
 | in the recipient's inbox (`WEBHOOK_URL` = the `webhook_url` output, `WEBHOOK_TOKEN` = yours), open a delivered message and press **Approve** or **Decline** with a reason | the request page shows the Client decision card within about 30 seconds (a reload shows it at once) |
+| stop the recipient, create a request, wait for `failed` (about 8 minutes), start the recipient, press **Send again** | the request goes through delivery again and becomes `sent` |
 | press Approve, then Decline | the later action wins: the card shows Declined |
 | press **Send again** on an event | the same event again: nothing changes |
 | stop the recipient, create a request, start the recipient again within the retries (about 8 minutes) | the Exchange panel shows the failed attempt (`retry`, `502` from the tunnel), then the request is delivered on the next attempt, two minutes after the first |
@@ -223,7 +229,7 @@ Written down as they are made; each stage adds its own.
   On-demand would be the choice for spiky or unknown traffic.
 - **Request statuses separate temporary from permanent failures:** `created` (stored)
   -> `queued` (in SQS FIFO) -> `sent` (the recipient accepted it). `failed` means delivery
-  retries are exhausted and the message is in the DLQ; `rejected` means the message was
+  retries are exhausted (the owner can send it again); `rejected` means the message was
   refused for good (the recipient said no, or our own XSD check failed) and is not retried.
 - **HTTP API instead of REST API.** Cheaper, lower latency and it has a built-in JWT
   authorizer, so no authorizer Lambda is needed. The REST-only features (API keys,
@@ -240,10 +246,23 @@ Written down as they are made; each stage adds its own.
   punctuation, and a partner is free text), so order is kept per partner. Batch size is 1:
   in a FIFO batch a failing message drags the messages behind it, other partners' included,
   into retries, and each retry is charged a receive, so they could reach the DLQ untried.
-- **The dead-letter queue is a quarantine, not a pipe.** The worker writes `failed` itself on
-  the last attempt (the number of attempts comes from Terraform, one source of truth), and the
-  message then moves to the DLQ, where it stays for inspection and raises an alarm. A function
-  reading the DLQ would delete exactly what the alarm is meant to show.
+- **The worker writes `failed` itself on the last attempt** (the number of attempts comes from
+  Terraform, one source of truth), sends the e-mail and acknowledges the message: a failure the
+  owner can act on is a state of the request, not a stuck message.
+- **The dead-letter queue is a quarantine, not a pipe, and it is for what could not be processed
+  at all** (a malformed message, an unknown request, an error of ours). It stays for inspection and
+  raises an alarm; nothing reads it automatically, because a function reading it would delete
+  exactly what the alarm is meant to show. Earlier a delivery that ran out of attempts went there
+  too; with a Send again button that would have left a stale message and an alarm after every
+  successful retry.
+- **Sending a failed request again is a state change, and the queue message is only a pointer.**
+  The message holds two ids; the request (its text, the partner, the status) is in DynamoDB. So
+  `POST /requests/{id}/retry` only flips `failed` to `created` with a conditional update, and the
+  table's stream makes the enqueuer put a new message on the queue, the same outbox as for a new
+  request (the API needs no queue permission). The stream carries only the new image, so the
+  enqueuer's filter cannot ask "was it failed?": the API's condition guarantees it, and the
+  deduplication id carries the retry count so the second send is never taken for a duplicate of
+  the first. `rejected` cannot be sent again: the same message would get the same answer.
 - **A 401 or 403 from the partner is retried, not rejected.** It means our own credentials or
   permissions are wrong, so it ends as `failed` with an alarm instead of a silent `rejected`.
 - **The recipient is a separate system, not part of the AWS stack.** This stack knows its base
@@ -323,6 +342,8 @@ Written down as they are made; each stage adds its own.
   only by the owner of the request. Logs are designed to carry no message text; a full review of
   them is still to do.
 - Both validators are libxml2 (see Decisions).
+- Sending again has no limit on how often it is used, and only a `failed` request can be sent
+  again. There is no tool to redrive the DLQ: an operator moves those messages by hand.
 - The webhook is authenticated by a shared token, and rotating it is a manual step on both sides.
   Once the signature is right the recipient is trusted: an `OccurredAt` far in the future would keep
   the decision from ever being replaced.
