@@ -132,6 +132,22 @@ nothing waits for it and nothing expires.
   queued 1.2 s later, delivered with the recipient's answer in 385 ms, sent 5 s after creation, the
   two decisions); a repeated event produced no line; a retry produced `retry_requested` with the real
   `retryCount`.
+- [x] Stage 9: metrics, alarms and a dashboard for the delivery: 8 custom metrics (six counted from the
+  log lines, two durations written by the worker), 10 alarms, one dashboard and six saved Logs
+  Insights queries, all inside the free tier. Checked on AWS: after a live delivery the two duration
+  metrics held exactly the values of the log line (6837 ms until sent, 407 ms for the recipient's
+  answer) and the sent counter was 1; six calls with a wrong signature moved the
+  `webhook-unauthorized` alarm to ALARM within a minute (the metric was 6 against a threshold of 5);
+  all six saved queries run.
+- [x] Stage 10: a long-term log archive: every log group is copied to S3 by a small Lambda within
+  seconds, kept 13 months and queried with Athena. Checked on AWS: a live delivery loop produced 13
+  objects (78 log events, 10 KB) from the six function log groups and the API access log, each one JSON
+  line; the reason texts sent in that loop are nowhere in them; Athena returned the timeline of the
+  test request (the same six events as Logs Insights) and scanned 10 KB. Two things were found only
+  by running it: Firehose is refused by the free account plan (replaced by the Lambda), and the saved
+  queries did not run (Athena gives an unnested log event as one column, not three). Not seen yet: a
+  request that failed after the archive started, so the query "failed requests per day" has run but
+  returned no rows.
 
 ## Try it
 
