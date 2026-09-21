@@ -47,13 +47,10 @@ locals {
 # CloudWatch Transaction Search: where the spans go
 # ---------------------------------------------------------------------------
 
-# The spans are stored as structured logs in this group (X-Ray and CloudWatch create it when the
-# destination below is switched, without a retention: created here first, so the retention is set).
+# The spans are stored as structured logs in the group `aws/spans`. It is not created here: AWS
+# reserves the names that start with `aws/` (CreateLogGroup refuses them), and X-Ray creates it
+# itself when the destination below is switched. Its retention is looked at after the first apply.
 # Ingestion is billed as any log ingestion, inside the 5 GB free a month; a span is about a kilobyte.
-resource "aws_cloudwatch_log_group" "spans" {
-  name              = "aws/spans"
-  retention_in_days = 30 # as every other log group of the project
-}
 
 # Lets X-Ray write into the two groups Transaction Search uses, on behalf of this account only.
 resource "aws_cloudwatch_log_resource_policy" "xray_spans" {
@@ -84,7 +81,7 @@ resource "aws_cloudwatch_log_resource_policy" "xray_spans" {
 resource "aws_xray_trace_segment_destination" "this" {
   destination = "CloudWatchLogs"
 
-  depends_on = [aws_cloudwatch_log_group.spans, aws_cloudwatch_log_resource_policy.xray_spans]
+  depends_on = [aws_cloudwatch_log_resource_policy.xray_spans]
 }
 
 # Every span is searchable in the logs. On top of that a share of the traces is indexed as trace
