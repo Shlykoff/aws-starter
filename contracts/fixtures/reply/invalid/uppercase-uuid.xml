@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Reply xmlns="urn:aws-starter:reply:v1" version="1">
+  <MessageId>3F2B8C1E-5A4D-4E7B-9C1A-2D6E8F0A1B3C</MessageId>
+  <RelatesTo>01M30JDSMHY8CRX59V35WV731S</RelatesTo>
+  <ReceivedAt>2026-09-20T23:29:08.000Z</ReceivedAt>
+  <Result><Status>Accepted</Status></Result>
+</Reply>

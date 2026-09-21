@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The recipient's answer to one submission. `Code` and `Description` are present only when
+  the status is Rejected: XSD 1.0 cannot express that rule, so the recipient guarantees it
+  and the sender checks it (contracts/README.md).
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:aws-starter:reply:v1"
+           xmlns:c="urn:aws-starter:common:v1"
+           targetNamespace="urn:aws-starter:reply:v1"
+           elementFormDefault="qualified">
+
+  <xs:import namespace="urn:aws-starter:common:v1" schemaLocation="common-types.xsd"/>
+
+  <xs:element name="Reply">
+    <xs:complexType>
+      <xs:sequence>
+        <!-- The recipient's own id of this answer. -->
+        <xs:element name="MessageId" type="c:Uuid"/>
+        <!-- The MessageId of the submission. Absent when the submission was so broken that
+             no id could be read from it. -->
+        <xs:element name="RelatesTo" type="c:Ulid" minOccurs="0"/>
+        <xs:element name="ReceivedAt" type="xs:dateTime"/>
+        <xs:element name="Result" type="Result"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="c:Version" use="required"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="Result">
+    <xs:sequence>
+      <xs:element name="Status" type="Status"/>
+      <xs:element name="Code" type="Code" minOccurs="0"/>
+      <xs:element name="Description" type="c:Text500" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:simpleType name="Status">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Accepted"/>
+      <xs:enumeration value="Rejected"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    Why a submission was rejected:
+      MALFORMED_XML       not well-formed, or it carries a DOCTYPE (not allowed at all)
+      SCHEMA_INVALID      well-formed, but violates submission.xsd
+      RECIPIENT_REJECTED  valid, but the recipient's own rules refuse it
+  -->
+  <xs:simpleType name="Code">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="MALFORMED_XML"/>
+      <xs:enumeration value="SCHEMA_INVALID"/>
+      <xs:enumeration value="RECIPIENT_REJECTED"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>

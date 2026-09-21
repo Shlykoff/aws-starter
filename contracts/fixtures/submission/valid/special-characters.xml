@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Submission xmlns="urn:aws-starter:submission:v1" version="1">
+  <Header>
+    <MessageId>01M30JDSMHY8CRX59V35WV731V</MessageId>
+    <SentAt>2026-09-20T23:29:07.123Z</SentAt>
+    <Sender><Name>aws-starter</Name></Sender>
+    <Recipient><Name>Smith &amp; Sons, Inc.</Name></Recipient>
+  </Header>
+  <Content>
+    <Subject>Fish &amp; chips &lt;3 &quot;quotes&quot; 'apostrophe'</Subject>
+    <Text>Line one
+	indented &gt; line two &amp; done</Text>
+  </Content>
+</Submission>

@@ -1,0 +1,11 @@
+# Local leftovers of running the tests or the linter outside Docker.
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Settings with real values (the example file is committed) and any database file.
+.env
+*.db
+*.db-wal
+*.db-shm

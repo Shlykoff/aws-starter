@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The message the sender delivers to the recipient: who sends it, who should get it, and the
+  content. Split over two files on purpose: the shared types come from common-types.xsd
+  through xs:import, as in real schema sets.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:aws-starter:submission:v1"
+           xmlns:c="urn:aws-starter:common:v1"
+           targetNamespace="urn:aws-starter:submission:v1"
+           elementFormDefault="qualified">
+
+  <xs:import namespace="urn:aws-starter:common:v1" schemaLocation="common-types.xsd"/>
+
+  <xs:element name="Submission">
+    <xs:complexType>
+      <!-- These elements, in this order, once each. -->
+      <xs:sequence>
+        <xs:element name="Header" type="Header"/>
+        <xs:element name="Content" type="Content"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="c:Version" use="required"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="Header">
+    <xs:sequence>
+      <xs:element name="MessageId" type="c:Ulid"/>
+      <xs:element name="SentAt" type="xs:dateTime"/>
+      <xs:element name="Sender" type="Party"/>
+      <xs:element name="Recipient" type="Party"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Party">
+    <xs:sequence>
+      <xs:element name="Name" type="c:PartyName"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="Content">
+    <xs:sequence>
+      <xs:element name="Subject" type="c:Text200"/>
+      <xs:element name="Text" type="c:Text5000"/>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>

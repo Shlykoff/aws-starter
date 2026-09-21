@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Message {{ m.id }} - Partner simulator{% endblock %}
+
+{% block content %}
+  <p><a href="/">&larr; Back to the inbox</a></p>
+  <h1>
+    Message #{{ m.id }}
+    {% if m.outcome == "accepted" %}
+      <span class="badge ok">Accepted</span>
+    {% else %}
+      <span class="badge bad">Rejected &middot; {{ m.code }}</span>
+    {% endif %}
+  </h1>
+
+  <dl class="facts">
+    <dt>Received</dt><dd>{{ m.received_at|utc_text }} UTC</dd>
+    <dt>MessageId</dt><dd>{{ m.message_id if m.message_id is not none else "(not readable)" }}</dd>
+    <dt>Recipient</dt><dd>{{ m.recipient if m.recipient is not none else "(not readable)" }}</dd>
+    <dt>Subject</dt><dd>{{ m.subject if m.subject is not none else "(not readable)" }}</dd>
+    <dt>HTTP status sent</dt><dd>{{ m.http_status }}</dd>
+  </dl>
+
+  <h2>Validation findings</h2>
+  {% if m.problems %}
+    <table>
+      <thead><tr><th>Line</th><th>Finding</th></tr></thead>
+      <tbody>
+        {% for p in m.problems %}
+          <tr><td class="nowrap">{{ p.line if p.line is not none else "-" }}</td><td>{{ p.message }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">None: the message passed every check.</p>
+  {% endif %}
+
+  <h2>Received XML <span class="muted">re-indented for reading; the stored text is unchanged</span></h2>
+  {# Escaped by Jinja (autoescape is on): markup in a message is shown as text, never run. #}
+  <pre>{{ request_xml }}</pre>
+
+  <h2>Reply sent</h2>
+  <pre>{{ reply_xml }}</pre>
+{% endblock %}

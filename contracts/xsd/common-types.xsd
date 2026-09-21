@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Types shared by the submission and the reply schemas. It has no elements of its own, so
+  no document ever uses this namespace: the other two schemas only borrow its types
+  (xs:import). Version 1 is immutable: a change means a new namespace and a new file.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="urn:aws-starter:common:v1"
+           elementFormDefault="qualified">
+
+  <!-- ULID: 26 characters of Crockford base32 (digits and letters without I, L, O, U). -->
+  <xs:simpleType name="Ulid">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9A-HJKMNP-TV-Z]{26}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- UUID in its lower-case textual form. -->
+  <xs:simpleType name="Uuid">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+    The name of a party. Deliberately stricter than the sender's own API, which accepts any
+    text of 1-100 characters: the recipient owns this rule. Letters, digits, space and . , ' &amp; -
+  -->
+  <xs:simpleType name="PartyName">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+      <xs:maxLength value="100"/>
+      <xs:pattern value="[\p{L}\p{N} .,'&amp;-]+"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Text200">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+      <xs:maxLength value="200"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Text500">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+      <xs:maxLength value="500"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Text5000">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1"/>
+      <xs:maxLength value="5000"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- The schema version carried by the root element of a message. -->
+  <xs:simpleType name="Version">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="1"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>

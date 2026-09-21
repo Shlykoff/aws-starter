@@ -1,0 +1,21 @@
+# Tool settings only; the application is not built as a package.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets the tests do `from app... import ...` when pytest runs from partner-sim/.
+pythonpath = ["."]
+addopts = "-ra -p no:cacheprovider"
+filterwarnings = [
+    # Starlette 1.x would like its TestClient to run on `httpx2`. The brief allows `httpx`, and
+    # the TestClient still works with it, so these two known warnings are silenced.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, import order, bugbear, pyupgrade: a small, familiar set.
+select = ["E", "F", "I", "B", "UP"]

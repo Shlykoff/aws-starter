@@ -1,0 +1,37 @@
+{
+  "_comment": "What a recipient must answer for each fixture: valid, or the reply Code for a rejection. The Node and the Python side both check every file listed here.",
+  "submission": {
+    "invalid/doctype-entity-expansion.xml": "MALFORMED_XML",
+    "invalid/doctype-external-entity.xml": "MALFORMED_XML",
+    "invalid/message-id-bad-character.xml": "SCHEMA_INVALID",
+    "invalid/message-id-lowercase.xml": "SCHEMA_INVALID",
+    "invalid/missing-content.xml": "SCHEMA_INVALID",
+    "invalid/missing-version.xml": "SCHEMA_INVALID",
+    "invalid/not-well-formed.xml": "MALFORMED_XML",
+    "invalid/not-xml.xml": "MALFORMED_XML",
+    "invalid/recipient-pattern.xml": "SCHEMA_INVALID",
+    "invalid/recipient-too-long.xml": "SCHEMA_INVALID",
+    "invalid/sent-at-not-a-date.xml": "SCHEMA_INVALID",
+    "invalid/subject-empty.xml": "SCHEMA_INVALID",
+    "invalid/subject-too-long.xml": "SCHEMA_INVALID",
+    "invalid/unknown-element.xml": "SCHEMA_INVALID",
+    "invalid/wrong-element-order.xml": "SCHEMA_INVALID",
+    "invalid/wrong-namespace.xml": "SCHEMA_INVALID",
+    "invalid/wrong-version.xml": "SCHEMA_INVALID",
+    "valid/boundary-lengths.xml": "valid",
+    "valid/cyrillic.xml": "valid",
+    "valid/emoji-text.xml": "valid",
+    "valid/minimal.xml": "valid",
+    "valid/special-characters.xml": "valid"
+  },
+  "reply": {
+    "invalid/bad-code.xml": "SCHEMA_INVALID",
+    "invalid/bad-status.xml": "SCHEMA_INVALID",
+    "invalid/description-too-long.xml": "SCHEMA_INVALID",
+    "invalid/missing-result.xml": "SCHEMA_INVALID",
+    "invalid/uppercase-uuid.xml": "SCHEMA_INVALID",
+    "valid/accepted.xml": "valid",
+    "valid/rejected-schema-invalid.xml": "valid",
+    "valid/rejected-without-relates-to.xml": "valid"
+  }
+}

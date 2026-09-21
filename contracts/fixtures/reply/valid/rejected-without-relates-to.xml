@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Reply xmlns="urn:aws-starter:reply:v1" version="1">
+  <MessageId>3f2b8c1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c</MessageId>
+  <ReceivedAt>2026-09-20T23:29:08.000Z</ReceivedAt>
+  <Result><Status>Rejected</Status><Code>MALFORMED_XML</Code><Description>The document is not well-formed XML</Description></Result>
+</Reply>

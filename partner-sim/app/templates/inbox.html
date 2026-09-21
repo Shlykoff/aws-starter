@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block head %}
+  {# The page reloads itself, so a new message shows up without a click. #}
+  <meta http-equiv="refresh" content="5">
+{% endblock %}
+
+{% block content %}
+  <section class="box">
+    <h2>How to send a message</h2>
+    <p>POST one XML document to <code>{{ endpoint }}</code> with the API key in the
+       <code>X-API-Key</code> header:</p>
+    <pre>curl -i -X POST '{{ endpoint }}' \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  -H 'Content-Type: application/xml' \
+  --data-binary @message.xml</pre>
+    <p class="muted">You can also send one by hand from <a href="/docs">/docs</a>.
+       A Subject containing <code>[reject]</code> is refused (422); one containing
+       <code>[fail]</code> gets a 503 that is not stored.</p>
+  </section>
+
+  <h2>Inbox <span class="muted">the newest {{ rows|length }}, refreshed every 5 seconds</span></h2>
+  {% if rows %}
+    <table>
+      <thead>
+        <tr>
+          <th>Received (UTC)</th><th>MessageId</th><th>Recipient</th><th>Subject</th>
+          <th>Outcome</th><th>HTTP</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in rows %}
+          <tr>
+            <td class="nowrap"><a href="/messages/{{ m.id }}">{{ m.received_at|utc_text }}</a></td>
+            <td><code>{{ m.message_id|truncate(30, True) if m.message_id else "-" }}</code></td>
+            <td>{{ m.recipient|truncate(30, True) if m.recipient else "-" }}</td>
+            <td>{{ m.subject|truncate(50, True) if m.subject else "-" }}</td>
+            <td>
+              {% if m.outcome == "accepted" %}
+                <span class="badge ok">Accepted</span>
+              {% else %}
+                <span class="badge bad">Rejected &middot; {{ m.code }}</span>
+              {% endif %}
+            </td>
+            <td>{{ m.http_status }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">Nothing has arrived yet. Send a message with the example above.</p>
+  {% endif %}
+{% endblock %}

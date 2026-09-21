@@ -1,0 +1,21 @@
+# The build context is the repository root, which holds node_modules, .git, Terraform state and
+# more. So this file is an allow-list: everything is left out except what the Dockerfile copies.
+# (BuildKit reads "<Dockerfile name>.dockerignore" next to the Dockerfile before the one in the
+# root of the context. The legacy builder does not; Docker Desktop and Compose v2 use BuildKit.)
+*
+
+!contracts/xsd/
+!partner-sim/app/
+!partner-sim/tests/
+!partner-sim/requirements.txt
+!partner-sim/requirements-dev.txt
+!partner-sim/pyproject.toml
+
+# Then again, inside the folders allowed above:
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/*.db
+**/*.db-wal
+**/*.db-shm
