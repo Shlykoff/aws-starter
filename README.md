@@ -405,7 +405,9 @@ Written down as they are made; each stage adds its own.
   the spans are kept as logs (`aws/spans`, 30 days, all of them), 1 % of the traces are indexed for the
   X-Ray console (free). The DynamoDB stream and the HTTP webhook carry no trace, so the code stores a W3C
   `traceparent` on the request item and passes it in the queue message; only the OpenTelemetry API is in
-  the code, which does nothing without the layer. Found on the way, and measured: with the layer a
+  the code, which does nothing without the layer. Lambda's own tracing does not join the consumer of a
+  queue message to the message's trace, it only links a new one (seen on AWS), so the worker takes the
+  parent from the message itself. Found on the way, and measured: with the layer a
   cold start is about a second longer (0.3 to 0.4 s before, 1.1 to 2.4 s after) and a function uses about
   100 MB more (so 512 MB, not 256); and the XML validator's worker threads each started the whole SDK
   again (a warm webhook 1.7 s instead of 0.75 s), fixed in the build. Rejected: the X-Ray SDK (in

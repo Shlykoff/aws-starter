@@ -18,6 +18,8 @@ export const handler = async (event: SQSEvent, context: Context): Promise<SQSBat
     // SQS sends the count as a string. If it were ever not a number, NaN >= max is false, so
     // the message is simply never treated as the last attempt (it goes to the DLQ anyway).
     receiveCount: Number(record.attributes.ApproximateReceiveCount),
+    // The trace of the request, put on the message by the enqueuer (absent on an older message).
+    traceHeader: record.attributes.AWSTraceHeader,
   }));
 
   const result = await service.deliver(jobs, log);

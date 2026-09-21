@@ -113,6 +113,27 @@ export function toXRayTraceHeader(traceparent: string | undefined): string | und
   return `Root=1-${parsed.traceId.slice(0, 8)}-${parsed.traceId.slice(8)};Parent=${parsed.spanId};Sampled=${sampled}`;
 }
 
+// The AWSTraceHeader that SQS hands to the consumer of a message: what `toXRayTraceHeader` wrote,
+// read back. Fields SQS or X-Ray may add are ignored; anything that is not exactly this is not a trace.
+const XRAY_ROOT = /^1-([0-9a-f]{8})-([0-9a-f]{24})$/;
+const SPAN_ID = /^[0-9a-f]{16}$/;
+
+/**
+ * A context whose "parent span" is the one named by the AWSTraceHeader of a queue message
+ * (`toXRayTraceHeader` the other way round). `undefined` for anything else, so a bad or missing
+ * header means "no parent", never an error.
+ */
+export function contextFromXRayTraceHeader(value: unknown): Context | undefined {
+  if (typeof value !== "string") return undefined;
+  const fields = new Map(value.split(";").map((part) => part.trim().split("=", 2) as [string, string | undefined]));
+  const root = XRAY_ROOT.exec(fields.get("Root") ?? "");
+  const parent = fields.get("Parent") ?? "";
+  const sampled = fields.get("Sampled");
+  if (root === null || !SPAN_ID.test(parent) || (sampled !== "0" && sampled !== "1")) return undefined;
+  // Through the traceparent reader: it also refuses all-zero ids.
+  return contextFromTraceparent(`00-${root[1]}${root[2]}-${parent}-0${sampled}`);
+}
+
 // --- Spans -----------------------------------------------------------------------------------
 
 export interface SpanOptions {

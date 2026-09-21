@@ -11,7 +11,7 @@ import { buildSubmissionXml } from "../domain/submission-xml";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
 import { logRequestEvent } from "../lib/request-events";
-import { withSpan } from "../lib/tracing";
+import { contextFromXRayTraceHeader, withSpan } from "../lib/tracing";
 import type { ApiKeyProvider } from "../repositories/api-key-provider";
 import type { DeliveryRepository } from "../repositories/delivery-repository";
 import type { ExchangeStore } from "../repositories/exchange-store";
@@ -23,6 +23,12 @@ export interface DeliveryJob {
   body: string;
   /** How many times SQS has handed this message out, this delivery included (starts at 1). */
   receiveCount: number;
+  /**
+   * The AWSTraceHeader of the message (the enqueuer put it there): the trace of the request. SQS
+   * hands it to Lambda, whose own tracing only LINKS the invocation to that trace, so the code
+   * makes its spans a part of it (`deliver request`). Left out for a message without one.
+   */
+  traceHeader?: string;
 }
 
 // What happened to one message. The first four acknowledge the message (SQS deletes it);
@@ -125,7 +131,15 @@ export class DeliveryService {
 
     const messageLog = log.child({ requestId: message.requestId });
     try {
-      return await this.process(message, job.receiveCount, messageLog);
+      // One span for the whole attempt, in the trace of the request: everything the attempt does
+      // (its calls to DynamoDB, S3, SSM, SNS and the recipient) is nested in it, and the request
+      // events it logs carry that trace's id. Without a header the span starts a trace of its own.
+      return await withSpan(
+        "deliver request",
+        { requestId: message.requestId, attempt: job.receiveCount },
+        () => this.process(message, job.receiveCount, messageLog),
+        { parent: contextFromXRayTraceHeader(job.traceHeader) },
+      );
     } catch (error) {
       // Anything unexpected: DynamoDB, S3 or SSM unavailable, missing permissions, a bug. The
       // message is reported as failed and comes back later. This deliberately does NOT

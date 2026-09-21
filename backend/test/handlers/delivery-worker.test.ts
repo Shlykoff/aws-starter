@@ -14,6 +14,8 @@ import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
 import { sqsEvent, sqsRecord } from "../helpers/pipeline-events";
+import { STORED_SPAN_ID, STORED_TRACE_ID, parentIdOf, recordSpans } from "../helpers/tracing";
+import { toXRayTraceHeader } from "../../src/lib/tracing";
 
 // The real handler, service, adapters, XSD validator (libxml2 as WebAssembly, the real schema
 // files) and container. Replaced: the AWS SDK's `send` (DynamoDB by an in-memory table, SNS,
@@ -470,5 +472,32 @@ describe("delivery-worker: logging", () => {
     for (const secret of [CANARY, API_KEY, "<Submission", "<Reply", "is wrong"]) {
       expect(everything).not.toContain(secret);
     }
+  });
+});
+
+describe("delivery-worker: the trace of the request", () => {
+  const spans = recordSpans();
+  const traceHeader = toXRayTraceHeader(`00-${STORED_TRACE_ID}-${STORED_SPAN_ID}-01`);
+
+  it("continues the trace that the message carries: its spans and the request events it logs are in it", async () => {
+    seed(1);
+
+    await run(sqsRecord({ messageId: "msg-1", requestId: idNumber(1), traceHeader }));
+
+    const attempt = spans.only("deliver request");
+    expect(attempt.spanContext().traceId).toBe(STORED_TRACE_ID);
+    expect(parentIdOf(attempt)).toBe(STORED_SPAN_ID);
+    // The container wraps the partner client, the store and the repositories: their spans are in it too.
+    expect(spans.only("partner.send").spanContext().traceId).toBe(STORED_TRACE_ID);
+    const sent = logs.entries().find((entry) => entry.event === "request_sent");
+    expect(sent?.traceId).toBe(STORED_TRACE_ID);
+  });
+
+  it("makes no trace of the request for a message without a header", async () => {
+    seed(1);
+
+    await run(message(1));
+
+    expect(spans.only("deliver request").spanContext().traceId).not.toBe(STORED_TRACE_ID);
   });
 });

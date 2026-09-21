@@ -58,6 +58,8 @@ export function sqsRecord(options: {
   /** Replaces the JSON body, for malformed messages. */
   body?: string;
   receiveCount?: number;
+  /** The AWSTraceHeader system attribute (X-Ray's format): the trace the enqueuer put on the message. */
+  traceHeader?: string;
 }): SQSRecord {
   return {
     messageId: options.messageId,
@@ -73,6 +75,7 @@ export function sqsRecord(options: {
       SentTimestamp: "1789984800000",
       SenderId: "test-sender",
       ApproximateFirstReceiveTimestamp: "1789984800100",
+      ...(options.traceHeader !== undefined && { AWSTraceHeader: options.traceHeader }),
     },
     messageAttributes: {},
     md5OfBody: "not-checked",
