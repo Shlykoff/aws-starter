@@ -327,10 +327,11 @@ checks ownership in the table before it touches S3).
 | `enqueuer` | DynamoDB stream | `UpdateItem` | stream read; `sqs:SendMessage` on the queue; `sns:Publish` on `alerts` |
 | `delivery-worker` | SQS queue | `GetItem`, `UpdateItem` | queue receive/delete/attributes; `sns:Publish` on `request-status`; `s3:PutObject` on `exchanges/*`; `ssm:GetParameter` on the API key parameter |
 | `receive-webhook` | `POST /webhooks/partner` (public) | `Query` on `by-request-id`, `UpdateItem` | `ssm:GetParameter` on the webhook token parameter |
+| `log-archiver` | CloudWatch Logs subscription (asynchronous) | | `s3:PutObject` on `logs/*` of the log archive bucket |
 | `get-exchange` | `GET /requests/{id}/exchange` | `GetItem` | `s3:GetObject` on `exchanges/*`; `s3:ListBucket` on the bucket (without it S3 answers a missing key with 403 instead of 404; a prefix condition would not help, a GetObject request carries no prefix) |
 
 - Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. Timeouts:
-  API functions, `receive-webhook` and `enqueuer` 10 s, `delivery-worker` 15 s.
+  API functions, `receive-webhook`, `enqueuer` and `log-archiver` 10 s, `delivery-worker` 15 s.
 - The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
   event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
 - API events: HTTP API payload format 2.0 with JWT authorizer
@@ -341,7 +342,7 @@ checks ownership in the table before it touches S3).
   `TABLE_NAME`, `QUEUE_URL`; `delivery-worker` `TABLE_NAME`, `PARTNER_URL`,
   `PARTNER_API_KEY_PARAM`, `SENDER_NAME` (default `aws-starter`), `TOPIC_ARN` (request-status),
   `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`; `receive-webhook` `TABLE_NAME`, `WEBHOOK_TOKEN_PARAM` (the
-  SSM parameter name).
+  SSM parameter name); `log-archiver` `ARCHIVE_BUCKET` (no table).
 - The XSD files of `contracts/xsd/` are copied into the package of every function that needs
   them (`schemas/` next to `index.mjs`) by the build; the packaged copy is the sender's own copy
   of the contract.
@@ -421,13 +422,20 @@ Logs older than the 30 days of CloudWatch Logs are kept in S3 for **395 days** (
 queried with Athena. The logs hold no personal data (the log guard, "Logs"), so a long archive is safe.
 
 - **Pipeline** (module `infra/modules/log-archive`): a subscription filter on every Lambda log group
-  and on the API access log group (empty pattern: everything) sends each batch of log events to a
-  Firehose stream, which decompresses it, puts a newline after each record and writes it to S3,
-  gzip-compressed, every 5 minutes or 5 MB: `s3://<project>-<env>-log-archive-<account id>/logs/year=YYYY/month=MM/day=DD/`.
-  One line is the envelope CloudWatch Logs sends: `messageType`, `owner` (the AWS account id, which is
+  and on the API access log group (empty pattern: everything) invokes the `log-archiver` function
+  with each batch of log events. The function writes the batch to S3, gzip-compressed, one JSON
+  object per line: `s3://<project>-<env>-log-archive-<account id>/logs/year=YYYY/month=MM/day=DD/<hash>.json.gz`.
+  A line is the envelope CloudWatch Logs sends: `messageType`, `owner` (the AWS account id, which is
   why the bucket is private), `logGroup`, `logStream`, `logEvents[]` (`id`, `timestamp` in
-  milliseconds, `message`). A Firehose delivery failure is written to its own log group,
-  `/aws/kinesisfirehose/<project>-<env>-log-archive`, and the failed records to `errors/`.
+  milliseconds, `message`). A batch that spans midnight (UTC) becomes one object per day, so a line is
+  filed under the day it was logged. The object name is the hash of its content: a batch delivered
+  twice (Lambda retries a failed asynchronous invocation twice) overwrites itself, so no line is
+  archived twice. CloudWatch's `CONTROL_MESSAGE` health check is not written.
+- **Failure modes**: the archive is a copy, the lines are still in CloudWatch Logs for 30 days. A
+  batch that fails all three tries (an S3 outage of minutes) is dropped, and nothing is queued for
+  later. The archiver's own log group is not archived (it would trigger itself; Terraform refuses to
+  subscribe it). There is no alarm on it: the account is at the 10 free alarms. Its runs and errors
+  are on the dashboard `<project>-<env>-delivery`.
 - **Only what is logged after the archive exists is in it**: there is no backfill of older lines.
 - **Querying**: Athena workgroup `<project>-<env>-logs` (a fixed result location under
   `athena-results/`, kept 7 days, and a **1 GB scan limit per query**), Glue database
@@ -437,7 +445,7 @@ queried with Athena. The logs hold no personal data (the log guard, "Logs"), so 
   counterpart of the Logs Insights query in "Logs") and failed requests per day. A line is
   `timestamp<TAB>requestId<TAB>LEVEL<TAB>{json}`, so the queries take the JSON out of `message` with
   `regexp_extract` first.
-- **Cost**: Firehose has no free tier (about $0.03 per GB ingested, at least 5 KB per record), S3 and
-  Athena are billed by use; at a few MB of logs a month the archive costs cents. Standard-IA is not
-  used: it bills at least 128 KB per object and the objects here are tiny.
+- **Cost**: the function's runs are inside the always-free Lambda allowance; S3 PUT requests, S3
+  storage and Athena are billed by use, and at a few MB of logs a month the archive costs cents.
+  Standard-IA is not used: it bills at least 128 KB per object and the objects here are tiny.
 

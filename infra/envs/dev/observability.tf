@@ -30,6 +30,8 @@ module "observability" {
   webhook_function_name  = module.function["receive-webhook"].name
   webhook_log_group_name = module.function["receive-webhook"].log_group_name
 
+  archiver_function_name = module.log_archive.archiver_function_name
+
   api_id     = module.api.api_id
   queue_name = module.deliveries_queue.name
   dlq_name   = module.deliveries_queue.dlq_name

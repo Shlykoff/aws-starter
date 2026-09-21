@@ -33,8 +33,8 @@ resource "aws_glue_catalog_table" "this" {
     # reading them from the catalog, so there is no crawler and no MSCK REPAIR, and a new day
     # is queryable the moment its first object exists. The keys are strings, as in AWS's
     # documented Hive-layout examples; the integer type with `digits` yields the zero-padded
-    # names Firehose writes (month=09). The path is built from the table location and the
-    # key names (logs/year=2026/month=09/day=21/), which is the layout Firehose writes.
+    # names the archiver writes (month=09). The path is built from the table location and the
+    # key names (logs/year=2026/month=09/day=21/), which is the layout of the archiver's keys.
     "projection.enabled"      = "true"
     "projection.year.type"    = "integer"
     "projection.year.range"   = "2026,2035" # short on purpose (a query without a year filter lists every projected day in S3); extend it before 2036
@@ -79,9 +79,10 @@ resource "aws_glue_catalog_table" "this" {
       }
     }
 
-    # The envelope CloudWatch Logs sends (the Firehose comment in main.tf).
+    # The envelope CloudWatch Logs sends, which the archiver writes as it is (only `logevents` is
+    # split by day).
     columns {
-      name = "messagetype" # DATA_MESSAGE, or CONTROL_MESSAGE for the subscription's health check
+      name = "messagetype" # always DATA_MESSAGE: the archiver does not write CloudWatch's CONTROL_MESSAGE health check
       type = "string"
     }
 
@@ -163,8 +164,9 @@ resource "aws_athena_named_query" "request_timeline" {
 
   query = <<-SQL
     -- The timeline of one request. Edit the request id and the date range.
-    -- The archive's day is the day Firehose wrote the object (UTC), not the day of the line:
-    -- take a day more at each end. For a range across two months, use OR groups, e.g.
+    -- The archive's day is the day of the line (UTC). A request that was sent again days later has
+    -- lines on several days: take the range that covers them. For a range across two months,
+    -- use OR groups, e.g.
     --   (year = '2026' AND month = '08' AND day >= '30') OR (year = '2026' AND month = '09' AND day <= '02')
     WITH log_lines AS (
       SELECT

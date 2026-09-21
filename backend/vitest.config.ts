@@ -15,6 +15,7 @@ export default defineConfig({
       WEBHOOK_TOKEN_PARAM: "/test/webhook-token",
       TOPIC_ARN: "arn:aws:sns:eu-north-1:000000000000:test-request-status",
       AUDIT_BUCKET: "test-deliveries",
+      ARCHIVE_BUCKET: "test-log-archive",
       MAX_RECEIVE_COUNT: "5",
       AWS_REGION: "eu-north-1",
       // A log call the guard would have to change fails the test (lib/logger.ts, log-fields.ts).

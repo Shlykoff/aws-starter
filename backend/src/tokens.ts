@@ -11,6 +11,7 @@ export const TOKENS = {
   EnqueuerConfig: Symbol("EnqueuerConfig"),
   WorkerConfig: Symbol("WorkerConfig"),
   WebhookConfig: Symbol("WebhookConfig"),
+  ArchiverConfig: Symbol("ArchiverConfig"),
 
   Logger: Symbol("Logger"),
 
@@ -27,6 +28,7 @@ export const TOKENS = {
   DeliveryQueue: Symbol("DeliveryQueue"),
   StatusNotifier: Symbol("StatusNotifier"),
   ExchangeStore: Symbol("ExchangeStore"),
+  LogArchiveStore: Symbol("LogArchiveStore"),
   ApiKeyProvider: Symbol("ApiKeyProvider"),
   DecisionRepository: Symbol("DecisionRepository"),
   WebhookToken: Symbol("WebhookToken"), // a SecretProvider
@@ -39,4 +41,5 @@ export const TOKENS = {
   DeliveryService: Symbol("DeliveryService"),
   ExchangeService: Symbol("ExchangeService"),
   WebhookService: Symbol("WebhookService"),
+  LogArchiveService: Symbol("LogArchiveService"),
 } as const;

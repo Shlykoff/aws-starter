@@ -17,3 +17,8 @@ output "athena_table" {
   description = "Glue table over the archive (partitioned by year, month and day)."
   value       = aws_glue_catalog_table.this.name
 }
+
+output "archiver_function_name" {
+  description = "Name of the archiver function (dimension of its Lambda metrics)."
+  value       = module.archiver.name
+}

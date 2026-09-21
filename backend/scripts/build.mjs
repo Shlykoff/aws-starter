@@ -20,6 +20,7 @@ const functions = [
   "enqueuer",
   "delivery-worker",
   "receive-webhook",
+  "log-archiver",
 ];
 
 // Functions that validate XML. get-exchange only hands a stored record back, so it needs

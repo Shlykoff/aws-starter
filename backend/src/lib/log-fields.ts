@@ -130,6 +130,7 @@ const FIELDS: Record<string, Check> = {
   receiveCount: finiteNumber,
   problemCount: finiteNumber,
   records: finiteNumber,
+  objects: nonNegativeNumber, // how many objects a log batch was written to (log-archiver)
   messages: finiteNumber,
   sent: finiteNumber,
   rejected: finiteNumber,

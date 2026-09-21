@@ -1,6 +1,7 @@
 # Long-term log archive (modules/log-archive): every line of every function's log group and of
-# the API access log is copied to S3 within minutes and kept for 13 months. CloudWatch Logs
-# stays the hot tier with its own, shorter retention; this is the cold one, queried with Athena.
+# the API access log is copied to S3 within seconds (by a small Lambda of ours) and kept for 13
+# months. CloudWatch Logs stays the hot tier with its own, shorter retention; this is the cold
+# one, queried with Athena.
 #
 # How to query (the names are in the outputs below): run Athena in the workgroup
 # <project>-<env>-logs, database <project>_<env>_logs (dashes become underscores), table
@@ -12,6 +13,9 @@ module "log_archive" {
   source = "../../modules/log-archive"
 
   prefix = local.prefix
+
+  archiver_source_dir = "${var.backend_dist_dir}/log-archiver"
+  environment         = local.common_environment
 
   # One subscription filter per entry. The names come from the modules that create the groups,
   # so a renamed function cannot leave its group out of the archive. The labels only have to be
