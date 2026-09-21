@@ -327,6 +327,15 @@ Written down as they are made; each stage adds its own.
 - **The recipient's side of the action is a person, not a timer.** In `partner-sim` two buttons send
   the event, one attempt per click, and "Send again" repeats the same event, which is how the
   receiver's idempotency is seen.
+- **The logs are guarded by the logger, not only by care.** The rule "no message text, names,
+  reasons or tokens in a log" was a convention for whoever writes a log call. Now every field is on
+  a list with a shape for its value (an id, a word from a closed list, a number), anything else is
+  written as `[unlisted]` or `[rejected]` with the value dropped, and the text of an error has its
+  quoted pieces replaced (parsers quote the value that failed them: `Unexpected token 'a', "..."`).
+  In tests the guard throws, so a wrong log call fails the build. The shape matters as much as the
+  name: `reason` is a fixed word in the worker and free text in an event from the recipient. Rejected:
+  a list of forbidden names (it fails the day somebody picks another name), and CloudWatch's data
+  protection policies (billed per GB scanned, so not free).
 
 ## Limits
 
@@ -342,6 +351,11 @@ Written down as they are made; each stage adds its own.
   only by the owner of the request. Logs are designed to carry no message text; a full review of
   them is still to do.
 - Both validators are libxml2 (see Decisions).
+- The log guard knows shapes, not meaning: a one-word value in a field that takes a word passes, and
+  the text of an error is scrubbed of quotes and capped but not otherwise inspected. It covers the
+  Lambdas. The recipient writes to its container's output, and the ngrok tunnel ends TLS and shows
+  the full bodies in its inspector (`127.0.0.1:4040`) and to ngrok itself: fine for fake data, not for
+  real data.
 - Sending again has no limit on how often it is used, and only a `failed` request can be sent
   again. There is no tool to redrive the DLQ: an operator moves those messages by hand.
 - The webhook is authenticated by a shared token, and rotating it is a manual step on both sides.

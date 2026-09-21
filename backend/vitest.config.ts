@@ -17,6 +17,8 @@ export default defineConfig({
       AUDIT_BUCKET: "test-deliveries",
       MAX_RECEIVE_COUNT: "5",
       AWS_REGION: "eu-north-1",
+      // A log call the guard would have to change fails the test (lib/logger.ts, log-fields.ts).
+      LOG_STRICT: "1",
     },
     // Put console.* and other spies back to the originals after every test.
     restoreMocks: true,

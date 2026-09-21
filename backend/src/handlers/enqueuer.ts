@@ -13,7 +13,7 @@ import { TOKENS } from "../tokens";
 const service = container.get<EnqueueService>(TOKENS.EnqueueService);
 const logger = container.get<Logger>(TOKENS.Logger);
 
-type ParsedRecord = { entry: EnqueueEntry } | { skipReason: string };
+type ParsedRecord = { entry: EnqueueEntry } | { skipReason: string; invalidFields?: string[] };
 
 // Is this stream record for the queue? Two kinds are:
 //   - INSERT: a new request;
@@ -38,8 +38,8 @@ function isForTheQueue(record: DynamoDBRecord): boolean {
 function parseRecord(record: DynamoDBRecord): ParsedRecord {
   const sequenceNumber = record.dynamodb?.SequenceNumber;
   const image = record.dynamodb?.NewImage;
-  if (sequenceNumber === undefined) return { skipReason: "record has no sequence number" };
-  if (image === undefined) return { skipReason: "record has no NewImage" };
+  if (sequenceNumber === undefined) return { skipReason: "no_sequence_number" };
+  if (image === undefined) return { skipReason: "no_new_image" };
 
   let item: unknown;
   try {
@@ -48,14 +48,14 @@ function parseRecord(record: DynamoDBRecord): ParsedRecord {
     // written, hence the cast.)
     item = unmarshall(image as Record<string, AttributeValue>);
   } catch {
-    return { skipReason: "NewImage could not be unmarshalled" };
+    return { skipReason: "image_not_readable" };
   }
 
   const parsed = newRequestImageSchema.safeParse(item);
   if (!parsed.success) {
     // Only the names of the invalid fields are reported, never their values.
-    const fields = parsed.error.issues.map((issue) => issue.path.join(".")).join(", ");
-    return { skipReason: `invalid NewImage fields: ${fields}` };
+    const invalidFields = parsed.error.issues.map((issue) => issue.path.join("."));
+    return { skipReason: "invalid_image_fields", invalidFields };
   }
   return { entry: { key: sequenceNumber, request: parsed.data } };
 }
@@ -89,6 +89,7 @@ export const handler = async (
       log.error("Skipping a malformed stream record", {
         sequenceNumber: record.dynamodb?.SequenceNumber,
         reason: parsed.skipReason,
+        invalidFields: parsed.invalidFields,
       });
     }
   }
