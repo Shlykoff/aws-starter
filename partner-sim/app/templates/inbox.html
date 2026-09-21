@@ -31,7 +31,7 @@
       <tbody>
         {% for m in rows %}
           <tr>
-            <td class="nowrap"><a href="/messages/{{ m.id }}">{{ m.received_at|utc_text }}</a></td>
+            <td class="nowrap"><a href="/messages/{{ m.id }}">{{ m.received_at|time_tag }}</a></td>
             <td><code>{{ m.message_id|truncate(30, True) if m.message_id else "-" }}</code></td>
             <td>{{ m.recipient|truncate(30, True) if m.recipient else "-" }}</td>
             <td>{{ m.subject|truncate(50, True) if m.subject else "-" }}</td>

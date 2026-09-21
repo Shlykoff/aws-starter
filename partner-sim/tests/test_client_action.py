@@ -345,7 +345,8 @@ def test_a_hostile_reason_is_shown_as_text_never_as_markup(ready, webhook):
     refused = press(ready, "Declined", reason='"><script>alert(2)</script>' + "x" * 500)
 
     for text in (page(ready), refused.text):
-        assert "<script>" not in text and "<img" not in text
+        # our own one script (the local time) and nothing that came from the reason
+        assert "<img" not in text and text.count("<script") == 1
     assert "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;" in page(ready)
     assert etree.fromstring(webhook.requests[0].body).findtext("e:Reason", namespaces=NS) == hostile
 
@@ -461,7 +462,7 @@ def test_reading_a_page_needs_no_origin(ready):
 def test_the_forms_of_the_page_are_allowed_by_the_content_security_policy(ready):
     policy = ready.get("/messages/1", auth=UI_AUTH).headers["content-security-policy"]
 
-    assert "form-action 'self'" in policy and "script-src" not in policy
+    assert "form-action 'self'" in policy and "script-src 'sha256-" in policy
 
 
 # --- The inbox column ----------------------------------------------------------------------------
