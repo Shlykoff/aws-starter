@@ -149,6 +149,31 @@ nothing waits for it and nothing expires.
   request that failed after the archive started, so the query "failed requests per day" has run but
   returned no rows.
 
+- [x] Stage 9: metrics, alarms and a dashboard for the delivery: 8 custom metrics (six counted from the
+  log lines, two durations written by the worker), 10 alarms, one dashboard and six saved Logs
+  Insights queries, all inside the free tier. Checked on AWS: after a live delivery the two duration
+  metrics held exactly the values of the log line (6837 ms until sent, 407 ms for the recipient's
+  answer); six calls with a wrong signature moved the `webhook-unauthorized` alarm to ALARM within a
+  minute and the notification mail arrived; all six saved queries run.
+- [x] Stage 10: a long-term log archive: every log group is copied to S3 by a small Lambda within
+  seconds, kept 13 months and queried with Athena. Checked on AWS: a live delivery loop produced 13
+  objects (78 log events, 10 KB) from the six function log groups and the API access log, each one JSON
+  line; the reason texts sent in that loop are nowhere in them; Athena returned the timeline of the
+  test request (the same six events as Logs Insights). Found only by running it: Firehose is refused by
+  the free account plan (replaced by the Lambda), and the saved queries did not run (fixed). Not seen
+  yet: a request that failed after the archive started, so "failed requests per day" returned no rows.
+- [x] Stage 11: one trace per request. Checked on AWS with one live loop (creation, delivery, three
+  decision events): a single trace of 30 spans holds `create request`, `enqueue request` (from the
+  enqueuer), `deliver request` (from the worker) with each of its calls and their times (DynamoDB, the
+  XML checks about 0.5 and 0.7 s, SSM, the recipient 0.3 s, S3, SNS) and the three `record decision`
+  spans (from the webhook); all six request events carry that trace's id. Not in it, on purpose: the
+  browser and API Gateway (the HTTP API has no X-Ray integration; the trace starts in create-request),
+  the start-up (`Init`) of enqueuer, worker and webhook (it stays in the trace of the invocation), and
+  the polled read functions. Three things were found only by running it and are in the history: the
+  log group `aws/spans` cannot be created by us (AWS reserves the prefix), a worker thread of the XML
+  validator started the tracing SDK again (fixed in the build), and Lambda links the consumer of a
+  queue message to the trace instead of joining it (the worker takes the parent from the message).
+
 ## Try it
 
 ### 1. The recipient, on your computer (two minutes, no AWS needed)
