@@ -14,12 +14,17 @@ const image = {
 };
 
 describe("newRequestImageSchema", () => {
-  it("keeps only the request id, the owner and the partner", () => {
+  it("keeps only the request id, the owner, the partner and the retry count (0 for a new request)", () => {
     expect(newRequestImageSchema.parse(image)).toEqual({
       requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
       ownerId: "user-a",
       partner: "Acme",
+      retryCount: 0,
     });
+  });
+
+  it("reads the retry count of a request that was sent again", () => {
+    expect(newRequestImageSchema.parse({ ...image, retryCount: 3 }).retryCount).toBe(3);
   });
 
   it("ignores the client's decision (clientDecision, decisionAtMs), like every other attribute it does not need", () => {
@@ -33,6 +38,7 @@ describe("newRequestImageSchema", () => {
       requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
       ownerId: "user-a",
       partner: "Acme",
+      retryCount: 0,
     });
   });
 
@@ -51,6 +57,9 @@ describe("newRequestImageSchema", () => {
     ["partner", { partner: undefined }],
     ["partner", { partner: "" }],
     ["partner", { partner: 42 }],
+    ["retryCount", { retryCount: -1 }],
+    ["retryCount", { retryCount: 1.5 }],
+    ["retryCount", { retryCount: "1" }],
   ])("rejects an image with a bad %s", (field, change) => {
     const result = newRequestImageSchema.safeParse({ ...image, ...change });
 

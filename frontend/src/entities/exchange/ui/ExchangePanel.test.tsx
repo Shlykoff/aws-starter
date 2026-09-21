@@ -200,3 +200,23 @@ describe("ExchangePanel shows untrusted text as text", () => {
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 });
+
+describe("ExchangePanel earlier attempt", () => {
+  const note = "This is the earlier attempt; the new one replaces it when it has run.";
+
+  it("says the record is an earlier attempt when the page asks for it", () => {
+    render(<ExchangePanel state={ready(makeExchange())} onRetry={() => undefined} earlierAttempt />);
+
+    expect(screen.getByText(note)).toBeInTheDocument();
+    // The record itself is still shown.
+    expect(screen.getByText("Attempt 1")).toBeInTheDocument();
+  });
+
+  it("says nothing by default, and nothing when there is no record to call earlier", () => {
+    const { rerender } = render(<ExchangePanel state={ready(makeExchange())} onRetry={() => undefined} />);
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+
+    rerender(<ExchangePanel state={{ id: "r1", status: "empty" }} onRetry={() => undefined} earlierAttempt />);
+    expect(screen.queryByText(note)).not.toBeInTheDocument();
+  });
+});

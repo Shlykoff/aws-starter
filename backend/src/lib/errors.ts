@@ -2,7 +2,7 @@
 // src/lib/http.ts is the one place that turns them into status codes.
 
 // The `code` values are the ones docs/api.md promises to clients.
-export type ErrorCode = "validation_error" | "not_found" | "internal_error";
+export type ErrorCode = "validation_error" | "not_found" | "not_retryable" | "internal_error";
 
 export class AppError extends Error {
   constructor(
@@ -26,6 +26,13 @@ export class ValidationError extends AppError {
 export class NotFoundError extends AppError {
   constructor(message = "Request not found") {
     super("not_found", message);
+  }
+}
+
+/** Only a failed request can be sent again (409). The message names the status it has now. */
+export class NotRetryableError extends AppError {
+  constructor(currentStatus: string) {
+    super("not_retryable", `Only a failed request can be sent again (it is ${currentStatus})`);
   }
 }
 

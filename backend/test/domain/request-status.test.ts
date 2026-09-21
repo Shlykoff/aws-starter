@@ -11,7 +11,7 @@ import {
 // changing a rule in src/ means changing it here too, on purpose.
 
 describe("terminal and deliverable statuses", () => {
-  it("sent, rejected and failed are terminal", () => {
+  it("sent, rejected and failed are terminal (final for the worker)", () => {
     expect([...TERMINAL_STATUSES].sort()).toEqual(["failed", "rejected", "sent"]);
     for (const status of ["sent", "rejected", "failed"] as const) {
       expect(isTerminal(status)).toBe(true);
@@ -47,15 +47,21 @@ describe("allowedPreviousStatuses", () => {
     },
   );
 
-  it("created can never be set again", () => {
-    expect(allowedPreviousStatuses("created")).toEqual([]);
+  it("created is set again only from failed (the owner sends a failed request again)", () => {
+    expect(allowedPreviousStatuses("created")).toEqual(["failed"]);
   });
 
-  it("no status may be changed away from a terminal status", () => {
+  it("sent and rejected never change again", () => {
     for (const target of REQUEST_STATUSES) {
-      for (const terminal of TERMINAL_STATUSES) {
-        expect(allowedPreviousStatuses(target)).not.toContain(terminal);
-      }
+      expect(allowedPreviousStatuses(target)).not.toContain("sent");
+      expect(allowedPreviousStatuses(target)).not.toContain("rejected");
+    }
+  });
+
+  it("a failed request can only be moved to created", () => {
+    for (const target of REQUEST_STATUSES) {
+      const movesAwayFromFailed = allowedPreviousStatuses(target).includes("failed");
+      expect(movesAwayFromFailed).toBe(target === "created");
     }
   });
 

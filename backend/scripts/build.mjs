@@ -15,6 +15,7 @@ const functions = [
   "create-request",
   "list-requests",
   "get-request",
+  "retry-request",
   "get-exchange",
   "enqueuer",
   "delivery-worker",

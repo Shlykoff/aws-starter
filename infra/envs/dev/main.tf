@@ -13,6 +13,10 @@ locals {
     list-requests  = { route_key = "GET /requests", dynamodb_action = "dynamodb:Query" }
     get-request    = { route_key = "GET /requests/{id}", dynamodb_action = "dynamodb:GetItem" }
 
+    # Sends a failed request again: one conditional update (failed -> created). It needs no queue
+    # permission: the change reaches the enqueuer through the table's stream, like a new request.
+    retry-request = { route_key = "POST /requests/{id}/retry", dynamodb_action = "dynamodb:UpdateItem" }
+
     # Returns the exchange record (the XML sent and the reply) of a request. The record is in
     # S3; the table is read only to check that the request belongs to the caller.
     get-exchange = {
@@ -257,11 +261,28 @@ resource "aws_lambda_event_source_mapping" "enqueuer" {
   # that is harmless, the queue's deduplication and the worker's status check absorb repeats.
   starting_position = "TRIM_HORIZON"
 
-  # Only new requests. The pipeline's own status updates are MODIFY events, and the
-  # enqueuer must not see them again.
+  # Two kinds of record reach the enqueuer, and nothing else:
+  #  - a new request (INSERT);
+  #  - a request sent again: a MODIFY whose new image has status `created` and a `retryCount`
+  #    (POST /requests/{id}/retry sets both; docs/api.md, "Sending a failed request again").
+  # The pipeline's own status updates (queued, sent, ...) are MODIFY records with another status,
+  # so they are filtered out and cannot loop. Only the new image is in the stream, so "it was
+  # `failed`" cannot be tested here; the API's conditional update guarantees it, and the worst a
+  # stray record can cause is a message that the queue's deduplication drops.
   filter_criteria {
     filter {
       pattern = jsonencode({ eventName = ["INSERT"] })
+    }
+    filter {
+      pattern = jsonencode({
+        eventName = ["MODIFY"]
+        dynamodb = {
+          NewImage = {
+            status     = { S = ["created"] }
+            retryCount = { N = [{ exists = true }] }
+          }
+        }
+      })
     }
   }
 
@@ -428,10 +449,12 @@ resource "aws_ssm_parameter" "webhook_token" {
 # drifting to INSUFFICIENT_DATA.
 # ---------------------------------------------------------------------------
 
-# Anything in the DLQ is a delivery that ran out of attempts and needs a look.
+# Anything in the DLQ is a message that could not be processed (a bug or a broken dependency)
+# and needs a look. A delivery that ran out of attempts is not one: the worker records it as
+# `failed` and acknowledges the message.
 resource "aws_cloudwatch_metric_alarm" "dlq_not_empty" {
   alarm_name        = "${local.prefix}-deliveries-dlq-not-empty"
-  alarm_description = "A delivery message ran out of attempts and is in the dead-letter queue. Inspect it, then redrive or delete it."
+  alarm_description = "A delivery message could not be processed (a malformed message, an unknown request or an error of ours) and is in the dead-letter queue. Inspect it, then redrive or delete it. A delivery that the recipient refused or that ran out of attempts is not here: that is a failed request, with an e-mail and a Send again button."
 
   namespace   = "AWS/SQS"
   metric_name = "ApproximateNumberOfMessagesVisible" # SQS's recommended metric for watching a DLQ

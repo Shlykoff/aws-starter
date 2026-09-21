@@ -38,7 +38,7 @@ describe("RequestStatusBadge", () => {
     );
     expect(screen.getByText("Failed")).toHaveAttribute(
       "title",
-      "Delivery was attempted several times and did not succeed. The request needs attention.",
+      "Delivery was attempted several times and did not succeed. You can send it again.",
     );
     expect(screen.getByText("Sent")).not.toHaveAttribute("title");
   });

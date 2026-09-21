@@ -5,7 +5,7 @@ import type { Logger } from "./lib/logger";
 import { TOKENS } from "./tokens";
 
 // The bindings that more than one function needs. Every function kind has its own container
-// file (container.ts for the create/list/get request functions, container-exchange.ts,
+// file (container.ts for the create/list/get/retry request functions, container-exchange.ts,
 // container-enqueuer.ts and container-worker.ts), because each one:
 //   - validates only ITS OWN environment variables (a function must not fail to start
 //     because a variable of another function is missing), and

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { makeRequest, makeRequestsApi } from "@test/factories";
+import { makeDeferred, makeRequest, makeRequestsApi } from "@test/factories";
 import { ApiError } from "@/shared/api";
 import { RequestsStore } from "./RequestsStore";
 import type { PartnerRequest } from "./types";
@@ -202,6 +202,60 @@ describe("RequestsStore.create", () => {
       code: "validation_error",
     });
     expect(store.items).toEqual([]);
+  });
+});
+
+describe("RequestsStore.retry", () => {
+  // A failed request that the store already knows, as after opening the list.
+  async function setupFailed() {
+    const { api, store } = setup();
+    const failed = makeRequest({ status: "failed" });
+    api.list.mockResolvedValue([failed]);
+    await store.loadList();
+    return { api, store, failed };
+  }
+
+  it("puts the returned request (status created) into the store and raises the flag only while it runs", async () => {
+    const { api, store, failed } = await setupFailed();
+    const answer = makeDeferred<PartnerRequest>();
+    api.retry.mockReturnValue(answer.promise);
+
+    const running = store.retry(failed.id);
+    expect(store.isRetrying(failed.id)).toBe(true);
+    // Only this request is busy; the others keep their button.
+    expect(store.isRetrying("another-id")).toBe(false);
+
+    answer.resolve({ ...failed, status: "created" });
+
+    await expect(running).resolves.toBe("retried");
+    expect(api.retry).toHaveBeenCalledWith(failed.id);
+    expect(store.isRetrying(failed.id)).toBe(false);
+    expect(store.findById(failed.id)?.status).toBe("created");
+    // A created request is not final, so the list page polls again.
+    expect(store.hasPendingItems).toBe(true);
+  });
+
+  it("on 409 not_retryable does not throw: it reads the request again and reports it", async () => {
+    const { api, store, failed } = await setupFailed();
+    api.retry.mockRejectedValue(new ApiError(409, "not_retryable", "The request cannot be sent again"));
+    api.get.mockResolvedValue({ ...failed, status: "queued" });
+
+    await expect(store.retry(failed.id)).resolves.toBe("not-retryable");
+
+    expect(api.get).toHaveBeenCalledWith(failed.id);
+    expect(store.findById(failed.id)?.status).toBe("queued");
+    expect(store.isRetrying(failed.id)).toBe(false);
+  });
+
+  it("throws any other error, changes nothing and lets the button be used again", async () => {
+    const { api, store, failed } = await setupFailed();
+    api.retry.mockRejectedValue(new ApiError(500, "internal_error", "Internal server error"));
+
+    await expect(store.retry(failed.id)).rejects.toMatchObject({ code: "internal_error" });
+
+    expect(store.findById(failed.id)?.status).toBe("failed");
+    expect(store.isRetrying(failed.id)).toBe(false);
+    expect(api.get).not.toHaveBeenCalled();
   });
 });
 

@@ -5,8 +5,9 @@
 // newer one, or an item that appears out of nowhere), not because a string differs.
 //
 // Supported: attribute_exists(x), attribute_not_exists(x), `x < :v` (also <=, >, >=, =, <>),
-// AND, OR, and parentheses; SET a = :x, b = :y. Anything else throws, so a new kind of
-// expression is noticed instead of silently accepted.
+// AND, OR, and parentheses; SET a = :x, b = :y; ADD n :v (a number: a missing one counts as 0).
+// Names may be #aliases. Anything else throws, so a new kind of expression is noticed instead
+// of silently accepted.
 
 type Item = Record<string, unknown>;
 
@@ -88,15 +89,33 @@ export function evaluateCondition(expression: string, context: Context): boolean
   return position === tokens.length ? result : fail();
 }
 
-/** Applies `SET a = :x, b = :y` to the item. */
-export function applySet(item: Item, expression: string, context: Pick<Context, "values" | "names">): void {
-  const assignments = /^SET\s+(.+)$/.exec(expression)?.[1];
-  if (assignments === undefined) throw new Error(`fake table: unsupported UpdateExpression "${expression}"`);
-  for (const assignment of assignments.split(",")) {
+/**
+ * Applies an update expression to the item: `SET a = :x, b = :y` and/or `ADD n :v`. ADD on a
+ * number adds to it and starts from 0 when the attribute is not there yet, as DynamoDB does.
+ */
+export function applyUpdate(item: Item, expression: string, context: Pick<Context, "values" | "names">): void {
+  const unsupported: () => never = () => {
+    throw new Error(`fake table: unsupported UpdateExpression "${expression}"`);
+  };
+  const attributeName = (name: string): string => (name.startsWith("#") ? (context.names[name] ?? name) : name);
+
+  const setClause = /^SET\s+(.+?)(?=\s+ADD\s|$)/.exec(expression)?.[1];
+  const addClause = /(?:^|\s)ADD\s+(.+)$/.exec(expression)?.[1];
+  if (setClause === undefined && addClause === undefined) unsupported();
+
+  for (const assignment of setClause?.split(",") ?? []) {
     const [name, value] = assignment.split("=").map((part) => part.trim());
-    if (name === undefined || value === undefined || !(value in context.values)) {
-      throw new Error(`fake table: unsupported UpdateExpression "${expression}"`);
-    }
-    item[name.startsWith("#") ? (context.names[name] ?? name) : name] = structuredClone(context.values[value]);
+    if (name === undefined || value === undefined || !(value in context.values)) return unsupported();
+    item[attributeName(name)] = structuredClone(context.values[value]);
+  }
+
+  for (const addition of addClause?.split(",") ?? []) {
+    const [name, value] = addition.trim().split(/\s+/);
+    if (name === undefined || value === undefined) return unsupported();
+    const key = attributeName(name);
+    const amount = context.values[value];
+    const current = item[key] ?? 0;
+    if (typeof amount !== "number" || typeof current !== "number") return unsupported();
+    item[key] = current + amount;
   }
 }

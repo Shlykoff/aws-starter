@@ -33,7 +33,8 @@ export interface ApiClientOptions {
 // only the caller knows what it expects.
 export interface ApiClient {
   get(path: string): Promise<unknown>;
-  post(path: string, body: unknown): Promise<unknown>;
+  // `body` is left out for a POST that carries no data (POST /requests/{id}/retry).
+  post(path: string, body?: unknown): Promise<unknown>;
 }
 
 export function createApiClient(options: ApiClientOptions): ApiClient {

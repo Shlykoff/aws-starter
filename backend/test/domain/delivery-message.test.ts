@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeDeliveryMessage,
+  deduplicationId,
   encodeDeliveryMessage,
   messageGroupId,
 } from "../../src/domain/delivery-message";
+
+describe("deduplicationId", () => {
+  const ID = "01J8Z3K5W0ABCDEFGHJKMNPQR1";
+
+  it("is the request id for the first send", () => {
+    expect(deduplicationId(ID, 0)).toBe(ID);
+  });
+
+  it("is <requestId>-r<retryCount> for a send after a retry, and differs between retries", () => {
+    expect(deduplicationId(ID, 1)).toBe(`${ID}-r1`);
+    expect(deduplicationId(ID, 2)).toBe(`${ID}-r2`);
+  });
+
+  it("only uses characters a FIFO deduplication id allows and stays short", () => {
+    expect(deduplicationId(ID, 123456)).toMatch(/^[A-Za-z0-9-]{1,128}$/);
+  });
+});
 
 describe("messageGroupId", () => {
   // Reference values computed outside the code: printf 'acme' | shasum -a 256

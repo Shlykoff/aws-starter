@@ -27,8 +27,11 @@ import type { DecisionRepository, RecordOutcome } from "./decision-repository";
 //
 // The update touches only these two attributes, so it never interferes with the status
 // changes of the delivery pipeline (DynamoDeliveryRepository), and the other way round.
-// It is a MODIFY record in the stream, and the enqueuer's mapping reacts to INSERT only, so
-// storing a decision never queues the request again.
+// It is a MODIFY record in the stream, and the enqueuer's mapping reacts only to INSERT and to
+// a request sent again (status `created` with a `retryCount`), so storing a decision never
+// queues the request again. The one exception is a decision that arrives while a request that
+// was sent again is still `created`: the enqueuer sends its message a second time, and the
+// queue drops it (same deduplication id).
 
 const INDEX_NAME = "by-request-id";
 

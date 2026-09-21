@@ -1,13 +1,13 @@
 import { isValid as isUlid, ulid } from "ulid";
 import type { CreateRequestInput } from "../domain/create-request";
 import type { PartnerRequest } from "../domain/request";
-import { NotFoundError } from "../lib/errors";
+import { NotFoundError, NotRetryableError } from "../lib/errors";
 import type { RequestRepository } from "../repositories/request-repository";
 
 // docs/api.md: GET /requests returns at most 50 items, newest first.
 export const MAX_LIST_ITEMS = 50;
 
-// The business rules of stage 1. No HTTP and no AWS types in here: the service gets plain
+// The business rules of the request API (create, list, get, retry). No HTTP and no AWS types in here: the service gets plain
 // values from the handler and the repository interface from the container.
 export class RequestService {
   constructor(
@@ -45,5 +45,24 @@ export class RequestService {
     const request = await this.repository.findById(ownerId, id);
     if (request === undefined) throw new NotFoundError();
     return request;
+  }
+
+  /**
+   * Sends a failed request again (docs/api.md, "Sending a failed request again"). The request
+   * goes back to "created"; the enqueuer sees that in the table's stream and queues it.
+   */
+  async retry(ownerId: string, id: string): Promise<PartnerRequest> {
+    // A malformed id cannot exist: 404 without touching the database (see `get`).
+    if (!isUlid(id)) throw new NotFoundError();
+
+    const outcome = await this.repository.retry(ownerId, id);
+    switch (outcome.kind) {
+      case "restarted":
+        return outcome.request;
+      case "not_found":
+        throw new NotFoundError();
+      case "not_failed":
+        throw new NotRetryableError(outcome.status);
+    }
   }
 }

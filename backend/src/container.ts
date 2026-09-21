@@ -9,8 +9,8 @@ import { loadConfig } from "./lib/config";
 import type { Config } from "./lib/config";
 import { TOKENS } from "./tokens";
 
-// The dependency graph of the three request functions (create-request, list-requests,
-// get-request), wired in one place. The other functions have their own containers:
+// The dependency graph of the four request functions (create-request, list-requests,
+// get-request, retry-request), wired in one place. The other functions have their own containers:
 // container-exchange.ts, container-enqueuer.ts and container-worker.ts (see
 // container-shared.ts for why there is one per function kind).
 //

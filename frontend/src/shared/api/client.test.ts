@@ -50,6 +50,17 @@ describe("createApiClient", () => {
     expect(init?.headers).toMatchObject({ "Content-Type": "application/json" });
   });
 
+  it("sends a POST without a body and without a content type when there is nothing to send", async () => {
+    const { client, fetchImpl } = setup();
+
+    await client.post("/requests/1/retry");
+
+    const { init } = firstCall(fetchImpl);
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBeUndefined();
+    expect(init?.headers).not.toHaveProperty("Content-Type");
+  });
+
   it("maps the API error shape to an ApiError", async () => {
     const { client } = setup({
       response: json({ error: { code: "validation_error", message: "partner is required", details: [1] } }, 400),

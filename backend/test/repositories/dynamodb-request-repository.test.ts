@@ -1,5 +1,5 @@
 import { ConditionalCheckFailedException, DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import type { PartnerRequest } from "../../src/domain/request";
@@ -198,5 +198,58 @@ describe("the client's decision in the API model", () => {
     const result = await repository.findById("user-a", ID);
 
     expect(result?.clientDecision).toStrictEqual({ decision: "Declined", at: stored.at, receivedAt: stored.receivedAt });
+  });
+});
+
+describe("DynamoRequestRepository.retry", () => {
+  const conditionFailed = (item?: Record<string, unknown>) =>
+    new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {}, Item: item as never });
+
+  it("makes one conditional update: created and one more send, only if the item is failed", async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, retryCount: 1 } });
+
+    await repository.retry("user-a", ID);
+
+    const calls = ddb.commandCalls(UpdateCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.args[0].input).toEqual({
+      TableName: "demo-dev-requests",
+      Key: { pk: "USER#user-a", sk: `REQ#${ID}` },
+      UpdateExpression: "SET #status = :created ADD retryCount :one",
+      ConditionExpression: "attribute_exists(pk) AND #status = :failed",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":created": "created", ":failed": "failed", ":one": 1 },
+      ReturnValues: "ALL_NEW",
+      ReturnValuesOnConditionCheckFailure: "ALL_OLD",
+    });
+  });
+
+  it("returns the item after the update as the API model, without keys or the retry count", async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, retryCount: 2 } });
+
+    const outcome = await repository.retry("user-a", ID);
+
+    expect(outcome).toEqual({ kind: "restarted", request });
+    expect(JSON.stringify(outcome)).not.toContain("retryCount");
+    expect(JSON.stringify(outcome)).not.toContain("user-a");
+  });
+
+  it("says not_failed, with the status of the old item, when the condition fails and an item came back", async () => {
+    // The exception carries the item in DynamoDB's typed format.
+    ddb.on(UpdateCommand).rejects(conditionFailed({ pk: { S: "USER#user-a" }, sk: { S: `REQ#${ID}` }, status: { S: "sent" } }));
+
+    expect(await repository.retry("user-a", ID)).toEqual({ kind: "not_failed", status: "sent" });
+  });
+
+  it("says not_found when the condition fails and no item came back", async () => {
+    ddb.on(UpdateCommand).rejects(conditionFailed());
+
+    expect(await repository.retry("user-a", ID)).toEqual({ kind: "not_found" });
+  });
+
+  it("lets other DynamoDB failures reach the caller", async () => {
+    ddb.on(UpdateCommand).rejects(new Error("throttled"));
+
+    await expect(repository.retry("user-a", ID)).rejects.toThrow("throttled");
   });
 });

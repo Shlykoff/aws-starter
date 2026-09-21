@@ -122,7 +122,7 @@ function ReceivedBlock({ exchange }: { exchange: Exchange }) {
   );
 }
 
-function ExchangeDetails({ exchange }: { exchange: Exchange }) {
+function ExchangeDetails({ exchange, earlierAttempt }: { exchange: Exchange; earlierAttempt: boolean }) {
   return (
     <>
       <div className="space-y-2">
@@ -134,6 +134,11 @@ function ExchangeDetails({ exchange }: { exchange: Exchange }) {
           </time>
         </div>
         <p className="text-sm">{getOutcomeExplanation(exchange.outcome)}</p>
+        {earlierAttempt && (
+          <p className="text-sm text-muted-foreground">
+            This is the earlier attempt; the new one replaces it when it has run.
+          </p>
+        )}
       </div>
       {/* One column on narrow screens, two side by side from `lg`. */}
       <div className="grid gap-6 lg:grid-cols-2">
@@ -147,8 +152,17 @@ function ExchangeDetails({ exchange }: { exchange: Exchange }) {
 // The exchange of one request: what our system sent to the partner and what came back.
 // A plain view of the store's state (the page asks the store; this only draws), so it can
 // be tested and previewed with a ready-made state. `null` means nothing was asked yet and
-// looks like loading.
-export function ExchangePanel({ state, onRetry }: { state: ExchangeState | null; onRetry: () => void }) {
+// looks like loading. `earlierAttempt`: the request is not finished, so the record shown is not the
+// last word (the page knows the request's status, this entity does not).
+export function ExchangePanel({
+  state,
+  onRetry,
+  earlierAttempt = false,
+}: {
+  state: ExchangeState | null;
+  onRetry: () => void;
+  earlierAttempt?: boolean;
+}) {
   const titleId = useId();
 
   let body: ReactNode;
@@ -185,7 +199,7 @@ export function ExchangePanel({ state, onRetry }: { state: ExchangeState | null;
       </Alert>
     );
   } else {
-    body = <ExchangeDetails exchange={state.exchange} />;
+    body = <ExchangeDetails exchange={state.exchange} earlierAttempt={earlierAttempt} />;
   }
 
   return (

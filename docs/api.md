@@ -37,19 +37,45 @@ The owner (`sub` claim of the token) is stored with the item but never returned.
 ```
 created --(enqueuer put it on the queue)--> queued --(partner answered 2xx)------> sent
    |                                           |--(partner answered 4xx)-------> rejected
-   `-------- (the worker may see it first) ----`--(5th attempt failed, DLQ)-----> failed
+   `-------- (the worker may see it first) ----`--(5th attempt failed)---------> failed
+   ^                                                                              |
+   `------------------------ (the owner sends it again) --------------------------'
 ```
 
 - `created`: stored by the API. `queued`: on the SQS FIFO queue. `sent`: the partner
   accepted it. `rejected`: the partner refused it for good (retrying is pointless).
-  `failed`: delivery attempts are exhausted and the message sits in the DLQ.
-- `sent`, `rejected` and `failed` are **terminal**: they never change again.
+  `failed`: delivery attempts are exhausted (the worker has recorded it and acknowledged the
+  message; it is not in the DLQ).
+- `sent` and `rejected` are **terminal**: they never change again. `failed` is final for the
+  worker, but the owner can send the request again (below), which puts it back to `created`.
 - Every status change is a conditional `UpdateItem` (`ConditionExpression` on the current
   status), so a late or repeated message cannot move a request backwards.
   `queued` is set only from `created`; the terminal statuses only from `created` or `queued`
-  (the worker can pick a message up before the enqueuer has written `queued`).
+  (the worker can pick a message up before the enqueuer has written `queued`); `created` is
+  set again only from `failed` (sending it again).
   A failed condition means somebody else already moved the request on: treat it as done,
   not as an error.
+
+## Sending a failed request again
+
+`POST /requests/{id}/retry` (owner only, no body) starts the delivery of a `failed` request
+again, through the same pipeline: a request that failed because the recipient was down can be
+delivered once it is back.
+
+- One conditional `UpdateItem` on (`pk`, `sk`): `SET status = created`, `ADD retryCount 1`, with
+  the condition `status = failed`. Answers `200` with the `Request` (status `created`). Another
+  status: `409` `not_retryable` (a request that is `created`, `queued` or `sent` is on its way or
+  done; a `rejected` one would get the same answer again). Not the caller's, or unknown, or a
+  malformed id: `404`. Pressing twice is safe: the second press finds `created` and gets `409`.
+- The API only writes to the table, as for a new request (the outbox): the change is a `MODIFY`
+  record in the stream, and the enqueuer accepts it (see "Delivery pipeline"). The API function
+  has no queue permission.
+- The delivery starts from scratch: five more attempts, and `attempt` in the exchange record
+  counts from 1 again. The recipient deduplicates by `MessageId` (the request id), so if it had
+  accepted the message before our own error, it answers with the stored answer and the request
+  becomes `sent`. The exchange record of the earlier attempt stays until the next attempt
+  overwrites it; `clientDecision` is not touched.
+- `retryCount` (number) counts the sends after the first; it is never returned.
 
 ## Client decision (webhook)
 
@@ -81,6 +107,7 @@ what it means for the request.
 | POST | `/requests` | `{ partner, subject, body }` | `201` `Request` (status `created`) | `400` validation, `500` |
 | GET | `/requests` | | `200` `{ items: Request[] }`, newest first, at most 50 (pagination later) | `500` |
 | GET | `/requests/{id}` | | `200` `Request` | `404` (also for a malformed id), `500` |
+| POST | `/requests/{id}/retry` | | `200` `Request` (status `created`) | `404` (also for a malformed id), `409` `not_retryable` (the status is not `failed`), `500` |
 | GET | `/requests/{id}/exchange` | | `200` `Exchange` | `404` (no such request, or no delivery attempt yet), `500` |
 | POST | `/webhooks/partner` | XML `DecisionEvent`, signed | `200`, empty body | `413`, `401`, `415`, `400`, `422`, `404`, `5xx` (see "Client decision"); **no Cognito token** |
 
@@ -110,7 +137,7 @@ show it poll every few seconds while a request is `created` or `queued`.
 Errors produced by the Lambdas use one shape:
 
 ```
-{ "error": { "code": "validation_error" | "not_found" | "internal_error",
+{ "error": { "code": "validation_error" | "not_found" | "not_retryable" | "internal_error",
              "message": string, "details"?: unknown } }
 ```
 
@@ -132,8 +159,8 @@ Table `<project>-<env>-requests`, provisioned 5 RCU / 5 WCU, no autoscaling.
 | partition | `pk` (S) | `USER#<sub>` |
 | sort | `sk` (S) | `REQ#<ULID>` |
 
-Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`, and once the
-client has acted `clientDecision` (a map: the fields of "Model" plus `eventId`, the id of the event
+Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`, `retryCount` (once
+the request has been sent again), and once the client has acted `clientDecision` (a map: the fields of "Model" plus `eventId`, the id of the event
 that set it, kept for the "same event" rule and never returned) and `decisionAtMs` (number, epoch
 milliseconds of `clientDecision.at`, for the comparison of the webhook).
 
@@ -161,7 +188,8 @@ POST /requests -> DynamoDB (created) -> stream -> enqueuer -> SQS FIFO -> delive
                                                                  |          |-> HTTPS + API key -> the recipient (another system)
                                                                  |          |        <- XML reply, checked against reply.xsd
                                                                  |          |-> S3 exchange record, DynamoDB (sent | rejected | failed), SNS
-                                                                 `-> after 5 receives -> DLQ (kept for inspection)
+                                                                 `-> a message that cannot be processed -> DLQ (kept for inspection)
+POST /requests/{id}/retry -> DynamoDB (failed -> created) -> stream -> enqueuer -> ... as above
 GET /requests/{id}/exchange -> the XML we sent and the XML that came back
 ```
 
@@ -170,7 +198,11 @@ GET /requests/{id}/exchange -> the XML we sent and the XML that came back
 API needs no permission for the queue.
 
 **enqueuer** (event source mapping on the stream):
-- Filter: `INSERT` events only, so the status updates of the pipeline do not trigger it again.
+- Filter: a new request (`INSERT`) or a request sent again (`MODIFY` whose new image has status
+  `created` and a `retryCount`), so the status updates of the pipeline (`queued`, `sent`, ...) do
+  not trigger it again. Only the new image is in the stream, so "was `failed`" cannot be tested; a
+  `created` request with a `retryCount` is the sending-again state, and the worst a stray record
+  can do is a message that the queue's deduplication drops.
 - Batch size up to 10 (`SendMessageBatch` takes at most 10). Reports failures per record
   (`ReportBatchItemFailures`), `bisect_batch_on_function_error`, a bounded number of retries
   and record age; when a record is given up on, the mapping's failure destination is the
@@ -184,8 +216,11 @@ API needs no permission for the queue.
 - Message body: `{ "requestId": ULID, "ownerId": string }`. Ids only: no request text in the queue.
 - `MessageGroupId` = SHA-256 hex of `partner.trim().toLowerCase()`. A hash, because a group id
   may only contain alphanumerics and punctuation and the partner is free text. Order is kept
-  per partner; a failing message blocks its own partner's later messages until it is in the DLQ.
-- `MessageDeduplicationId` = `requestId`. No content-based deduplication.
+  per partner; a failing message blocks its own partner's later messages until it is
+  acknowledged (its last attempt) or in the DLQ.
+- `MessageDeduplicationId` = `requestId` for the first send and `<requestId>-r<retryCount>` for
+  a send after a retry, so that a request sent again is never taken for a duplicate of its first
+  message. No content-based deduplication.
 - Visibility timeout 120 s (at least 6 x the worker timeout), `maxReceiveCount` 5, retention
   4 days on the queue and 14 days on the DLQ, server-side encryption on.
 
@@ -224,9 +259,10 @@ API needs no permission for the queue.
    status is lost. For a temporary failure the record is diagnostics only: if it cannot be
    written, log that and carry on with the retry.
 7. Retryable failure: report the message as failed so SQS retries it after the visibility timeout.
-   On the **last** attempt (`ApproximateReceiveCount >= MAX_RECEIVE_COUNT`) set `failed` and
-   publish first, then still report the message as failed so that SQS moves it to the DLQ,
-   which keeps it for inspection. `MAX_RECEIVE_COUNT` comes from Terraform, the same value as
+   On the **last** attempt (`ApproximateReceiveCount >= MAX_RECEIVE_COUNT`) set `failed`, publish
+   it (an e-mail), and **acknowledge** the message: the failure is handled, the owner sees it with
+   a "Send again" button, the partner's group is not held back, and the DLQ stays for what could
+   not be processed at all (step 10). `MAX_RECEIVE_COUNT` comes from Terraform, the same value as
    the queue's `maxReceiveCount`.
 8. The mapping uses batch size 1: a FIFO queue hands out the messages of one partner strictly
    in order, and with one message per invocation a failure affects only that message. The code
@@ -274,7 +310,8 @@ checks ownership in the table before it touches S3).
   `{ "requestId", "status", "at" }` (no request text), message attribute `status` (String). The
   owner's e-mail subscription has a filter policy on `status` in [`failed`, `rejected`].
 - `<project>-<env>-alerts`: operational alarms and the enqueuer's failure destination. The
-  owner's e-mail subscription has no filter. CloudWatch alarms: DLQ depth >= 1
+  owner's e-mail subscription has no filter. CloudWatch alarms: DLQ depth >= 1 (a message
+  that could not be processed: a bug or a broken dependency, not a delivery the recipient refused)
   (`ApproximateNumberOfMessagesVisible`) and enqueuer `IteratorAge` above 5 minutes.
 - The e-mail address is the `notification_email` Terraform variable (in CI a GitHub secret).
   Each subscription needs a confirmation click.
@@ -286,6 +323,7 @@ checks ownership in the table before it touches S3).
 | `create-request` | `POST /requests` | `PutItem` | |
 | `list-requests` | `GET /requests` | `Query` | |
 | `get-request` | `GET /requests/{id}` | `GetItem` | |
+| `retry-request` | `POST /requests/{id}/retry` | `UpdateItem` | |
 | `enqueuer` | DynamoDB stream | `UpdateItem` | stream read; `sqs:SendMessage` on the queue; `sns:Publish` on `alerts` |
 | `delivery-worker` | SQS queue | `GetItem`, `UpdateItem` | queue receive/delete/attributes; `sns:Publish` on `request-status`; `s3:PutObject` on `exchanges/*`; `ssm:GetParameter` on the API key parameter |
 | `receive-webhook` | `POST /webhooks/partner` (public) | `Query` on `by-request-id`, `UpdateItem` | `ssm:GetParameter` on the webhook token parameter |

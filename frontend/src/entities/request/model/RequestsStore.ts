@@ -6,6 +6,10 @@ import type { NewPartnerRequest, PartnerRequest } from "./types";
 
 export type LoadState = "idle" | "loading" | "ready" | "error";
 
+// What `retry` did. "not-retryable" is the API's 409: the request is no longer `failed` (a double
+// press, or another tab sent it again first). Not a failure of ours, so it is not thrown.
+export type RetryOutcome = "retried" | "not-retryable";
+
 // State of the "open one request" screen.
 export type DetailState =
   | { id: string; status: "loading" | "ready" | "not-found" }
@@ -33,6 +37,9 @@ export class RequestsStore {
   listState: LoadState = "idle";
   listError: string | null = null;
   detail: DetailState | null = null;
+  // Ids of the requests that are being sent again right now: the page disables the button for
+  // them. Shared state and not component state, so the flag survives leaving and reopening the page.
+  retrying = new Set<string>();
 
   constructor(private readonly api: RequestsApi) {
     makeAutoObservable<RequestsStore, "api">(this, {
@@ -45,6 +52,10 @@ export class RequestsStore {
 
   findById(id: string): PartnerRequest | undefined {
     return this.items.find((request) => request.id === id);
+  }
+
+  isRetrying(id: string): boolean {
+    return this.retrying.has(id);
   }
 
   // True while at least one known request can still change status (created or queued).
@@ -149,5 +160,31 @@ export class RequestsStore {
       this.items = mergeById(this.items, [created]);
     });
     return created;
+  }
+
+  // Sends a `failed` request again and puts the answer (status `created`) into `items`, so the
+  // list and the details page show it at once and start following its status again.
+  // 409 `not_retryable` is not an error for the user: the request has already moved on, so it is
+  // read again to show what it is now. Any other error is thrown, the page shows it.
+  async retry(id: string): Promise<RetryOutcome> {
+    this.retrying.add(id);
+    try {
+      const request = await this.api.retry(id);
+      runInAction(() => {
+        this.items = mergeById(this.items, [request]);
+      });
+      return "retried";
+    } catch (error) {
+      if (error instanceof ApiError && error.code === "not_retryable") {
+        await this.refreshDetail(id);
+        return "not-retryable";
+      }
+      throw error;
+    } finally {
+      // Also after a failure, so the button is usable again.
+      runInAction(() => {
+        this.retrying.delete(id);
+      });
+    }
   }
 }
