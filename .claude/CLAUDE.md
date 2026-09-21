@@ -31,8 +31,8 @@ explained in two sentences, simplify it, or write down why in the README "Decisi
    so the brief must be self-contained: goal, exact files, constraints from this file,
    acceptance criteria, and what not to do. Tell the owner which agents are running.
 3. **Review** with the checklist below. Run the checks yourself (fmt, validate,
-   typecheck, lint, test); don't take "it passes" on trust. Send fixes back at most
-   twice, then take the slice over or bring the decision to the owner.
+   typecheck, lint, test); don't take "it passes" on trust. A finding goes to a NEW agent
+   as a short brief of its own; after two rounds without a fix, bring the decision to the owner.
 4. **Walkthrough.** Explain the change to the owner in Russian, briefly, then run a
    Q&A round on it (below). Update the README status and Decisions, and add the
    stage's questions to `NOTES.md` (personal, git-ignored; `walkthrough-coach` can
@@ -43,24 +43,23 @@ explained in two sentences, simplify it, or write down why in the README "Decisi
 
 Agents are the biggest cost of this project (the XML exchange took about 890k tokens across
 three agents; half of it went to the backend agent, which made 139 tool calls, among them 12
-mutation checks and several container experiments). Every agent and the lead follow these rules.
+mutation checks and several container experiments). Two sets of rules: the lead's, then every agent's.
 
-**The lead leads.** The lead's work is to plan, brief, review, run the checks, make the PR and merge;
-the agents build. Split a stage into small slices (one agent, one folder, a brief a page long, minimal
-context) instead of writing the code yourself. **One task, one fresh agent:** a finished agent is never
-resumed (no SendMessage to it) and never reused for the next slice, so old context does not pile up;
-the agents keep no memory files, a new agent starts clean. The lead writes code only for a one-line fix.
-
-**The lead, when writing a brief**
+**The lead** plans, briefs, reviews, runs the checks, makes the PR and merges. The agents build; the
+lead writes code only for a one-line fix.
+- Split a stage into small slices: one agent, one folder, a brief a page long, minimal context.
+  **One task, one fresh agent.** A finished agent is never resumed (no SendMessage) or reused for the
+  next slice, so old context does not pile up; the agents keep no memory files. The one exception is
+  an agent that stopped before it finished (a rate limit, an API error): it is resumed to finish the
+  same task.
 - The brief holds only what is specific to the task: the goal, the exact files or folders, the
-  contract files that are the source of truth (by path, not pasted), the acceptance criteria and
-  what not to do. Rules that are in this file or in the agent's own file are **not repeated**.
-- Say which model to use (`model` parameter): the default is `sonnet`; `haiku` only for
-  mechanical, easy-to-verify work (running suites and comparing, formatting, a text change);
-  never `haiku` for parsing, auth, IAM or anything that handles secrets.
-- At most **two agents at a time**. More of them do not finish sooner in tokens, they hit the
-  session limit sooner (a limit stopped three of four agents once and the work had to resume).
-- Give a **report size** (default: at most 60 lines).
+  contract files that are the source of truth (by path, not pasted), the acceptance criteria, what
+  not to do, the report size (default: at most 60 lines) and the model (`model` parameter: the
+  default is `sonnet`; `haiku` only for mechanical, easy-to-verify work; never `haiku` for parsing,
+  auth, IAM or anything that handles secrets). Rules that are in this file or in the agent's own
+  file are **not repeated**, except one line: "Git: only status, diff, log, show."
+- At most **two agents at a time**, on separate folders. More of them do not finish sooner in tokens,
+  they hit the session limit sooner (a limit stopped three of four agents once).
 - Split the checking, so that nobody does the same expensive thing twice: the engineer runs the
   unit tests and targeted checks while building, and one full run at the end; QA does the built
   artefacts, the cross-side and hostile-input tests, the live run and the log scan; the lead reads
@@ -68,6 +67,8 @@ the agents keep no memory files, a new agent starts clean. The lead writes code 
   suites once. A live AWS run is done once, by one party.
 
 **Every agent**
+- **Git: only `git status`, `git diff`, `git log`, `git show`. Every other git command is
+  forbidden**: the worktree is shared and holds other agents' uncommitted work.
 - Read what the brief names, and search (`grep`, an offset and a limit) instead of reading
   whole large files. Do not re-read a file you just wrote or edited.
 - Run the narrowest check that answers the question (one test file, one package). Cut the
@@ -111,7 +112,8 @@ and say what is good too.
   delete, ...) without the owner's explicit confirmation in the current conversation.
   Plans and read-only calls (`describe-*`, `list-*`, `get-*`, `sts get-caller-identity`)
   are fine. Agents never apply. The local AWS profile is an admin one: be conservative.
-- No `git commit` / `git push` unless asked.
+- Git: agents use only the four read-only commands above. The lead commits and pushes feature
+  branches for the PR flow, never `main`, and merges after green CI.
 - Tracked files contain no secrets, account IDs or personal e-mails. `*.tfvars` are
   git-ignored; commit `*.tfvars.example`.
 - Fake data only. Never real personal data, not even as an example.
