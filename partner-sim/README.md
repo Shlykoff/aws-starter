@@ -266,6 +266,26 @@ The container runs `ngrok http partner-sim:8080 --url https://<NGROK_DOMAIN>`, w
 in the environment (as the ngrok Docker documentation describes). ngrok ends TLS; the simulator
 itself speaks plain HTTP.
 
+## The published image (for a hosting platform)
+
+`.github/workflows/partner-sim-image.yml` tests the recipient and, on every push to `main` that
+touches `partner-sim/` or `contracts/xsd/`, publishes it to the GitHub Container Registry as
+`ghcr.io/<owner>/aws-starter-partner-sim` (`linux/amd64`), tagged `latest` and `sha-<commit>` (pin
+the second when a deploy must be repeatable). A pull request only runs the tests.
+
+To run it somewhere that is not your laptop:
+
+- **The package has to be public** for a platform to pull it without credentials (GitHub: your
+  profile, Packages, the package, Package settings, Change visibility). A new package starts private.
+- **The image has no defaults for secrets.** It refuses to start without `PARTNER_API_KEY`, `UI_USER`
+  and `UI_PASSWORD`; `WEBHOOK_URL` and `WEBHOOK_TOKEN` go together or not at all (see
+  [Configuration](#configuration)). Set them in the platform's secret store, never in the repository.
+- **It listens on port 8080** (HTTP; the platform terminates TLS) and answers `GET /healthz` for a
+  health check.
+- **The data is one SQLite file, `/data/partner.db`.** Mount a persistent volume at `/data`, and make
+  sure the user inside the image (`app`) can write to it. Without a volume the messages, the client
+  decisions and the memory of answered `MessageId`s disappear at every restart.
+
 ## Configuration
 
 Environment variables, checked at start-up. A wrong or missing value stops the application with
