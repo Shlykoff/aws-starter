@@ -11,6 +11,8 @@ this address, also to one made by a form on another web site. So they refuse cro
 (_is_same_origin) before they do anything else.
 """
 
+import base64
+import hashlib
 import logging
 from pathlib import Path
 from typing import Annotated, Any
@@ -20,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from markupsafe import Markup
 from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings
@@ -37,11 +40,31 @@ INBOX_SIZE = 100
 # A form with a reason of 500 characters is at most about 6 KB once percent-encoded.
 FORM_MAX_BYTES = 16 * 1024
 
-# Sent with every HTML page. The CSP forbids everything except the page's own inline <style>
-# and forms that post back to this same address: no scripts, no images, no framing.
+# Times are stored and sent in UTC, and a page written in UTC only would disagree with the
+# sender's web app, which shows the time in the viewer's own time zone: the same moment would
+# read four hours apart for somebody in UTC+4. So every time is a <time datetime="..."> element
+# with the UTC text inside (what a browser without scripts shows, labelled UTC), and this one
+# small script, fixed and written by us, replaces the text with the viewer's local time and
+# zone in the SAME format as the sender's web app (frontend/src/shared/lib/formatDate.ts).
+LOCAL_TIME_SCRIPT = (
+    'document.querySelectorAll("time[datetime]").forEach(function (el) {'
+    'var d = new Date(el.getAttribute("datetime"));'
+    "if (!isNaN(d.getTime())) {"
+    'el.textContent = d.toLocaleString(undefined, {year: "numeric", month: "short", '
+    'day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit", '
+    'timeZoneName: "short"});'
+    "}});"
+)
+# The page may run this script and no other: the policy names it by its hash, so a script that
+# somebody managed to get into a page (there is none: autoescape is on) would still not run.
+_SCRIPT_HASH = base64.b64encode(hashlib.sha256(LOCAL_TIME_SCRIPT.encode("utf-8")).digest()).decode()
+
+# Sent with every HTML page. The CSP forbids everything except the page's own inline <style>,
+# the one script above and forms that post back to this same address: no images, no framing.
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
+        f"default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-{_SCRIPT_HASH}'; "
+        "form-action 'self'; frame-ancestors 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
     # same-origin, not no-referrer: with no-referrer a browser sends "Origin: null" on a form
@@ -56,8 +79,19 @@ _templates = Environment(
     autoescape=True,  # the one line that keeps message text from becoming markup
     undefined=StrictUndefined,  # a typo in a template is an error, not an empty string
 )
-# 2026-09-21T10:11:12.123Z -> 2026-09-21 10:11:12.123
-_templates.filters["utc_text"] = lambda stamp: stamp.replace("T", " ").removesuffix("Z")
+_templates.globals["local_time_script"] = LOCAL_TIME_SCRIPT
+
+
+def _time_tag(stamp: str) -> Markup:
+    """2026-09-21T10:11:12.123Z -> <time datetime="...">2026-09-21 10:11:12.123 UTC</time>.
+
+    The text is what shows without the script. `stamp` comes from our own clock, but it is
+    escaped like everything else: Markup() is applied only to the finished tag."""
+    text = str(stamp).replace("T", " ").removesuffix("Z")
+    return Markup('<time datetime="{}">{} UTC</time>').format(stamp, text)
+
+
+_templates.filters["time_tag"] = _time_tag
 
 
 def build_ui_router(

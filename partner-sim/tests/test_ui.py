@@ -1,12 +1,23 @@
 """The web pages: login, security headers, what is shown, and that message text is never markup."""
 
+import base64
+import hashlib
 import re
 import secrets
 
 import pytest
 from helpers import API_KEY, UI_AUTH, UI_PASSWORD, UI_USER, make_submission, ulid
 
+from app.ui import LOCAL_TIME_SCRIPT
+
 PAGES = ["/", "/messages/1"]
+
+
+def _only_our_script(page: str) -> None:
+    """The page carries our one fixed script (the local time) and no other: text from a message
+    never becomes a <script> element."""
+    assert page.count("<script") == 1
+    assert _inline_scripts(page) == [LOCAL_TIME_SCRIPT]
 
 
 # --- Login ------------------------------------------------------------------------------------
@@ -106,9 +117,9 @@ def test_the_pages_carry_the_security_headers(client, post, path):
     response = client.get(path, auth=UI_AUTH)
 
     assert response.headers["content-type"] == "text/html; charset=utf-8"
-    assert response.headers["content-security-policy"] == (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
-    )
+    policy = response.headers["content-security-policy"]
+    assert policy.startswith("default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-")
+    assert policy.endswith("'; form-action 'self'; frame-ancestors 'none'")
     assert response.headers["x-content-type-options"] == "nosniff"
     # same-origin, not no-referrer: see SECURITY_HEADERS in ui.py (no-referrer would make a
     # browser send "Origin: null" from our own form).
@@ -241,7 +252,7 @@ def test_markup_inside_a_message_is_shown_as_text_never_rendered(client, post):
     detail = client.get("/messages/1", auth=UI_AUTH).text
 
     for page in (inbox, detail):
-        assert "<script>" not in page
+        _only_our_script(page)
         assert "<img" not in page
     assert "&lt;img src=x onerror=alert(1)&gt;" in inbox  # the subject, escaped once
     assert "&lt;img src=x onerror=alert(1)&gt;" in detail
@@ -255,7 +266,7 @@ def test_raw_markup_in_a_broken_message_is_shown_as_text_never_rendered(client, 
 
     detail = client.get("/messages/1", auth=UI_AUTH).text
 
-    assert "<script>" not in detail
+    _only_our_script(detail)
     assert "<img" not in detail
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in detail
 
@@ -291,3 +302,57 @@ def test_with_the_interface_off_only_the_api_remains(make_client, settings):
         headers={"X-API-Key": API_KEY, "Content-Type": "application/xml"},
     )
     assert response.status_code == 200
+
+
+# --- Times: the viewer's local time, in the sender's format --------------------------------------
+
+
+def _inline_scripts(html: str) -> list[str]:
+    return re.findall(r"<script>(.*?)</script>", html, flags=re.DOTALL)
+
+
+@pytest.mark.parametrize("path", PAGES)
+def test_the_one_inline_script_is_the_one_the_policy_names(client, post, path):
+    """The CSP allows a script by its hash. If the script in the page and the hash in the header
+    ever differ (an edit of one but not the other), the browser refuses it and every time on the
+    page silently goes back to UTC: this test is what notices."""
+    post(make_submission())
+    response = client.get(path, auth=UI_AUTH)
+
+    scripts = _inline_scripts(response.text)
+
+    assert len(scripts) == 1
+    digest = base64.b64encode(hashlib.sha256(scripts[0].encode("utf-8")).digest()).decode()
+    assert f"script-src 'sha256-{digest}'" in response.headers["content-security-policy"]
+
+
+def test_a_time_is_a_time_element_with_the_utc_text_inside(client, post):
+    post(make_submission())
+
+    inbox = client.get("/", auth=UI_AUTH).text
+    message = client.get("/messages/1", auth=UI_AUTH).text
+
+    for page in (inbox, message):
+        # The datetime attribute is the moment itself (ISO, UTC); the text is what a browser
+        # without scripts shows, labelled, so that it can never be mistaken for local time.
+        match = re.search(
+            r'<time datetime="(\d{4}-\d\d-\d\dT[\d:.]+Z)">(\d{4}-\d\d-\d\d [\d:.]+) UTC</time>',
+            page,
+        )
+        assert match is not None
+        assert match.group(1).replace("T", " ").removesuffix("Z") == match.group(2)
+
+
+def test_the_script_formats_a_time_like_the_senders_web_app():
+    """frontend/src/shared/lib/formatDate.ts uses these options; the two must stay the same, or
+    the same moment reads differently in the two applications."""
+    for option in (
+        'year: "numeric"',
+        'month: "short"',
+        'day: "numeric"',
+        'hour: "numeric"',
+        'minute: "2-digit"',
+        'second: "2-digit"',
+        'timeZoneName: "short"',
+    ):
+        assert option in LOCAL_TIME_SCRIPT
