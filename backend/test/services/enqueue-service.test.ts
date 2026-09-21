@@ -194,3 +194,47 @@ describe("EnqueueService: failures", () => {
     expect(logs.lines.join("\n")).not.toContain("Acme");
   });
 });
+
+// The request event of docs/api.md ("Logs", "Request events"): written per request, and only for
+// a request that THIS call moved from created to queued.
+describe("EnqueueService: request events", () => {
+  const requestEvents = (logs: ReturnType<typeof captureLogs>) =>
+    logs.entries().filter((line) => line.message === "Request event");
+
+  it("request_queued: once per moved request, with exactly its fields", async () => {
+    const { logs, enqueue } = setup(2);
+
+    await enqueue([entry(1), entry(2)]);
+
+    expect(requestEvents(logs)).toEqual(
+      [1, 2].map((n) => ({
+        level: "info",
+        message: "Request event",
+        event: "request_queued",
+        role: "enqueuer",
+        requestId: idNumber(n),
+        fromStatus: "created",
+        toStatus: "queued",
+      })),
+    );
+  });
+
+  it("is not written for a request that was no longer created (the worker was faster)", async () => {
+    const { repository, logs, enqueue } = setup(2);
+    repository.setStatus(idNumber(1), "sent");
+
+    await enqueue([entry(1), entry(2)]);
+
+    expect(requestEvents(logs).map((line) => line.requestId)).toEqual([idNumber(2)]);
+  });
+
+  it("is not written for a message SQS refused, or when markQueued throws", async () => {
+    const { queue, repository, logs, enqueue } = setup(3);
+    queue.refuse.add("seq-1");
+    repository.failures.set("markQueued", new Error("throttled"));
+
+    await enqueue([entry(1), entry(2), entry(3)]);
+
+    expect(requestEvents(logs)).toEqual([]);
+  });
+});

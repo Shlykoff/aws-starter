@@ -175,7 +175,7 @@ describe("POST /requests", () => {
     it("writes one summary line with route, status, duration and request id", async () => {
       await handler(createRequestEvent({ body: JSON.stringify(validBody) }), lambdaContext("req-77"));
 
-      expect(logs.entries()).toEqual([
+      expect(logs.entries().filter((line) => line.message === "Request handled")).toEqual([
         {
           level: "info",
           message: "Request handled",
@@ -183,6 +183,23 @@ describe("POST /requests", () => {
           route: "POST /requests",
           statusCode: 201,
           durationMs: expect.any(Number) as number,
+        },
+      ]);
+    });
+
+    it("writes the request_created event with the Lambda request id, and only for a stored request", async () => {
+      await handler(createRequestEvent({ body: JSON.stringify(validBody) }), lambdaContext("req-78"));
+      await handler(createRequestEvent({ body: "{" }), lambdaContext("req-79")); // 400: nothing stored
+
+      expect(logs.entries().filter((line) => line.message === "Request event")).toEqual([
+        {
+          level: "info",
+          message: "Request event",
+          awsRequestId: "req-78",
+          event: "request_created",
+          role: "user",
+          requestId: expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/) as string,
+          toStatus: "created",
         },
       ]);
     });

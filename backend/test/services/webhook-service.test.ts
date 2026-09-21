@@ -266,12 +266,57 @@ describe("WebhookService: logging", () => {
     await receive(call());
     await receive(call({ token: "another-token" }));
 
-    expect(logs.entries().map(({ level, message, outcome }) => ({ level, message, outcome }))).toEqual([
+    const handled = logs.entries().filter((entry) => entry.message === "Webhook handled");
+    expect(handled.map(({ level, message, outcome }) => ({ level, message, outcome }))).toEqual([
       { level: "info", message: "Webhook handled", outcome: "applied" },
       { level: "info", message: "Webhook handled", outcome: "duplicate" },
       { level: "warn", message: "Webhook handled", outcome: "unauthorized" },
     ]);
-    expect(logs.entries()[0]).toMatchObject({ requestId: REQUEST_ID, decision: "Approved" });
-    expect(logs.entries()[2]).toMatchObject({ signatureProblem: "signature_mismatch" });
+    expect(handled[0]).toMatchObject({ requestId: REQUEST_ID, decision: "Approved" });
+    expect(handled[2]).toMatchObject({ signatureProblem: "signature_mismatch" });
+  });
+});
+
+// The request event of docs/api.md ("Logs", "Request events"): the decision is a change in the life
+// of the request only when it was stored.
+describe("WebhookService: request events", () => {
+  const requestEvents = (logs: ReturnType<typeof setup>["logs"]) =>
+    logs.entries().filter((entry) => entry.message === "Request event");
+
+  it("decision_recorded: once, with the stored decision and no reason, when the decision is applied", async () => {
+    const { logs, decisions, receive } = setup();
+
+    await receive(call());
+
+    expect(requestEvents(logs)).toEqual([
+      {
+        level: "info",
+        message: "Request event",
+        event: "decision_recorded",
+        role: "recipient",
+        requestId: REQUEST_ID,
+        decision: "Approved",
+      },
+    ]);
+    expect(decisions.recorded[0]?.decision.decision).toBe("Approved"); // the stored one
+    expect(logs.lines.join("\n")).not.toContain("Out of stock"); // the Reason of the event
+  });
+
+  it.each(["duplicate", "ignored", "unknown_request"] as const)("is not written when the outcome is %s", async (outcome) => {
+    const { logs, decisions, receive } = setup();
+    decisions.outcome = outcome;
+
+    await receive(call());
+
+    expect(requestEvents(logs)).toEqual([]);
+  });
+
+  it("is not written for a call that was refused before the decision (bad signature)", async () => {
+    const { logs, decisions, receive } = setup();
+
+    await receive(call({ token: "another-token" }));
+
+    expect(decisions.recorded).toEqual([]);
+    expect(requestEvents(logs)).toEqual([]);
   });
 });

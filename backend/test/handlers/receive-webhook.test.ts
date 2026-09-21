@@ -33,6 +33,8 @@ let handler: typeof import("../../src/handlers/receive-webhook").handler;
 let tokens: ApiKeyProvider;
 let table: FakeTable;
 let logs: ReturnType<typeof captureLogs>;
+// The summary line of each call (the request event of an applied decision is another line).
+const handledLines = () => logs.entries().filter((entry) => entry.message === "Webhook handled");
 
 beforeAll(async () => {
   ({ handler } = await import("../../src/handlers/receive-webhook"));
@@ -175,7 +177,7 @@ describe("receive-webhook: several events for one request", () => {
 
     expect(second).toEqual({ statusCode: 200 });
     expect(stored()).toEqual(first); // not even `receivedAt` moved
-    expect(logs.entries().map((entry) => entry.outcome)).toEqual(["applied", "duplicate"]);
+    expect(handledLines().map((entry) => entry.outcome)).toEqual(["applied", "duplicate"]);
   });
 
   it("a later event replaces the decision", async () => {
@@ -197,7 +199,7 @@ describe("receive-webhook: several events for one request", () => {
     expect(await send(body(earlier))).toEqual({ statusCode: 200 });
 
     expect(decisionOf()).toMatchObject({ eventId: E2, decision: "Declined" });
-    expect(logs.entries().map((entry) => entry.outcome)).toEqual(["applied", "ignored"]);
+    expect(handledLines().map((entry) => entry.outcome)).toEqual(["applied", "ignored"]);
   });
 
   it("the same event id with a LATER time still changes nothing (an event never replaces itself)", async () => {
@@ -210,7 +212,7 @@ describe("receive-webhook: several events for one request", () => {
     expect(await send(body(retimed))).toEqual({ statusCode: 200 });
 
     expect(stored()).toEqual(first);
-    expect(logs.entries().map((entry) => entry.outcome)).toEqual(["applied", "duplicate"]);
+    expect(handledLines().map((entry) => entry.outcome)).toEqual(["applied", "duplicate"]);
   });
 
   it("another event at the very same moment changes nothing (the first one stays)", async () => {

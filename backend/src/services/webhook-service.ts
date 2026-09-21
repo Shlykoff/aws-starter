@@ -5,6 +5,7 @@ import { describeProblem } from "../domain/exchange";
 import { UNREADABLE_DOCUMENT_RULES, isUnreadableDocument } from "../domain/validation-result";
 import { checkSignatureHeaders, signatureMatches } from "../domain/webhook-signature";
 import type { LogFields, Logger } from "../lib/logger";
+import { logRequestEvent } from "../lib/request-events";
 import type { DecisionRepository, RecordOutcome } from "../repositories/decision-repository";
 import type { SecretProvider } from "../repositories/secret-provider";
 
@@ -115,6 +116,16 @@ export class WebhookService {
       eventId: facts.eventId,
     };
     const outcome = await this.decisions.recordDecision(facts.relatesTo, decision, facts.occurredAtMs);
+    // An event of the request only when the decision was stored: not for a duplicate, an older
+    // event that was ignored, or a request that does not exist.
+    if (outcome === "applied") {
+      logRequestEvent(log, {
+        event: "decision_recorded",
+        role: "recipient",
+        requestId: facts.relatesTo,
+        decision: decision.decision,
+      });
+    }
     // The ids and the decision come from fields the schema checked (a ULID, a UUID, one of two words).
     return finish(outcome, {
       requestId: facts.relatesTo,

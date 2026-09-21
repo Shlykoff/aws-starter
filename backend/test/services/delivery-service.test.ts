@@ -1005,3 +1005,169 @@ describe("DeliveryService: logging", () => {
     });
   });
 });
+
+// The request events of docs/api.md ("Logs", "Request events"): the lines of `delivery_attempted`
+// (after every attempt) and `request_sent` / `request_rejected` / `request_failed` (only when the
+// status change was applied). The request was created at 09:00:00 and the clock says 10:00:00.
+describe("DeliveryService: request events", () => {
+  const SINCE_CREATED_MS = 3_600_000;
+  const event = (fields: Record<string, unknown>) => ({
+    level: "info",
+    message: "Request event",
+    requestId: idNumber(1),
+    role: "worker",
+    ...fields,
+  });
+  const requestEvents = (logs: ReturnType<typeof captureLogs>) =>
+    logs.entries().filter((entry) => entry.message === "Request event");
+
+  it("delivered: delivery_attempted with the HTTP status, then request_sent, each exactly once", async () => {
+    const { logs, deliver } = setup();
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 1, outcome: "delivered", httpStatus: 200, partnerMs: 0 }),
+      event({ event: "request_sent", toStatus: "sent", attempt: 1, sinceCreatedMs: SINCE_CREATED_MS }),
+    ]);
+  });
+
+  it("refused: delivery_attempted (refused, 422), then request_rejected", async () => {
+    const { partner, logs, deliver } = setup();
+    partner.answer = refusedAnswer;
+
+    await deliver(job(1, 2));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 2, outcome: "refused", httpStatus: 422, partnerMs: 0 }),
+      event({ event: "request_rejected", toStatus: "rejected", attempt: 2, sinceCreatedMs: SINCE_CREATED_MS }),
+    ]);
+  });
+
+  it("a retry before the last attempt: only delivery_attempted, no status event", async () => {
+    const { partner, logs, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    await deliver(job(1, 2));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 2, outcome: "retry", httpStatus: 503, partnerMs: 0 }),
+    ]);
+  });
+
+  it("no answer (a timeout): delivery_attempted has partnerMs and no httpStatus", async () => {
+    const { partner, logs, deliver } = setup();
+    partner.answer = () => ({ kind: "no-answer", reason: "timeout" });
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 1, outcome: "retry", partnerMs: 0 }),
+    ]);
+  });
+
+  it("the last attempt: delivery_attempted (retry), then request_failed with the attempt", async () => {
+    const { partner, logs, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    await deliver(job(1, MAX_RECEIVE_COUNT));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: MAX_RECEIVE_COUNT, outcome: "retry", httpStatus: 503, partnerMs: 0 }),
+      event({ event: "request_failed", toStatus: "failed", attempt: MAX_RECEIVE_COUNT, sinceCreatedMs: SINCE_CREATED_MS }),
+    ]);
+  });
+
+  it("text that XML cannot carry: unrepresentable, nobody was called (no httpStatus, no partnerMs), then request_rejected", async () => {
+    const { repository, logs, deliver } = setup();
+    repository.seed(aRequest({ id: idNumber(1), subject: "bad\u0000subject" }));
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 1, outcome: "unrepresentable" }),
+      event({ event: "request_rejected", toStatus: "rejected", attempt: 1, sinceCreatedMs: SINCE_CREATED_MS }),
+    ]);
+  });
+
+  it("XML that fails submission.xsd: invalid_request, nobody was called, then request_rejected", async () => {
+    const { validator, logs, deliver } = setup();
+    validator.submissionResult = { valid: false, findings: [{ element: "Subject", rule: "does not match the allowed pattern" }] };
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 1, outcome: "invalid_request" }),
+      event({ event: "request_rejected", toStatus: "rejected", attempt: 1, sinceCreatedMs: SINCE_CREATED_MS }),
+    ]);
+  });
+
+  it.each(["sent", "rejected", "failed"] as const)("a request that is already %s: no event at all", async (status) => {
+    const { repository, logs, deliver } = setup();
+    repository.setStatus(idNumber(1), status);
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs)).toEqual([]);
+  });
+
+  it("a lost conditional update (somebody finished it first): the attempt is written, the status event is not", async () => {
+    const { repository, logs, deliver } = setup();
+    repository.afterFind = () => repository.setStatus(idNumber(1), "failed");
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs)).toEqual([
+      event({ event: "delivery_attempted", attempt: 1, outcome: "delivered", httpStatus: 200, partnerMs: 0 }),
+    ]);
+  });
+
+  it("the status write throws: the attempt is written, request_sent is not", async () => {
+    const { repository, logs, deliver } = setup();
+    repository.failures.set("markSent", new Error("throttled"));
+
+    await deliver(job(1, 1));
+
+    expect(requestEvents(logs).map((entry) => entry.event)).toEqual(["delivery_attempted"]);
+  });
+
+  describe("the times", () => {
+    // A clock that says 10:00:00 until the recipient has been called, and `afterCall` after that.
+    function setupWithClock(afterCall: Date, request = aRequest({ id: idNumber(1) })) {
+      const journal: Journal = [];
+      const repository = new FakeDeliveryRepository(journal);
+      const partner = new FakePartnerClient(journal);
+      repository.seed(request);
+      const logs = captureLogs();
+      const service = new DeliveryService(
+        repository,
+        partner,
+        new FakeXmlValidator(journal),
+        new FakeApiKeyProvider(journal),
+        new FakeExchangeStore(journal),
+        new FakeStatusNotifier(journal),
+        { senderName: "aws-starter", maxReceiveCount: MAX_RECEIVE_COUNT },
+        () => (partner.sent.length === 0 ? NOW : afterCall),
+      );
+      return { logs, run: () => service.deliver([job(1, 1)], createLogger("debug")) };
+    }
+
+    it("partnerMs is the time of the call to the recipient; sinceCreatedMs is measured up to the status write", async () => {
+      const { logs, run } = setupWithClock(new Date(NOW.getTime() + 400));
+
+      await run();
+
+      const [attempted, sent] = requestEvents(logs);
+      expect(attempted).toMatchObject({ event: "delivery_attempted", partnerMs: 400 });
+      expect(sent).toMatchObject({ event: "request_sent", sinceCreatedMs: SINCE_CREATED_MS + 400 });
+    });
+
+    it("sinceCreatedMs is 0, not negative, when the request seems to come from the future", async () => {
+      const { logs, run } = setupWithClock(NOW, aRequest({ id: idNumber(1), createdAt: "2026-09-21T10:30:00.000Z" }));
+
+      await run();
+
+      expect(requestEvents(logs)[1]).toMatchObject({ event: "request_sent", sinceCreatedMs: 0 });
+    });
+  });
+});

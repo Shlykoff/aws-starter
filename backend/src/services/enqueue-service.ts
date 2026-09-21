@@ -2,6 +2,7 @@ import { deduplicationId, encodeDeliveryMessage, messageGroupId } from "../domai
 import type { EnqueueRequest } from "../domain/request-image";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
+import { logRequestEvent } from "../lib/request-events";
 import type { DeliveryQueue, QueueMessage } from "../repositories/delivery-queue";
 import type { DeliveryRepository } from "../repositories/delivery-repository";
 
@@ -58,8 +59,17 @@ export class EnqueueService {
 
         try {
           const applied = await this.repository.markQueued(entry.request.ownerId, entry.request.requestId);
-          if (applied) result.queued += 1;
-          else result.alreadyMoved += 1; // not an error: the worker was faster
+          if (applied) {
+            result.queued += 1;
+            // Only when this call moved it: not when the worker was faster (below).
+            logRequestEvent(log, {
+              event: "request_queued",
+              role: "enqueuer",
+              requestId: entry.request.requestId,
+              fromStatus: "created",
+              toStatus: "queued",
+            });
+          } else result.alreadyMoved += 1; // not an error: the worker was faster
         } catch (error) {
           log.error("Could not mark the request as queued", {
             requestId: entry.request.requestId,

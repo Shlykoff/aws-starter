@@ -2,7 +2,9 @@ import type { PartnerRequest, RequestStatus } from "../domain/request";
 
 // What `retry` found.
 export type RetryOutcome =
-  | { kind: "restarted"; request: PartnerRequest } // it was failed and is `created` again
+  // it was failed and is `created` again; `retryCount` is the new number of sends (for the log,
+  // never for the API: the request itself does not carry it)
+  | { kind: "restarted"; request: PartnerRequest; retryCount: number }
   | { kind: "not_found" } // no such request for this owner
   | { kind: "not_failed"; status: RequestStatus }; // it exists, but has this other status
 

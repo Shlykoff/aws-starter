@@ -99,11 +99,12 @@ export function parseJsonBody<T>(
  * Wraps the code of one route into a Lambda handler. It is the same for every route:
  *   - errors thrown by `run` become the JSON error shape of docs/api.md,
  *   - one log line per request: route, status code, duration and the Lambda request id.
- * `run` only has to return the success response.
+ * `run` only has to return the success response. It gets the logger of this invocation (with the
+ * Lambda request id) for the lines the route itself writes, such as the request events.
  */
 export function createHandler(
   logger: Logger,
-  run: (event: ApiEvent) => Promise<ApiResult>,
+  run: (event: ApiEvent, log: Logger) => Promise<ApiResult>,
 ): (event: ApiEvent, context: Context) => Promise<ApiResult> {
   return async (event, context) => {
     const startedAt = Date.now();
@@ -111,7 +112,7 @@ export function createHandler(
 
     let response: ApiResult;
     try {
-      response = await run(event);
+      response = await run(event, requestLogger);
     } catch (error) {
       response = toErrorResponse(error);
       if (response.statusCode === STATUS_BY_CODE.internal_error) {
