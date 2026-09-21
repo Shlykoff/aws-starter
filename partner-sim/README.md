@@ -177,11 +177,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 ## Optional: a public address through ngrok
 
-> **Checked by hand with a free ngrok account:** the tunnel comes up, a public `POST` reaches the
-> service (`200`), a wrong key gets `401`, and the inbox refuses the demo password. It ran with an
-> address that ngrok assigned at random: without `--url` a free account gets a new one on every
-> start. **Not checked yet:** the `tunnel` profile with the account's fixed dev domain in
-> `NGROK_DOMAIN` (the address of your account is shown in the dashboard under *Domains*).
+> **Checked with a free ngrok account** (the `tunnel` profile with the account's fixed dev domain in
+> `NGROK_DOMAIN`): a public `POST` reaches the service (`200`), a wrong key gets `401`, and the
+> inbox refuses the demo password. The main system on AWS delivered messages through it, and a
+> stopped container showed up there as a `502` from ngrok (a temporary failure, retried). The
+> address of your account is shown in the ngrok dashboard under *Domains*.
 
 For a sender that cannot reach your computer (for example the main system on AWS), the `tunnel`
 profile starts an ngrok container next to the service:

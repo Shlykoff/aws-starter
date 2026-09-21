@@ -84,10 +84,14 @@ Where each outcome ends:
 - [x] Stage 2: async delivery (stream outbox, SQS FIFO, worker, DLQ, SNS). Checked on AWS
   with three requests: delivered, refused and failing (five attempts, then `failed`, the
   DLQ and the alarm).
-- [ ] Stage 3: the recipient as a separate system, XML + XSD validation on both sides, the
-  exchange record and its panel in the UI, the API key in SSM. Written and tested locally and in
-  CI (the sender against the real recipient in Docker). **Not yet run on AWS through a tunnel.**
-  Still to do: a review of the logs for personal data, optional mTLS.
+- [x] Stage 3: the recipient as a separate system, XML + XSD validation on both sides, the
+  exchange record and its panel in the UI, the API key in SSM. Checked on AWS through an ngrok
+  tunnel to the recipient running in Docker on a laptop: a request delivered in about two
+  seconds, one refused by the recipient, one refused by our own schema check without calling
+  anybody, one retried five times until `failed` (8 minutes), and one that waited while the
+  recipient was down and was delivered on the second attempt after it came back. The logs of
+  those runs contain no message text.
+  Still to do: a full review of the logs for personal data, optional mTLS.
 
 ## Try it
 
@@ -158,9 +162,9 @@ and `. , ' & -` only, because the recipient's schema says so):
 |---|---|
 | any subject, partner `Acme Ltd` | `sent` within seconds; the Exchange panel shows the XML and the `Accepted` reply |
 | `[reject]` in the subject | `rejected`; the reply says `RECIPIENT_REJECTED` |
-| `[fail]` in the subject | retried for about 8 minutes, then `failed`, an e-mail and an alarm; the DLQ holds the message |
+| `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed`; the message goes to the DLQ, which raises an alarm and an e-mail |
 | partner `Acme #1` | `rejected` at once: our own schema check refuses it and nobody is called |
-| stop the recipient, create a request, start the recipient again within the retries (about 8 minutes) | the request waits (`queued`) and is delivered when the recipient is back |
+| stop the recipient, create a request, start the recipient again within the retries (about 8 minutes) | the Exchange panel shows the failed attempt (`retry`, `502` from the tunnel), then the request is delivered on the next attempt, two minutes after the first |
 
 ## Layout
 
