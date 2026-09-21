@@ -23,6 +23,8 @@ RUN pip install -r requirements.txt
 # The schemas this recipient validates against: its own copy, taken at build time. It is
 # read from disk at start-up (SCHEMA_DIR); nothing is ever fetched from a URL.
 COPY contracts/xsd/ /app/schemas/
+# The code, and with it the database schema: app/migrations/*.sql. The application refuses to
+# start if that folder is empty, so a build that forgot it fails at once, not silently.
 COPY partner-sim/app/ /app/app/
 
 # A user with no login shell and no home. It owns /data (the database) and nothing else:
