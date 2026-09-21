@@ -7,6 +7,7 @@
 export const TOKENS = {
   // Configuration: one token per function kind, because each has its own set of variables.
   Config: Symbol("Config"), // the API functions
+  ExchangeConfig: Symbol("ExchangeConfig"), // get-exchange
   EnqueuerConfig: Symbol("EnqueuerConfig"),
   WorkerConfig: Symbol("WorkerConfig"),
 
@@ -17,17 +18,21 @@ export const TOKENS = {
   SqsClient: Symbol("SqsClient"),
   SnsClient: Symbol("SnsClient"),
   S3Client: Symbol("S3Client"),
+  SsmClient: Symbol("SsmClient"),
 
   // Repositories, ports and clients
   RequestRepository: Symbol("RequestRepository"),
   DeliveryRepository: Symbol("DeliveryRepository"),
   DeliveryQueue: Symbol("DeliveryQueue"),
   StatusNotifier: Symbol("StatusNotifier"),
-  AuditStore: Symbol("AuditStore"),
+  ExchangeStore: Symbol("ExchangeStore"),
+  ApiKeyProvider: Symbol("ApiKeyProvider"),
+  XmlValidator: Symbol("XmlValidator"),
   PartnerClient: Symbol("PartnerClient"),
 
   // Services
   RequestService: Symbol("RequestService"),
   EnqueueService: Symbol("EnqueueService"),
   DeliveryService: Symbol("DeliveryService"),
+  ExchangeService: Symbol("ExchangeService"),
 } as const;

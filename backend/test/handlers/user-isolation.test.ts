@@ -1,11 +1,19 @@
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { ulid } from "ulid";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { handler as create } from "../../src/handlers/create-request";
+import { handler as getExchange } from "../../src/handlers/get-exchange";
 import { handler as get } from "../../src/handlers/get-request";
 import { handler as list } from "../../src/handlers/list-requests";
-import { createRequestEvent, getRequestEvent, lambdaContext, listRequestsEvent } from "../helpers/events";
+import {
+  createRequestEvent,
+  getExchangeEvent,
+  getRequestEvent,
+  lambdaContext,
+  listRequestsEvent,
+} from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
 
@@ -13,14 +21,29 @@ import { captureLogs } from "../helpers/logs";
 // User A and user B are two different `sub` claims. The handlers, service, repository and
 // container are the real ones; only DynamoDB is an in-memory table with real key rules.
 const ddb = mockClient(DynamoDBDocumentClient);
+// S3 holds the exchange records. Its key is exchanges/<requestId>.json and says nothing about
+// the owner, so the isolation of exchanges rests on the ownership check in the table.
+const s3 = mockClient(S3Client);
+
+// An S3 that has a record for EVERY request id: the worst case for a user who guesses an id.
+const recordWithSecret = JSON.stringify({
+  attempt: 1,
+  at: "2026-09-21T10:00:00.000Z",
+  outcome: "delivered",
+  request: { xml: "<Submission>A's secret subject</Submission>", valid: true, problems: [] },
+  reply: null,
+});
 
 beforeEach(() => {
   ddb.reset();
+  s3.reset();
   stubTable(ddb);
+  s3.on(GetObjectCommand).resolves({ Body: { transformToString: () => Promise.resolve(recordWithSecret) } as never });
   captureLogs();
 });
 afterAll(() => {
   ddb.restore();
+  s3.restore();
 });
 
 const context = lambdaContext();
@@ -45,6 +68,23 @@ describe("user isolation", () => {
     expect(asB.statusCode).toBe(404);
     expect(asB).toEqual(unknown); // same status, headers and body: existence is not leaked
     expect(asB.body).not.toContain("secret");
+  });
+
+  it("user B cannot read user A's exchange, even though the object exists in S3: 404, like an unknown request", async () => {
+    const requestOfA = await createAs("user-a", "A's secret subject");
+
+    const asA = await getExchange(getExchangeEvent({ sub: "user-a", id: requestOfA.id }), context);
+    s3.resetHistory();
+    const asB = await getExchange(getExchangeEvent({ sub: "user-b", id: requestOfA.id }), context);
+    const callsForB = s3.commandCalls(GetObjectCommand).length;
+    const unknown = await getExchange(getExchangeEvent({ sub: "user-b", id: ulid(1_000) }), context);
+
+    expect(asA.statusCode).toBe(200);
+    expect(asA.body).toContain("secret");
+    expect(asB.statusCode).toBe(404);
+    expect(asB).toEqual(unknown); // same status, headers and body: existence is not leaked
+    expect(asB.body).not.toContain("secret");
+    expect(callsForB).toBe(0); // the object of A was never even requested for B
   });
 
   it("user B does not see user A's request in the list", async () => {

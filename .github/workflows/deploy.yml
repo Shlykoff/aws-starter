@@ -77,6 +77,12 @@ jobs:
           TF_VAR_cognito_domain_prefix: ${{ vars.COGNITO_DOMAIN_PREFIX }}
           # A personal address, so it is a secret: it is masked in the (public) logs.
           TF_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+          # Where the recipient of the messages lives. Not a secret, but it changes with the
+          # recipient, so it is a repository variable and not a line in the code.
+          TF_VAR_partner_url: ${{ vars.PARTNER_URL }}
+          # The API key the recipient checks. An ephemeral variable: it goes into the SSM
+          # parameter and into no state file and no plan file.
+          TF_VAR_partner_api_key: ${{ secrets.PARTNER_API_KEY }}
         run: terraform -chdir="$TF_DIR" plan -input=false -out=tfplan
 
       # A guard rail for unattended deploys: an automatic apply may create and change things
@@ -93,6 +99,9 @@ jobs:
           fi
 
       - name: Terraform apply
+        env:
+          # Not stored in the plan file (see above), so it is given again.
+          TF_VAR_partner_api_key: ${{ secrets.PARTNER_API_KEY }}
         run: terraform -chdir="$TF_DIR" apply -input=false tfplan
 
       # The app is configured at build time with the addresses Terraform just produced.

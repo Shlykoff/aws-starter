@@ -48,6 +48,23 @@ created --(enqueuer put it on the queue)--> queued --(partner answered 2xx)-----
 | POST | `/requests` | `{ partner, subject, body }` | `201` `Request` (status `created`) | `400` validation, `500` |
 | GET | `/requests` | | `200` `{ items: Request[] }`, newest first, at most 50 (pagination later) | `500` |
 | GET | `/requests/{id}` | | `200` `Request` | `404` (also for a malformed id), `500` |
+| GET | `/requests/{id}/exchange` | | `200` `Exchange` | `404` (no such request, or no delivery attempt yet), `500` |
+
+`Exchange` is what the worker recorded about the **latest** delivery attempt (see "The exchange
+record"). The XML in it is text for a person to read: clients must show it as text and never
+interpret it as markup.
+
+```
+Exchange {
+  attempt: number                 // which attempt this describes (1 = the first)
+  at:      string                 // ISO 8601, UTC
+  outcome: "delivered" | "refused" | "retry" | "invalid_request" | "unrepresentable"
+  request: { xml: string, valid: boolean, problems: { element: string, rule: string }[] }
+  //  ^ problems name the element and the rule, never the value found in it (it is personal data)
+  reply:   null | { httpStatus: number, xml: string | null, valid: boolean,
+                    status?: "Accepted" | "Rejected", code?: string, description?: string }
+}
+```
 
 A request that belongs to another user is `404`, not `403`, so existence is not leaked.
 A missing `sub` claim on a protected route is a misconfiguration and answers
@@ -97,10 +114,12 @@ Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`.
 
 ```
 POST /requests -> DynamoDB (created) -> stream -> enqueuer -> SQS FIFO -> delivery-worker
-                                                                 |          |-> partner (Function URL, SigV4)
-                                                                 |          |-> DynamoDB (sent | rejected | failed)
-                                                                 |          |-> S3 audit copy, SNS request-status
+                                                                 |          |-> build XML, check it against submission.xsd
+                                                                 |          |-> HTTPS + API key -> the recipient (another system)
+                                                                 |          |        <- XML reply, checked against reply.xsd
+                                                                 |          |-> S3 exchange record, DynamoDB (sent | rejected | failed), SNS
                                                                  `-> after 5 receives -> DLQ (kept for inspection)
+GET /requests/{id}/exchange -> the XML we sent and the XML that came back
 ```
 
 **Outbox through DynamoDB Streams.** The API only writes to the table. The stream feeds the
@@ -131,27 +150,50 @@ API needs no permission for the queue.
 `ReportBatchItemFailures`):
 1. `GetItem` with `ConsistentRead` (the item was written moments ago). Terminal status:
    acknowledge and do nothing (idempotent consumer).
-2. `POST` the partner (below) with an 8 s timeout. Outcome: 2xx = delivered; 401, 403, 408,
-   429, 5xx, network error or timeout = retryable failure; any other 4xx = rejected for good.
-   401 and 403 mean that our own credentials or permissions are wrong, not that the partner
-   refused the request. They are retried and end as `failed` with an alarm, instead of a silent
-   `rejected` that would hide a misconfiguration.
-3. Delivered: put the audit copy in S3, set `sent`, publish to SNS. Rejected: set `rejected`,
-   publish, acknowledge (no retry).
-4. Retryable failure: report the message as failed so SQS retries it after the visibility timeout.
+2. Build the `Submission` XML (`contracts/xsd/submission.xsd`) from the request: `MessageId` =
+   the request id, `SentAt` = now (UTC), `Sender/Name` = the `SENDER_NAME` setting,
+   `Recipient/Name` = the request's `partner`, `Subject` and `Text` from `subject` and `body`.
+   Text is XML-escaped. A character that XML 1.0 cannot carry at all (most control characters)
+   makes the request **unrepresentable**: it is `rejected` without calling anybody.
+3. Check that XML against `submission.xsd` (the schema files are packaged with the function).
+   A violation is `rejected` without calling anybody: the recipient would refuse it anyway, and
+   retrying cannot change it. The problems are recorded as element and rule, never with the
+   value. (The recipient's schema is stricter than the API: `partner` may be any text of 1-100
+   characters when the request is created, but a name with `#` in it fails here.)
+4. `POST` it to the recipient (`contracts/partner-api.md`) with an 8 s timeout and no redirects:
+   `X-API-Key` (read from SSM Parameter Store, cached for 5 minutes), `Content-Type:
+   application/xml`, `Idempotency-Key` = the request id, `User-Agent: aws-starter-worker/1`.
+5. Read the answer the way `contracts/partner-api.md` ("How the sender reads the answer") says:
+   `200` + `Accepted` = delivered; `400` or `422` + `Rejected` = `rejected`, no retry; `401`,
+   `403`, `408`, `429`, any `5xx`, no answer or a timeout = retry; any other `4xx` = `rejected`
+   (our request is wrong). The reply is untrusted input: at most 64 KiB, any DOCTYPE refused,
+   checked against `reply.xsd` and against the rule that `Code` and `Description` exist exactly
+   when the status is `Rejected`. A `200` whose body fails that check is a protocol violation by
+   the recipient and counts as a temporary failure. So does anything the contract does not define
+   (a redirect, a `1xx`, a `2xx` other than `200`) and a reply that contradicts its own status or
+   names another `MessageId`: the cautious reading is to try again, never to guess (the table is
+   in `contracts/partner-api.md`). 401 and 403 mean that our own credentials or
+   permissions are wrong, not that the recipient refused the request, so they are retried and end
+   as `failed` with an alarm, instead of a silent `rejected` that would hide a misconfiguration.
+6. Write the exchange record to S3 (below), then the status: delivered = `sent`, refused =
+   `rejected`, each followed by an SNS event. For a final outcome the record comes first: if the
+   S3 write fails, the message is retried (the recipient deduplicates by `MessageId`) and no
+   status is lost. For a temporary failure the record is diagnostics only: if it cannot be
+   written, log that and carry on with the retry.
+7. Retryable failure: report the message as failed so SQS retries it after the visibility timeout.
    On the **last** attempt (`ApproximateReceiveCount >= MAX_RECEIVE_COUNT`) set `failed` and
    publish first, then still report the message as failed so that SQS moves it to the DLQ,
    which keeps it for inspection. `MAX_RECEIVE_COUNT` comes from Terraform, the same value as
    the queue's `maxReceiveCount`.
-5. The mapping uses batch size 1: a FIFO queue hands out the messages of one partner strictly
+8. The mapping uses batch size 1: a FIFO queue hands out the messages of one partner strictly
    in order, and with one message per invocation a failure affects only that message. The code
    also handles larger batches the way AWS advises for FIFO: stop at the first failure and
    return it and every message after it in `batchItemFailures` (keeps the order). The price
    of larger batches: the messages behind a failure are charged a receive without being tried,
    so they can reach the DLQ untried, and one failing partner holds back unrelated ones in the
    same batch. That is why the demo does not use them.
-6. The SNS publish is best effort: log a failure, do not fail the message.
-7. Two more outcomes that are reported as failed and end in the DLQ after the allowed receives:
+9. The SNS publish is best effort: log a failure, do not fail the message.
+10. Two more outcomes that are reported as failed and end in the DLQ after the allowed receives:
    a malformed message body, and a message whose request does not exist (both are bugs, so
    they must be visible to the alarm, never silently acknowledged). If the conditional update
    finds the request already finished, the message is acknowledged: nothing to publish, no DLQ.
@@ -163,19 +205,25 @@ what broke, and after the partner accepted the request `failed` would be wrong. 
 to the DLQ, the alarm fires, and the request keeps its status. The same happens if the worker dies
 on the last attempt before writing `failed`: the request stays `queued` and only the alarm shows it.
 
-**Partner webhook** (`partner-mock`, a Lambda with a Function URL, auth type `AWS_IAM`; the
-worker signs its request with SigV4, service `lambda`, so there is no public endpoint and no
-shared secret):
-- `POST <url>`, headers `Content-Type: application/json` and `Idempotency-Key: <requestId>`,
-  body `{ "id", "partner", "subject", "body", "createdAt" }`.
-- `200 { "accepted": true }` normally. If `subject` contains `[reject]`: `422 { "error": ... }`.
-  If it contains `[fail]`: `503`. This makes both kinds of failure easy to show. The markers
-  are case-sensitive; if both are present, `[reject]` wins. A body that is not JSON or has no
-  string `subject` gets `400 { "error": ... }`. It keeps no state.
+**The recipient** is another system: it may run in another cloud or behind a tunnel, and this
+stack knows two things about it: a base URL (`PARTNER_URL`) and an API key (SSM Parameter Store,
+SecureString, `/<project>/<env>/partner-api-key`; the function reads the parameter whose name is
+in `PARTNER_API_KEY_PARAM`). Its contract is `contracts/partner-api.md`; the schemas and the
+sample messages are in `contracts/`. Nothing here knows how it is built. The stand-in used for
+demos and tests is `partner-sim/`, an independent application.
 
-**S3 audit copy**: bucket `<project>-<env>-deliveries-<account id>` (private, encrypted, objects
-expire after 30 days), key `deliveries/<requestId>.json` holding `{ "sentAt", "payload",
-"partnerStatus" }`, written after the partner answered 2xx.
+**The exchange record**: bucket `<project>-<env>-deliveries-<account id>` (private, encrypted,
+objects expire after 30 days). One JSON object per request, key `exchanges/<requestId>.json`,
+holding the `Exchange` of the endpoint above exactly as the endpoint returns it: the XML we
+built (`request.xml`), and the body of the recipient's answer as received (`reply.xml`, `null`
+when there was none). One object, so a reader never sees the request of one attempt next to the
+reply of another. `outcome`: `delivered` (accepted), `refused` (the recipient said `Rejected`,
+or another final 4xx), `retry` (a temporary failure), `invalid_request` (our XML failed
+`submission.xsd`), `unrepresentable` (it could not even be built as XML; `request.xml` is then
+`""`, there is nothing to show).
+Each attempt overwrites the record, so it always describes the latest attempt. It holds the
+request text: it is never logged, and only the owner of the request can read it (the endpoint
+checks ownership in the table before it touches S3).
 
 **SNS**
 - `<project>-<env>-request-status`: the worker publishes one event per terminal status. Body
@@ -195,19 +243,23 @@ expire after 30 days), key `deliveries/<requestId>.json` holding `{ "sentAt", "p
 | `list-requests` | `GET /requests` | `Query` | |
 | `get-request` | `GET /requests/{id}` | `GetItem` | |
 | `enqueuer` | DynamoDB stream | `UpdateItem` | stream read; `sqs:SendMessage` on the queue; `sns:Publish` on `alerts` |
-| `delivery-worker` | SQS queue | `GetItem`, `UpdateItem` | queue receive/delete/attributes; `sns:Publish` on `request-status`; `s3:PutObject` on `deliveries/*`; invoke the `partner-mock` Function URL |
-| `partner-mock` | Function URL | | |
+| `delivery-worker` | SQS queue | `GetItem`, `UpdateItem` | queue receive/delete/attributes; `sns:Publish` on `request-status`; `s3:PutObject` on `exchanges/*`; `ssm:GetParameter` on the API key parameter |
+| `get-exchange` | `GET /requests/{id}/exchange` | `GetItem` | `s3:GetObject` on `exchanges/*`; `s3:ListBucket` on the bucket (without it S3 answers a missing key with 403 instead of 404; a prefix condition would not help, a GetObject request carries no prefix) |
 
 - Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. Timeouts:
-  API functions, `enqueuer` and `partner-mock` 10 s, `delivery-worker` 15 s.
+  API functions and `enqueuer` 10 s, `delivery-worker` 15 s.
 - The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
   event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
 - API events: HTTP API payload format 2.0 with JWT authorizer
   (`event.requestContext.authorizer.jwt.claims.sub`).
 - Environment, all functions: `LOG_LEVEL` (default `info`), `NODE_OPTIONS=--enable-source-maps`
   (the build is minified; the source map keeps stack traces readable). Per function:
-  API functions `TABLE_NAME`; `enqueuer` `TABLE_NAME`, `QUEUE_URL`; `delivery-worker` `TABLE_NAME`,
-  `PARTNER_URL`, `TOPIC_ARN` (request-status), `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`. The worker
-  also reads `AWS_REGION`, which the Lambda runtime sets (needed to sign the partner request).
+  API functions `TABLE_NAME`; `get-exchange` `TABLE_NAME`, `AUDIT_BUCKET`; `enqueuer`
+  `TABLE_NAME`, `QUEUE_URL`; `delivery-worker` `TABLE_NAME`, `PARTNER_URL`,
+  `PARTNER_API_KEY_PARAM`, `SENDER_NAME` (default `aws-starter`), `TOPIC_ARN` (request-status),
+  `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`.
+- The XSD files of `contracts/xsd/` are copied into the package of every function that needs
+  them (`schemas/` next to `index.mjs`) by the build; the packaged copy is the sender's own copy
+  of the contract.
 - Build output: `backend/dist/<function>/index.mjs` (plus a source map). Terraform zips each
   directory with `archive_file`; the build does not produce zips.

@@ -15,15 +15,10 @@ variable "environment" {
 }
 
 variable "policy_statements" {
-  description = "IAM statements besides logging. Every statement must name concrete actions and resource ARNs; conditions are optional."
+  description = "IAM statements besides logging. Every statement must name concrete actions and resource ARNs."
   type = list(object({
     actions   = list(string)
     resources = list(string)
-    conditions = optional(list(object({
-      test     = string       # e.g. "StringEquals", "Bool"
-      variable = string       # condition key, e.g. "lambda:FunctionUrlAuthType"
-      values   = list(string) # a match on any of them is enough
-    })), [])
   }))
   default = []
 
@@ -31,12 +26,6 @@ variable "policy_statements" {
     condition     = alltrue([for s in var.policy_statements : !anytrue([for r in s.resources : r == "*"])])
     error_message = "Wildcard resources are not allowed: scope each statement to concrete ARNs."
   }
-}
-
-variable "enable_function_url" {
-  description = "Give the function an HTTPS URL. Always with auth type AWS_IAM: a caller must sign the request (SigV4) and be allowed lambda:InvokeFunctionUrl. A public URL (auth type NONE) is deliberately not offered by this module."
-  type        = bool
-  default     = false
 }
 
 variable "timeout" {

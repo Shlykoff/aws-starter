@@ -34,7 +34,7 @@ describe("RequestStatusBadge", () => {
 
     expect(screen.getByText("Rejected")).toHaveAttribute(
       "title",
-      "The partner refused this request. It was not retried.",
+      "The request was refused, by the partner or by our own check of the message. It was not retried.",
     );
     expect(screen.getByText("Failed")).toHaveAttribute(
       "title",

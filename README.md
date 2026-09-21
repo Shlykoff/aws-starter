@@ -6,8 +6,9 @@ around a demo scenario, sending requests to a partner system, that has two paths
 
 - **User path**: React -> API Gateway -> Lambda -> DynamoDB, authenticated with Cognito.
 - **Delivery path**: a request is queued in SQS FIFO; a worker Lambda builds an XML
-  message, validates it against an XSD and posts it to a webhook. Status changes
-  are published to SNS, messages that keep failing land in a DLQ.
+  message, validates it against an XSD and posts it over HTTPS to a separate system (the
+  recipient); it reads and validates the XML answer. Status changes are published to SNS,
+  messages that keep failing land in a DLQ.
 
 All data is fake. The domain is deliberately neutral.
 
@@ -15,10 +16,12 @@ All data is fake. The domain is deliberately neutral.
 
 - [x] Stage 0: bootstrap (state bucket, budget alert, GitHub OIDC role)
 - [x] Stage 1: REST API (API Gateway, Lambda, DynamoDB), Cognito, React login + list/form, CI/CD
-- [x] Stage 2: async delivery (stream outbox, SQS FIFO, worker, DLQ, SNS), S3 audit copy of
-  what was sent. Checked on AWS with three requests: delivered, refused (`[reject]`) and
-  failing (`[fail]`: five attempts, then `failed`, the DLQ and the alarm).
-- [ ] Stage 3: XML + XSD validation, PII masking in logs, CloudWatch/X-Ray, secrets in SSM, tests
+- [x] Stage 2: async delivery (stream outbox, SQS FIFO, worker, DLQ, SNS). Checked on AWS
+  with three requests: delivered, refused and failing (five attempts, then `failed`, the
+  DLQ and the alarm).
+- [ ] Stage 3: the recipient as a separate system (`partner-sim/`, `contracts/`), XML + XSD
+  validation on both sides, the exchange record and its panel in the UI, the API key in SSM;
+  still to do: PII masking review of the logs, mTLS, a README with diagrams and a quickstart
 
 ## Layout
 
@@ -27,6 +30,8 @@ bootstrap/   one-off Terraform: state bucket, budget, GitHub OIDC role
 infra/       main Terraform stack (remote state), modules per service   [stage 1]
 backend/     Node.js + TypeScript Lambda handlers                        [stage 1]
 frontend/    React app                                                   [stage 1]
+contracts/   what both sides share: XSD schemas, the HTTP contract, sample messages [stage 3]
+partner-sim/ the recipient: a separate Python app (FastAPI, lxml, SQLite, Docker)   [stage 3]
 docs/        API contract (docs/api.md)
 ```
 
@@ -51,9 +56,9 @@ Written down as they are made; each stage adds its own.
   The load is tiny and predictable, and this stays inside the always-free limits.
   On-demand would be the choice for spiky or unknown traffic.
 - **Request statuses separate temporary from permanent failures:** `created` (stored)
-  -> `queued` (in SQS FIFO) -> `sent` (partner answered 2xx). `failed` means delivery
-  retries are exhausted and the message is in the DLQ; `rejected` means the XML failed
-  schema validation and is not retried. Stage 1 only ever sets `created`.
+  -> `queued` (in SQS FIFO) -> `sent` (the recipient accepted it). `failed` means delivery
+  retries are exhausted and the message is in the DLQ; `rejected` means the message was
+  refused for good (the recipient said no, or our own XSD check failed) and is not retried.
 - **HTTP API instead of REST API.** Cheaper, lower latency and it has a built-in JWT
   authorizer, so no authorizer Lambda is needed. The REST-only features (API keys,
   usage plans, request validation) are not needed here.
@@ -75,8 +80,20 @@ Written down as they are made; each stage adds its own.
   reading the DLQ would delete exactly what the alarm is meant to show.
 - **A 401 or 403 from the partner is retried, not rejected.** It means our own credentials or
   permissions are wrong, so it ends as `failed` with an alarm instead of a silent `rejected`.
-- **The partner stand-in is an IAM-protected Lambda Function URL.** The worker signs its
-  requests with SigV4: no public endpoint and no shared secret.
+- **The recipient is a separate system, not part of the AWS stack.** This stack knows its base
+  URL and an API key, nothing else; the two sides share only `contracts/` (XSD, HTTP contract,
+  sample messages) and each validates against its own copy. It could live in another cloud, so
+  a mock inside this account would have shown nothing about the interface. The stand-in,
+  `partner-sim/`, is a Python app (a different stack on purpose: a Node.js sender and a Python
+  recipient show that the contract works, not the code). Rejected: a Lambda mock in this account.
+- **The API key lives in SSM Parameter Store (SecureString), written with a write-only
+  argument.** Terraform sends it to SSM and stores it neither in state nor in a plan file; the
+  price is that a rotation needs a version bump (documented at the parameter). Rejected: Secrets
+  Manager (billed per secret), an environment variable (visible in the console).
+- **The exchange record is one S3 object per request**, holding the XML sent and the reply, read
+  back by `GET /requests/{id}/exchange`. One object, so a reader never sees the request of one
+  attempt next to the reply of another. The function that reads it may list the bucket:
+  without that, S3 answers a missing key with 403 and "no exchange yet" would look like an error.
 - **Alarms treat missing data as fine, and the SNS topics are not KMS-encrypted.** An idle
   queue publishes no metric, and encrypted topics can only receive CloudWatch alarms through a
   customer-managed key. The messages hold ids and alarm data, never request text.

@@ -2,7 +2,6 @@ import type {
   AttributeValue,
   DynamoDBRecord,
   DynamoDBStreamEvent,
-  LambdaFunctionURLEvent,
   SQSEvent,
   SQSRecord,
 } from "aws-lambda";
@@ -79,38 +78,3 @@ export function sqsRecord(options: {
 }
 
 export const sqsEvent = (...records: SQSRecord[]): SQSEvent => ({ Records: records });
-
-/** A Lambda Function URL event (payload format 2.0) as the partner mock receives it. */
-export function functionUrlEvent(options: {
-  body?: string;
-  isBase64Encoded?: boolean;
-  headers?: Record<string, string>;
-}): LambdaFunctionURLEvent {
-  return {
-    version: "2.0",
-    routeKey: "$default",
-    rawPath: "/",
-    rawQueryString: "",
-    headers: { "content-type": "application/json", ...options.headers },
-    requestContext: {
-      accountId: "test-account",
-      apiId: "test-url-id",
-      domainName: "test-url-id.lambda-url.eu-north-1.on.aws",
-      domainPrefix: "test-url-id",
-      http: {
-        method: "POST",
-        path: "/",
-        protocol: "HTTP/1.1",
-        sourceIp: "192.0.2.1",
-        userAgent: "vitest",
-      },
-      requestId: "test-gateway-request-id",
-      routeKey: "$default",
-      stage: "$default",
-      time: "21/Sep/2026:10:00:00 +0000",
-      timeEpoch: 1789984800000,
-    },
-    body: options.body,
-    isBase64Encoded: options.isBase64Encoded ?? false,
-  };
-}

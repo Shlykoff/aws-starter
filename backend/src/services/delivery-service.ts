@@ -1,14 +1,17 @@
+import type { PartnerClient } from "../clients/partner-client";
+import type { XmlValidator } from "../clients/xml-validator";
 import { decodeDeliveryMessage } from "../domain/delivery-message";
 import type { DeliveryMessage } from "../domain/delivery-message";
-import { toPartnerPayload } from "../domain/partner-payload";
-import type { PartnerPayload } from "../domain/partner-payload";
+import type { Exchange, Problem } from "../domain/exchange";
+import { readAnswer } from "../domain/reply-reader";
 import { isTerminal } from "../domain/request-status";
 import type { TerminalStatus } from "../domain/request-status";
-import type { PartnerClient } from "../clients/partner-client";
+import { buildSubmissionXml } from "../domain/submission-xml";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
-import type { AuditStore } from "../repositories/audit-store";
+import type { ApiKeyProvider } from "../repositories/api-key-provider";
 import type { DeliveryRepository } from "../repositories/delivery-repository";
+import type { ExchangeStore } from "../repositories/exchange-store";
 import type { StatusNotifier } from "../repositories/status-notifier";
 
 /** One SQS message, as plain values (the handler maps the SQS record to this). */
@@ -23,11 +26,11 @@ export interface DeliveryJob {
 // the others report it as failed, so SQS hands it out again or moves it to the DLQ.
 export type DeliveryOutcome =
   | "sent" // the partner accepted it; status "sent"
-  | "rejected" // the partner refused it for good; status "rejected"
+  | "rejected" // it will never be accepted (refused, invalid, or not writable as XML); status "rejected"
   | "alreadyDone" // it was finished before (or a parallel run finished it): nothing to do
   | "retry" // the partner could not take it now; SQS will hand it out again
   | "failed" // last attempt: status "failed" written, SQS moves the message to the DLQ
-  | "error" // something on our side broke (DynamoDB, S3, a bug); SQS will hand it out again
+  | "error" // something on our side broke (DynamoDB, S3, SSM, a bug); SQS will hand it out again
   | "undeliverable" // a malformed message or an unknown request; goes to the DLQ in the end
   | "notAttempted"; // an earlier message of the batch failed, so this one was not tried
 
@@ -41,21 +44,38 @@ export interface DeliveryResult {
   counts: DeliveryCounts;
 }
 
-// Step 2 of the pipeline (docs/api.md, "delivery-worker"): take a queued request, hand it
-// to the partner, record the result.
+export interface DeliverySettings {
+  /** SENDER_NAME: the name in `Sender/Name` of every submission. */
+  senderName: string;
+  // The queue's maxReceiveCount: the receive on which SQS gives up and moves the message
+  // to the DLQ. Terraform passes the same number to the queue and to this function.
+  maxReceiveCount: number;
+}
+
+// A log line names problems as "element: rule". Both come from closed lists (see
+// src/clients/xsd-findings.ts), never from the document.
+const describeProblem = ({ element, rule }: Problem): string => `${element}: ${rule}`;
+
+// Step 2 of the pipeline (docs/api.md, "delivery-worker"): take a queued request, send it
+// to the partner as XML, record the exchange.
 //
 // The queue may deliver the same message twice, and this code may die half-way. So every
-// step is safe to repeat: a finished request is skipped, the partner deduplicates by
-// Idempotency-Key, the S3 copy is overwritten and status changes are conditional.
+// step is safe to repeat: a finished request is skipped, the partner deduplicates by the
+// MessageId inside the document (which is the request id), the exchange record is
+// overwritten and status changes are conditional.
+//
+// LOGGING: this class logs ids, outcomes, status codes, counts, problem counts and rule
+// names, and nothing else. Never the XML, the subject, the text, the partner name, the
+// description of a reply, or a message of the validator. All of those hold personal data.
 export class DeliveryService {
   constructor(
     private readonly repository: DeliveryRepository,
     private readonly partner: PartnerClient,
-    private readonly audit: AuditStore,
+    private readonly validator: XmlValidator,
+    private readonly apiKeys: ApiKeyProvider,
+    private readonly exchanges: ExchangeStore,
     private readonly notifier: StatusNotifier,
-    // The queue's maxReceiveCount: the receive on which SQS gives up and moves the message
-    // to the DLQ. Terraform passes the same number to the queue and to this function.
-    private readonly maxReceiveCount: number,
+    private readonly settings: DeliverySettings,
     // A parameter only so that tests can fix the clock.
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -103,7 +123,7 @@ export class DeliveryService {
     try {
       return await this.process(message, job.receiveCount, messageLog);
     } catch (error) {
-      // Anything unexpected: DynamoDB or S3 unavailable, missing permissions, a bug. The
+      // Anything unexpected: DynamoDB, S3 or SSM unavailable, missing permissions, a bug. The
       // message is reported as failed and comes back later. This deliberately does NOT
       // write "failed" on the last attempt: the database may be the very thing that broke,
       // and if the partner had already accepted the request, "failed" would be wrong. The
@@ -134,53 +154,155 @@ export class DeliveryService {
       return "alreadyDone";
     }
 
-    // The Idempotency-Key is the request id: if we retry after a crash, the partner
-    // recognises the request and does not process it twice.
-    const payload = toPartnerPayload(request);
-    const answer = await this.partner.send(payload);
+    // One clock reading per attempt: the SentAt inside the XML and the `at` of the record agree.
+    const at = this.now();
 
-    switch (answer.kind) {
+    // Step 2: build the XML. The text of the request is escaped there. Text that XML cannot
+    // carry at all cannot be delivered by any number of retries, so it ends here, and
+    // nobody is called.
+    const submission = buildSubmissionXml({
+      messageId: request.id,
+      sentAt: at,
+      senderName: this.settings.senderName,
+      recipientName: request.partner,
+      subject: request.subject,
+      text: request.body,
+    });
+    if (!submission.ok) {
+      log.warn("The request cannot be written as XML", { elements: submission.elements });
+      return this.recordAndFinish(
+        message,
+        {
+          attempt: receiveCount,
+          at: at.toISOString(),
+          outcome: "unrepresentable",
+          // There is no XML to show. The problems say where the bad character is, not what it is.
+          request: {
+            xml: "",
+            valid: false,
+            problems: submission.elements.map((element) => ({
+              element,
+              rule: "character not allowed in XML",
+            })),
+          },
+          reply: null,
+        },
+        "rejected",
+        log,
+      );
+    }
+    const xml = submission.xml;
+
+    // Step 3: check our own XML against our copy of submission.xsd. The recipient would
+    // refuse a document that fails it, and sending the same text again cannot change that.
+    const checked = await this.validator.validateSubmission(xml);
+    if (!checked.valid) {
+      log.warn("The submission does not match the schema", {
+        problemCount: checked.findings.length,
+        problems: checked.findings.map(describeProblem),
+      });
+      return this.recordAndFinish(
+        message,
+        {
+          attempt: receiveCount,
+          at: at.toISOString(),
+          outcome: "invalid_request",
+          request: { xml, valid: false, problems: checked.findings },
+          reply: null,
+        },
+        "rejected",
+        log,
+      );
+    }
+
+    // Step 4: send it. Not being able to get the key is a problem of ours (SSM, a missing
+    // permission): it throws, and the message comes back later ("error").
+    const apiKey = await this.apiKeys.get();
+    const answer = await this.partner.send({ xml, idempotencyKey: request.id, apiKey });
+    if (answer.kind === "answer" && (answer.httpStatus === 401 || answer.httpStatus === 403)) {
+      // The recipient does not accept our key. It may have been rotated since we read it, so
+      // forget it: the next attempt reads it from SSM again.
+      this.apiKeys.invalidate();
+    }
+
+    // Step 5: the reply is untrusted input. Check its body, then let the reader decide.
+    const replyCheck =
+      answer.kind === "answer" && answer.body !== undefined
+        ? await this.validator.validateReply(answer.body)
+        : undefined;
+    const reading = readAnswer(answer, replyCheck, request.id);
+
+    log.info("The partner answered", {
+      httpStatus: answer.kind === "answer" ? answer.httpStatus : undefined,
+      noAnswer: answer.kind === "no-answer" ? answer.reason : undefined,
+      decision: reading.decision,
+      reason: reading.reason,
+      replyValid: reading.reply?.valid,
+      // Closed values only: a status and a code from the reply schema's enumerations, and
+      // the recipient's own message id (a UUID). The description is free text: never logged.
+      replyStatus: reading.facts?.status,
+      replyCode: reading.facts?.code,
+      replyMessageId: reading.facts?.messageId,
+      replyProblems:
+        replyCheck !== undefined && !replyCheck.valid ? replyCheck.findings.map(describeProblem) : undefined,
+    });
+
+    const exchange: Exchange = {
+      attempt: receiveCount,
+      at: at.toISOString(),
+      outcome: reading.decision,
+      request: { xml, valid: true, problems: [] },
+      reply: reading.reply,
+    };
+
+    // Step 6: the record, then the status.
+    switch (reading.decision) {
       case "delivered":
-        return this.onDelivered(message, payload, answer.statusCode, log);
+        return this.recordAndFinish(message, exchange, "sent", log);
 
-      case "rejected":
+      case "refused":
         // No retry: asking again would get the same answer. Acknowledge the message.
-        log.warn("Partner refused the request", { statusCode: answer.statusCode });
-        return this.finish(message, "rejected", log);
+        log.warn("Partner refused the request", { reason: reading.reason });
+        return this.recordAndFinish(message, exchange, "rejected", log);
 
-      case "retryable":
-        return this.onRetryable(message, receiveCount, answer.reason, log);
+      case "retry":
+        return this.onRetry(message, receiveCount, exchange, reading.reason, log);
     }
   }
 
-  private async onDelivered(
+  // A final outcome: the record comes FIRST, then the status. If the S3 put throws (or the
+  // process dies before the status update), the message is reported as failed and comes
+  // back. The partner deduplicates by the MessageId, so it handles the request once, and the
+  // record is written again under the same key. Writing the status first would leave a "sent"
+  // request without its record for good, because the retry would find it finished and skip it.
+  private async recordAndFinish(
     message: DeliveryMessage,
-    payload: PartnerPayload,
-    partnerStatus: number,
+    exchange: Exchange,
+    status: TerminalStatus,
     log: Logger,
   ): Promise<DeliveryOutcome> {
-    // The audit copy comes first, then the status. If the S3 put throws (or the process
-    // dies before the status update), the message is reported as failed and comes back. The
-    // partner is called again with the same Idempotency-Key, so it handles the request once,
-    // and the copy is written again under the same key. Writing the status first would
-    // leave a "sent" request without its audit copy for good, because the retry would find
-    // it finished and skip it.
-    await this.audit.save(message.requestId, {
-      sentAt: this.now().toISOString(),
-      payload,
-      partnerStatus,
-    });
-    return this.finish(message, "sent", log);
+    await this.exchanges.save(message.requestId, exchange);
+    return this.finish(message, status, log);
   }
 
-  private async onRetryable(
+  private async onRetry(
     message: DeliveryMessage,
     receiveCount: number,
+    exchange: Exchange,
     reason: string,
     log: Logger,
   ): Promise<DeliveryOutcome> {
-    const isLastAttempt = receiveCount >= this.maxReceiveCount;
+    const isLastAttempt = receiveCount >= this.settings.maxReceiveCount;
     log.warn("Partner could not take the request", { reason, receiveCount, isLastAttempt });
+
+    // For a temporary failure the record is diagnostics only: the message is retried anyway.
+    // So a failed write is logged and the retry goes on, instead of turning a partner
+    // problem into an error of ours.
+    try {
+      await this.exchanges.save(message.requestId, exchange);
+    } catch (error) {
+      log.warn("The exchange record could not be written", describeError(error));
+    }
 
     if (!isLastAttempt) return "retry";
 

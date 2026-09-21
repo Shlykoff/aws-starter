@@ -1,15 +1,16 @@
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client, S3ServiceException } from "@aws-sdk/client-s3";
 import { PublishCommand, SNSClient } from "@aws-sdk/client-sns";
 import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { sent } from "../helpers/sqs";
-import { S3AuditStore } from "../../src/repositories/s3-audit-store";
+import type { Exchange } from "../../src/domain/exchange";
+import { S3ExchangeStore } from "../../src/repositories/s3-exchange-store";
 import { SnsStatusNotifier } from "../../src/repositories/sns-status-notifier";
 import { SqsDeliveryQueue } from "../../src/repositories/sqs-delivery-queue";
 
-// The three small adapters that call SQS, SNS and S3. The tests pin down the exact
-// commands, because a wrong field would only show up against the real services.
+// The small adapters that call SQS, SNS and S3. The tests pin down the exact commands,
+// because a wrong field would only show up against the real services.
 const sqs = mockClient(SQSClient);
 const sns = mockClient(SNSClient);
 const s3 = mockClient(S3Client);
@@ -101,37 +102,104 @@ describe("SnsStatusNotifier", () => {
   });
 });
 
-describe("S3AuditStore", () => {
-  const store = new S3AuditStore(new S3Client({}), "demo-dev-deliveries-000000000000");
-  const copy = {
-    sentAt: "2026-09-21T10:00:00.000Z",
-    payload: {
-      id: "r1",
-      partner: "Acme",
-      subject: "Order 42",
-      body: "Please ship.",
-      createdAt: "2026-09-21T09:00:00.000Z",
-    },
-    partnerStatus: 200,
+describe("S3ExchangeStore", () => {
+  const store = new S3ExchangeStore(new S3Client({}), "demo-dev-deliveries-000000000000");
+  const exchange: Exchange = {
+    attempt: 2,
+    at: "2026-09-21T10:00:00.000Z",
+    outcome: "delivered",
+    request: { xml: "<Submission/>", valid: true, problems: [] },
+    reply: { httpStatus: 200, xml: "<Reply/>", valid: true, status: "Accepted" },
   };
+  // What the SDK gives back for an object: a body with `transformToString`.
+  const object = (text: string) => ({ Body: { transformToString: () => Promise.resolve(text) } as never });
+  const denied = () => new S3ServiceException({ name: "AccessDenied", $fault: "client", $metadata: { httpStatusCode: 403 } });
 
-  it("puts { sentAt, payload, partnerStatus } at deliveries/<requestId>.json", async () => {
-    s3.on(PutObjectCommand).resolves({});
+  describe("save", () => {
+    it("puts the exchange as JSON at exchanges/<requestId>.json", async () => {
+      s3.on(PutObjectCommand).resolves({});
 
-    await store.save("r1", copy);
+      await store.save("r1", exchange);
 
-    const calls = s3.commandCalls(PutObjectCommand);
-    expect(calls).toHaveLength(1);
-    const input = calls[0]?.args[0].input;
-    expect(input?.Bucket).toBe("demo-dev-deliveries-000000000000");
-    expect(input?.Key).toBe("deliveries/r1.json");
-    expect(input?.ContentType).toBe("application/json");
-    expect(JSON.parse(input?.Body as string) as unknown).toEqual(copy);
+      const calls = s3.commandCalls(PutObjectCommand);
+      expect(calls).toHaveLength(1);
+      const input = calls[0]?.args[0].input;
+      expect(input?.Bucket).toBe("demo-dev-deliveries-000000000000");
+      expect(input?.Key).toBe("exchanges/r1.json");
+      expect(input?.ContentType).toBe("application/json; charset=utf-8");
+      expect(JSON.parse(input?.Body as string) as unknown).toEqual(exchange);
+      // Encryption comes from the bucket's default: the code asks for nothing special.
+      expect(input).not.toHaveProperty("ServerSideEncryption");
+    });
+
+    it("keeps a reply of null as null", async () => {
+      s3.on(PutObjectCommand).resolves({});
+
+      await store.save("r1", { ...exchange, outcome: "retry", reply: null });
+
+      expect(JSON.parse(s3.commandCalls(PutObjectCommand)[0]?.args[0].input.Body as string)).toMatchObject({ reply: null });
+    });
+
+    it("lets failures reach the caller", async () => {
+      s3.on(PutObjectCommand).rejects(new Error("AccessDenied"));
+
+      await expect(store.save("r1", exchange)).rejects.toThrow("AccessDenied");
+    });
   });
 
-  it("lets failures reach the caller", async () => {
-    s3.on(PutObjectCommand).rejects(new Error("AccessDenied"));
+  describe("find", () => {
+    it("reads the object of that request and returns the exchange", async () => {
+      s3.on(GetObjectCommand).resolves(object(JSON.stringify(exchange)));
 
-    await expect(store.save("r1", copy)).rejects.toThrow("AccessDenied");
+      expect(await store.find("r1")).toEqual(exchange);
+
+      expect(s3.commandCalls(GetObjectCommand)[0]?.args[0].input).toEqual({
+        Bucket: "demo-dev-deliveries-000000000000",
+        Key: "exchanges/r1.json",
+      });
+    });
+
+    it("returns undefined for NoSuchKey, and only for that", async () => {
+      s3.on(GetObjectCommand).rejects(new NoSuchKey({ message: "no such key", $metadata: {} }));
+
+      expect(await store.find("r1")).toBeUndefined();
+    });
+
+    it("throws AccessDenied: a missing permission must not look like 'no delivery attempt yet'", async () => {
+      s3.on(GetObjectCommand).rejects(denied());
+
+      await expect(store.find("r1")).rejects.toMatchObject({ name: "AccessDenied" });
+    });
+
+    it("throws every other failure too", async () => {
+      s3.on(GetObjectCommand).rejects(new Error("connection reset"));
+
+      await expect(store.find("r1")).rejects.toThrow("connection reset");
+    });
+
+    it("throws when the stored object does not have the shape of an exchange, naming the fields and not the content", async () => {
+      const broken = { ...exchange, outcome: "SECRET-value", request: { xml: 42 } };
+      s3.on(GetObjectCommand).resolves(object(JSON.stringify(broken)));
+
+      const failure = store.find("r1");
+
+      await expect(failure).rejects.toThrow(/does not match the expected shape \(outcome, request\.xml/);
+      await expect(failure).rejects.not.toThrow(/SECRET-value/);
+    });
+
+    it("throws a fixed message when the object is not JSON: the parser's own message quotes the text", async () => {
+      s3.on(GetObjectCommand).resolves(object("{ secret request text"));
+
+      const failure = store.find("r1");
+
+      await expect(failure).rejects.toThrow("The stored exchange is not valid JSON");
+      await expect(failure).rejects.not.toThrow(/secret request text/);
+    });
+
+    it("throws for an object without a body", async () => {
+      s3.on(GetObjectCommand).resolves({});
+
+      await expect(store.find("r1")).rejects.toThrow("not valid JSON");
+    });
   });
 });

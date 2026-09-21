@@ -11,9 +11,26 @@ cognito_domain_prefix = "starter-dev-x7k2q9"
 # GitHub secret, passed as TF_VAR_notification_email.
 notification_email = "you@example.com"
 
+# The recipient of the messages: another system, outside this stack (contracts/partner-api.md).
+# Base URL: https://<host>[:<port>], no trailing slash, no path (the worker appends /v1/submissions).
+# In CI the value comes from the GitHub variable PARTNER_URL, passed as TF_VAR_partner_url.
+partner_url = "https://partner.example.com"
+
+# partner_api_key is deliberately NOT set here. It is the secret the recipient checks (header
+# X-API-Key), at least 16 characters. It is an ephemeral variable: Terraform never writes it to
+# the state or to a plan file, so it has to be given again on every plan and every apply. Best
+# pass it as an environment variable, so that it is not in a file:
+#   export TF_VAR_partner_api_key='...'
+# In CI it is the GitHub secret PARTNER_API_KEY, passed as TF_VAR_partner_api_key.
+
+# Rotating the API key: give the new value (see above) AND raise this number by one. Terraform
+# cannot compare the key with what is stored, so it re-sends it only when the number changes.
+# partner_api_key_version = 1
+
 # optional
-# project            = "aws-starter"
-# env                = "dev"
-# region             = "eu-north-1"
-# backend_dist_dir   = "../../../backend/dist"   # build output, relative to this directory
-# enable_static_site = true                      # false = no S3 + CloudFront (API and Cognito only)
+# project                 = "aws-starter"
+# env                     = "dev"
+# region                  = "eu-north-1"
+# backend_dist_dir        = "../../../backend/dist"   # build output, relative to this directory
+# enable_static_site      = true                      # false = no S3 + CloudFront (API and Cognito only)
+# sender_name             = "aws-starter"             # Sender/Name in the XML: letters, digits, space and . , ' & - only, 1-100 characters

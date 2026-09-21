@@ -1,142 +1,111 @@
-import { Sha256 } from "@aws-crypto/sha256-js";
-import { SignatureV4 } from "@smithy/signature-v4";
-import type { PartnerPayload } from "../domain/partner-payload";
-import type { PartnerClient, PartnerResult } from "./partner-client";
+import type { PartnerAnswer } from "../domain/partner-answer";
+import type { PartnerClient, PartnerSubmission } from "./partner-client";
 
-// The partner is a Lambda Function URL with auth type AWS_IAM. AWS checks a SigV4
-// signature on every request, so there is no public endpoint and no shared secret: the
-// worker proves who it is with the credentials of its own IAM role.
+// The HTTP side of contracts/partner-api.md: POST /v1/submissions with an API key. Nothing
+// here is written to the logs: the key, the URL, the headers and the bodies stay out.
 
-// The worker has 15 s in total (docs/api.md). One slow partner must not eat all of it.
+// The worker has 15 s in total (docs/api.md). One slow recipient must not eat all of it.
 const TIMEOUT_MS = 8000;
 
-// The signing name of Lambda function URLs is "lambda" (not "execute-api").
-const SIGNING_SERVICE = "lambda";
+// The reply is untrusted input. The contract limits a Reply to be small, so anything above
+// 64 KiB is not a Reply, and reading more than that would only waste memory.
+export const MAX_REPLY_BYTES = 64 * 1024;
 
-export interface AwsCredentials {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-}
-
-/**
- * The credentials Lambda puts into the environment of every function, taken from the
- * function's execution role. They are read at signing time, not at start-up: the SDK
- * clients also find them lazily.
- */
-export function credentialsFromEnv(env: Record<string, string | undefined> = process.env): AwsCredentials {
-  const { AWS_ACCESS_KEY_ID: accessKeyId, AWS_SECRET_ACCESS_KEY: secretAccessKey } = env;
-  if (accessKeyId === undefined || accessKeyId === "" || secretAccessKey === undefined || secretAccessKey === "") {
-    throw new Error("AWS credentials are missing from the environment");
-  }
-  return { accessKeyId, secretAccessKey, sessionToken: env.AWS_SESSION_TOKEN };
-}
+const SUBMISSIONS_PATH = "/v1/submissions";
+const USER_AGENT = "aws-starter-worker/1";
 
 interface HttpPartnerClientOptions {
-  /** The Function URL of the partner. */
-  url: string;
-  /** The region the URL lives in (the same region as the worker). */
-  region: string;
-  credentials: () => AwsCredentials;
-  // The last two are parameters only so that tests can replace the network and the clock.
+  /** PARTNER_URL: scheme, host and port only (lib/config.ts checks it). The path is added here. */
+  baseUrl: string;
+  // A parameter only so that tests can replace the network. Production uses the global fetch
+  // of Node 24, so no HTTP library is needed.
   fetch?: typeof fetch;
-  now?: () => Date;
 }
 
 export class HttpPartnerClient implements PartnerClient {
-  private readonly url: URL;
-  private readonly signer: SignatureV4;
+  private readonly endpoint: URL;
   private readonly fetch: typeof fetch;
-  private readonly now: () => Date;
 
   constructor(options: HttpPartnerClientOptions) {
-    this.url = new URL(options.url);
+    this.endpoint = new URL(SUBMISSIONS_PATH, options.baseUrl);
     this.fetch = options.fetch ?? fetch;
-    this.now = options.now ?? (() => new Date());
-    this.signer = new SignatureV4({
-      service: SIGNING_SERVICE,
-      region: options.region,
-      credentials: () => Promise.resolve(options.credentials()),
-      sha256: Sha256,
-    });
   }
 
-  async send(payload: PartnerPayload): Promise<PartnerResult> {
-    const body = JSON.stringify(payload);
-    const headers = await this.signedHeaders(payload.id, body);
-
+  async send({ xml, idempotencyKey, apiKey }: PartnerSubmission): Promise<PartnerAnswer> {
     let response: Response;
     try {
-      response = await this.fetch(this.url.href, {
+      response = await this.fetch(this.endpoint.href, {
         method: "POST",
-        headers,
-        body,
-        // Never follow a redirect: the request is signed for this URL only.
-        redirect: "error",
+        headers: {
+          "X-API-Key": apiKey,
+          // Only the media type counts to the recipient; the document's own XML declaration
+          // says UTF-8, and `fetch` sends a string body as UTF-8.
+          "Content-Type": "application/xml",
+          "Idempotency-Key": idempotencyKey,
+          "User-Agent": USER_AGENT,
+          Accept: "application/xml",
+        },
+        body: xml,
+        // Never follow a redirect: the request carries the API key, and a redirect could send
+        // it to another host. With "manual" the 3xx answer comes back as it is, and the reply
+        // reader treats it as a failure.
+        redirect: "manual",
+        // The limit covers connecting, waiting for the answer AND reading its body.
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (error) {
-      // Timeout, DNS or connection problem: the partner never answered. Try again later.
+      // Timeout, DNS or connection problem: nobody answered. (The error is not kept: its
+      // text can contain the host name.)
       const timedOut = error instanceof Error && error.name === "TimeoutError";
-      return { kind: "retryable", reason: timedOut ? "timeout" : "network_error" };
+      return { kind: "no-answer", reason: timedOut ? "timeout" : "network_error" };
     }
 
-    // Only the status matters. Cancelling the body frees the connection for the next call.
-    await response.body?.cancel().catch(() => undefined);
-    return classify(response.status);
-  }
-
-  // The headers to send: Content-Type and Idempotency-Key, plus the ones the signature adds
-  // (Authorization, X-Amz-Date, X-Amz-Security-Token, ...). The URL has no query string.
-  private async signedHeaders(idempotencyKey: string, body: string): Promise<Record<string, string>> {
-    const signed = await this.signer.sign(
-      {
-        method: "POST",
-        protocol: this.url.protocol,
-        hostname: this.url.hostname,
-        path: this.url.pathname,
-        query: {},
-        // `host` is part of every signature. fetch sets it by itself, from the URL.
-        headers: {
-          host: this.url.host,
-          "content-type": "application/json",
-          "idempotency-key": idempotencyKey,
-        },
-        body,
-      },
-      { signingDate: this.now() },
-    );
-
-    const headers: Record<string, string> = {};
-    for (const [name, value] of Object.entries(signed.headers)) {
-      if (name !== "host") headers[name] = value;
-    }
-    return headers;
+    return { kind: "answer", httpStatus: response.status, ...(await readBody(response)) };
   }
 }
 
-// The 4xx answers that are NOT a final refusal (docs/api.md, "delivery-worker", step 2):
-//   401, 403  come from AWS itself, in front of the partner's code: our own credentials or
-//             permissions are wrong (the role, the Function URL policy, the signature). That
-//             is our fault and can be fixed, so it must not end as a silent "rejected": it is
-//             retried and, if it never works, ends as "failed" with an alarm.
-//   408, 429  the partner gave up waiting for us, or asks us to slow down: temporary.
-const RETRYABLE_CLIENT_ERRORS = [401, 403, 408, 429];
+type Body = { body: string | undefined; bodyProblem?: "too_large" | "unreadable" };
 
-// The rule of docs/api.md ("delivery-worker", step 2), in one place.
-function classify(statusCode: number): PartnerResult {
-  if (statusCode >= 200 && statusCode < 300) return { kind: "delivered", statusCode };
+// Reads the body as text, but never more than MAX_REPLY_BYTES. It reads the stream chunk by
+// chunk and stops at the limit, instead of `response.text()`, which would buffer a body of
+// any size before we could look at it.
+async function readBody(response: Response): Promise<Body> {
+  if (response.body === null) return { body: undefined };
 
-  // Every 5xx is temporary by nature.
-  if (statusCode >= 500 || RETRYABLE_CLIENT_ERRORS.includes(statusCode)) {
-    return { kind: "retryable", reason: `http_${statusCode}`, statusCode };
+  // The cheap check first: a recipient that announces too much is not read at all.
+  const announced = Number(response.headers.get("content-length"));
+  if (announced > MAX_REPLY_BYTES) {
+    await response.body.cancel().catch(() => undefined);
+    return { body: undefined, bodyProblem: "too_large" };
   }
 
-  // Any other 4xx (400, 404, 422, ...): the partner understood the request and refused it.
-  // Sending the same thing again would get the same answer.
-  if (statusCode >= 400) return { kind: "rejected", statusCode };
+  // The header may be missing (chunked answers) or wrong, so the bytes that really arrive
+  // are counted as well.
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_REPLY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        return { body: undefined, bodyProblem: "too_large" };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    // The connection broke, or the 8 s ran out, while the body was coming in. The status
+    // code is still known, so the answer is kept and only the body is lost.
+    return { body: undefined, bodyProblem: "unreadable" };
+  }
 
-  // 1xx and 3xx cannot be the final answer of a POST that does not follow redirects. If one
-  // ever shows up, retrying is safer than declaring the request refused.
-  return { kind: "retryable", reason: `http_${statusCode}`, statusCode };
+  if (total === 0) return { body: undefined };
+  try {
+    // `fatal`: bytes that are not UTF-8 are an error, not silently replaced by U+FFFD.
+    return { body: new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)) };
+  } catch {
+    return { body: undefined, bodyProblem: "unreadable" };
+  }
 }
