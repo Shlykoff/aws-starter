@@ -160,7 +160,8 @@ Table `<project>-<env>-requests`, provisioned 5 RCU / 5 WCU, no autoscaling.
 | sort | `sk` (S) | `REQ#<ULID>` |
 
 Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`, `retryCount` (once
-the request has been sent again), and once the client has acted `clientDecision` (a map: the fields of "Model" plus `eventId`, the id of the event
+the request has been sent again), `traceparent` (the W3C trace context of its creation or of the last
+resend: see "Traces"; never returned), and once the client has acted `clientDecision` (a map: the fields of "Model" plus `eventId`, the id of the event
 that set it, kept for the "same event" rule and never returned) and `decisionAtMs` (number, epoch
 milliseconds of `clientDecision.at`, for the comparison of the webhook).
 
@@ -330,8 +331,8 @@ checks ownership in the table before it touches S3).
 | `log-archiver` | CloudWatch Logs subscription (asynchronous) | | `s3:PutObject` on `logs/*` of the log archive bucket |
 | `get-exchange` | `GET /requests/{id}/exchange` | `GetItem` | `s3:GetObject` on `exchanges/*`; `s3:ListBucket` on the bucket (without it S3 answers a missing key with 403 instead of 404; a prefix condition would not help, a GetObject request carries no prefix) |
 
-- Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. X-Ray active tracing on the
-  functions that write (see "Traces"). Timeouts:
+- Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB (512 MB for the functions that
+  are traced, see "Traces"). Timeouts:
   API functions, `receive-webhook`, `enqueuer` and `log-archiver` 10 s, `delivery-worker` 15 s.
 - The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
   event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
@@ -396,7 +397,8 @@ checks ownership in the table before it touches S3).
   | `retry_requested` | `retry-request` | `user` | `fromStatus` `failed`, `toStatus` `created`, `retryCount` (the new value) |
   | `decision_recorded` | `receive-webhook` | `recipient` | `decision` (`Approved` or `Declined`) |
 
-  All lines carry `requestId` (and, like every line of a function, `awsRequestId`). There is no user
+  All lines carry `requestId` (and, like every line of a function, `awsRequestId`), and `traceId` when
+  they are written inside a trace ("Traces"). There is no user
   id and no text: `role` says who acted. The events are the audit trail of the request (the table
   keeps only the current status), and the source of the delivery metrics and of the request
   timeline. What to know when reading them:
@@ -452,26 +454,45 @@ queried with Athena. The logs hold no personal data (the log guard, "Logs"), so 
 
 ## Traces
 
-X-Ray **active tracing** is on for the functions that write: `create-request`, `retry-request`,
-`receive-webhook`, the `enqueuer` and the `delivery-worker`. Lambda records a trace for the
-invocations X-Ray samples: how long the start-up took (`Initialization`, the cold start), how long the
-run took, errors and throttles. Nothing is added to the code of the functions, and there is no new
-dependency.
+One request is one trace: from its creation, through the stream, the enqueuer and the queue, to the
+delivery, the call to the recipient and the decision webhook. It takes two halves that fit together.
 
-- **Sampling**: X-Ray's default, and for Lambda it cannot be set: one invocation a second, then 5 % of
-  the rest.
-- **Not traced**: `list-requests`, `get-request` and `get-exchange`, which the browser polls (every 5 s
-  while a request is in progress, every 30 s on a details page that waits for a decision, with no time
-  limit: one forgotten tab makes about 86,000 calls a month, most of the 100,000 free traces), and
-  the `log-archiver`, which runs once per batch of anybody's log lines and would only add traces that
-  say nothing about a request.
-- **What a trace does not show**: the calls a function makes (DynamoDB, SQS, S3, the recipient) would
-  have to be instrumented in the code, and one request is not one trace: the HTTP API has no X-Ray
-  integration and the DynamoDB stream does not carry a trace, so creating, enqueuing and delivering a
-  request are separate traces. To follow one request across all of them, use its id in the logs
-  ("Logs").
+- **The SDK and the exporter are AWS's.** The Lambda layer `AWSOpenTelemetryDistroJs` (pinned, version
+  14) is attached to the functions that write: `create-request`, `retry-request`, `receive-webhook`,
+  the `enqueuer` and the `delivery-worker`. Its start script (`AWS_LAMBDA_EXEC_WRAPPER`) starts the
+  OpenTelemetry SDK before our code, makes a span for every invocation and sends the spans to the
+  X-Ray OTLP endpoint, signed with the function's role: no collector. The calls made through `http` and
+  `fetch` (DynamoDB, SQS, SNS, S3, SSM, the recipient) become client spans with the host and the
+  status. These functions have 512 MB, and Lambda's active tracing stays on (it hands the trace header of
+  a queue message to the function).
+- **The trace context is carried by our code** (`src/lib/tracing.ts`, the OpenTelemetry API only: without
+  the layer every call does nothing), because the stream and the HTTP webhook carry no trace:
+  - `create-request` and `retry-request` store a W3C `traceparent` in the request item, in the same
+    write (a retry replaces it: it starts a new trace). It is never returned by the API.
+  - The enqueuer reads it from the stream image, records a span `enqueue request` in that trace and
+    puts the X-Ray form of it into the queue message (the system attribute `AWSTraceHeader`, which needs
+    no permission beyond `sqs:SendMessage`). The worker's invocation joins the trace by itself.
+  - The webhook gets the stored `traceparent` with the answer of its update (`ReturnValues: ALL_OLD`: no
+    extra read, and only that attribute is used) and records a span `record decision` in that trace after
+    the fact, from the moment its call began.
+  - Every port (repository, client, queue, store) is wrapped once in its container: each call is a span
+    `<port>.<method>`, without arguments or results. The worker's call to the recipient is a span
+    `call recipient`.
+- **What a span may hold**: the same as a log line. Attributes pass the guard of `lib/log-fields.ts`
+  (a name on the list, a value of its shape), an error is recorded by its type only, never its message,
+  and `recordException` is not used.
+- **Where the spans are**: CloudWatch Transaction Search. X-Ray keeps every span as a structured log in
+  the group `aws/spans` (30 days) and indexes 1 % of the traces for the X-Ray console (1 % is free). The
+  `Request event` lines carry the `traceId` of the trace they belong to: search `aws/spans` for it.
+- **Not in a trace**: the browser and API Gateway (the HTTP API has no X-Ray integration, so a trace
+  starts in `create-request`); the functions the browser polls (`list-requests`, `get-request`,
+  `get-exchange`); the `log-archiver`.
+- **Cost**: in money, span ingestion is log ingestion, inside the 5 GB free a month, and the layer is
+  free. In time, measured (256 MB without the layer, 512 MB with it): the start-up of a cold function
+  went from 0.31 to 0.43 s to 1.1 to 2.4 s, and the memory in use grew by 95 to 150 MB. The XML
+  validator started a worker thread per check, and every thread started the whole SDK again, which made
+  a warm `receive-webhook` take 1.7 s instead of 0.75 s; the build now changes the copy of `xmllint-wasm`
+  so that its worker starts without the layer's option (`scripts/build.mjs`), and the same call takes
+  0.5 to 0.7 s.
 - **IAM**: the two write actions (`xray:PutTraceSegments`, `xray:PutTelemetryRecords`) on `*`: X-Ray
   has no resource-level permissions for them. Only the traced functions get them.
-- **Cost**: inside the always-free X-Ray tier (100,000 traces recorded and 1,000,000 retrieved or
-  scanned a month).
-

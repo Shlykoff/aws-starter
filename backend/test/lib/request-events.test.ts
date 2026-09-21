@@ -6,7 +6,9 @@ import { LogGuardError, sanitizeFields } from "../../src/lib/log-fields";
 import { createLogger } from "../../src/lib/logger";
 import { logRequestEvent } from "../../src/lib/request-events";
 import type { RequestEvent } from "../../src/lib/request-events";
+import { withSpan } from "../../src/lib/tracing";
 import { captureLogs } from "../helpers/logs";
+import { recordSpans } from "../helpers/tracing";
 
 const ID = "01M30JDSMHY8CRX59V35WV731S";
 
@@ -42,6 +44,14 @@ describe("logRequestEvent", () => {
         partnerMs: 120,
       },
     ]);
+  });
+
+  it("adds no trace id without an SDK: the line is exactly the fields of the event", () => {
+    const logs = captureLogs();
+
+    logRequestEvent(createLogger("info"), EXAMPLES[0] as RequestEvent);
+
+    expect(Object.keys(logs.entries()[0] ?? {}).sort()).toEqual(["event", "level", "message", "requestId", "role", "toStatus"]);
   });
 
   it("leaves out an optional field that is not there", () => {
@@ -111,5 +121,34 @@ describe("the log guard: the fields of the request events", () => {
   it("outcome takes the five outcomes of a delivery attempt and decision the two decisions, as they are", () => {
     for (const outcome of EXCHANGE_OUTCOMES) expect(problemsOf({ outcome }), outcome).toEqual([]);
     for (const decision of DECISIONS) expect(problemsOf({ decision }), decision).toEqual([]);
+  });
+});
+
+describe("logRequestEvent inside a span", () => {
+  const spans = recordSpans();
+
+  it("adds the trace id of the active span, so the timeline of a request can jump to the trace", async () => {
+    const logs = captureLogs();
+
+    await withSpan("invocation", {}, () => {
+      logRequestEvent(createLogger("info", {}, { strict: true }), EXAMPLES[0] as RequestEvent);
+    });
+
+    const traceId = spans.only("invocation").spanContext().traceId;
+    expect(traceId).toMatch(/^[0-9a-f]{32}$/);
+    expect(logs.entries()).toEqual([
+      { level: "info", message: "Request event", event: "request_created", role: "user", requestId: ID, toStatus: "created", traceId },
+    ]);
+  });
+});
+
+describe("the log guard: traceId", () => {
+  it("takes 32 lower-case hex digits and nothing else", () => {
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+
+    expect(sanitizeFields({ traceId }).problems).toEqual([]);
+    for (const bad of [traceId.toUpperCase(), traceId.slice(1), `${traceId}0`, `${traceId.slice(0, 31)}g`, "", `${traceId} `, 42, null, [traceId]]) {
+      expect(sanitizeFields({ traceId: bad }).fields.traceId, String(bad)).toBe("[rejected]");
+    }
   });
 });

@@ -2,6 +2,7 @@ import type { Decision } from "../domain/client-decision";
 import type { ExchangeOutcome } from "../domain/exchange";
 import type { Logger } from "./logger";
 import { recordMetric } from "./metrics";
+import { currentTraceId } from "./tracing";
 
 // The request events of docs/api.md ("Logs", "Request events"): one log line for each change in
 // the life of a request. They are the audit trail (the table keeps only the current status), the
@@ -66,10 +67,11 @@ export type RequestEvent =
 /**
  * Writes one request event: the message is always the same, the fields are those of the event.
  * The two durations that an event carries are also published as metrics (lib/metrics.ts), so a
- * percentile of them can be graphed and alarmed on.
+ * percentile of them can be graphed and alarmed on. When a trace is active, its id is added, so
+ * the timeline of a request can jump to the trace (no field of the event; nothing without an SDK).
  */
 export function logRequestEvent(log: Logger, event: RequestEvent): void {
-  log.info("Request event", { ...event });
+  log.info("Request event", { ...event, traceId: currentTraceId() });
 
   if (event.event === "request_sent") recordMetric("TimeToSentMs", event.sinceCreatedMs);
   if (event.event === "delivery_attempted" && event.partnerMs !== undefined) recordMetric("PartnerMs", event.partnerMs);

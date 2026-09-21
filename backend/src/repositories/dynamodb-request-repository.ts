@@ -27,7 +27,8 @@ import type { RequestRepository, RetryOutcome } from "./request-repository";
 // Other attributes: id, partner, subject, body, status, createdAt (see RequestItem), retryCount
 // once the request has been sent again, and once the client has acted clientDecision and
 // decisionAtMs (written by the webhook, see dynamodb-decision-repository.ts, which also
-// explains the index `by-request-id`).
+// explains the index `by-request-id`). And, when tracing is on, `traceparent`: the trace of the
+// request (see RequestItem).
 //
 // Why this is safe: `ownerId` always comes from the verified token, never from the client,
 // and it is the whole partition key. A user therefore cannot even address another user's
@@ -48,13 +49,17 @@ interface RequestItem {
   createdAt: string;
   // Only there once the request has been sent again. Counted here, never returned.
   retryCount?: number;
+  // The W3C traceparent of the request's trace (lib/tracing.ts), written by the same PutItem
+  // that creates the item and REPLACED by the same UpdateItem that sends it again. The stream
+  // shows it to the enqueuer, which continues the trace. Only for the pipeline: never returned.
+  traceparent?: string;
   // Only there once the client has acted. `decisionAtMs` (the number the webhook compares) is
   // stored too, but the API never needs it, so it is not part of this type.
   clientDecision?: StoredClientDecision;
 }
 
 // The reverse mapping. It copies fields one by one instead of returning the item, so `pk`
-// and `sk` (which contain the owner) and `decisionAtMs` can never end up in an API response.
+// and `sk` (which contain the owner), `decisionAtMs` and `traceparent` can never end up in an API response.
 // `toClientDecision` does the same for the decision, and leaves out its `eventId`.
 function toPartnerRequest(item: RequestItem): PartnerRequest {
   return {
@@ -76,7 +81,7 @@ export class DynamoRequestRepository implements RequestRepository {
     private readonly tableName: string,
   ) {}
 
-  async create(ownerId: string, request: PartnerRequest): Promise<void> {
+  async create(ownerId: string, request: PartnerRequest, traceparent?: string): Promise<void> {
     const item: RequestItem = {
       pk: ownerKey(ownerId),
       sk: requestKey(request.id),
@@ -86,6 +91,8 @@ export class DynamoRequestRepository implements RequestRepository {
       body: request.body,
       status: request.status,
       createdAt: request.createdAt,
+      // Only when there is a trace: an item without one is valid (tracing off, older items).
+      ...(traceparent !== undefined && { traceparent }),
     };
 
     await this.client.send(
@@ -133,21 +140,31 @@ export class DynamoRequestRepository implements RequestRepository {
   // One conditional UpdateItem, so that "is it failed?" and "make it created" happen together.
   // The API writes only to the table (the outbox): the stream shows the change to the enqueuer,
   // which puts the request on the queue again (docs/api.md, "Sending a failed request again").
-  async retry(ownerId: string, id: string): Promise<RetryOutcome> {
+  async retry(ownerId: string, id: string, traceparent?: string): Promise<RetryOutcome> {
     try {
       const result = await this.client.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key: { pk: ownerKey(ownerId), sk: requestKey(id) },
           // ADD on a number that is not there yet starts from 0, so the first send stores 1.
-          UpdateExpression: "SET #status = :created ADD retryCount :one",
+          // The new trace REPLACES the old one in the same update: what the stream shows to the
+          // enqueuer is always the trace of this send. Without a trace the old one stays.
+          UpdateExpression:
+            traceparent === undefined
+              ? "SET #status = :created ADD retryCount :one"
+              : "SET #status = :created, traceparent = :traceparent ADD retryCount :one",
           // Only a failed request may be sent again (the rule of request-status.ts). A missing
           // item has no status, so this fails for it too and no item is created;
           // attribute_exists(pk) only says so out loud.
           // `status` is a reserved word in DynamoDB expressions, hence the #status alias.
           ConditionExpression: "attribute_exists(pk) AND #status = :failed",
           ExpressionAttributeNames: { "#status": "status" },
-          ExpressionAttributeValues: { ":created": "created", ":failed": "failed", ":one": 1 },
+          ExpressionAttributeValues: {
+            ":created": "created",
+            ":failed": "failed",
+            ":one": 1,
+            ...(traceparent !== undefined && { ":traceparent": traceparent }),
+          },
           // The whole item after the update: the answer is built from it, no second read.
           ReturnValues: "ALL_NEW",
           // If the condition fails, hand back the item as it is: its status (or its absence)

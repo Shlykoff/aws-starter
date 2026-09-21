@@ -1,4 +1,5 @@
-// What may be written to the logs (used by lib/logger.ts).
+// What may be written to the logs (used by lib/logger.ts) and to the attributes of a trace span
+// (lib/tracing.ts, which drops what a log line would replace).
 //
 // The logs hold no message text, no partner names, no reasons, no tokens: those are personal
 // data, and a log line outlives the request (14 days in CloudWatch, readable by everybody who can
@@ -20,6 +21,10 @@
 // (see `errorText`): error texts of libraries can quote the value that made them fail.
 
 const REJECTED = Symbol("rejected");
+
+/** What is written instead of the value of a field that is not on the list, or has the wrong shape. */
+export const UNLISTED_TEXT = "[unlisted]";
+export const REJECTED_TEXT = "[rejected]";
 
 /** Returns the value to write (possibly changed), or REJECTED. */
 type Check = (value: unknown) => unknown;
@@ -89,6 +94,8 @@ const FIELDS: Record<string, Check> = {
   messageId: id,
   replyMessageId: id,
   sequenceNumber: id,
+  // the trace of the request (lib/tracing.ts): 32 lower-case hex digits, as in a W3C traceparent
+  traceId: matches(/^[0-9a-f]{32}$/),
   // outcomes, statuses and reasons: words
   outcome: word,
   decision: word,
@@ -196,13 +203,13 @@ export function sanitizeFields(fields: Record<string, unknown>): Sanitized {
 
     const check = FIELDS[name];
     if (check === undefined) {
-      clean[name] = "[unlisted]";
+      clean[name] = UNLISTED_TEXT;
       problems.push(`the field "${name}" is not on the list (src/lib/log-fields.ts)`);
       continue;
     }
     const checked = check(value);
     if (checked === REJECTED) {
-      clean[name] = "[rejected]";
+      clean[name] = REJECTED_TEXT;
       problems.push(`the value of the field "${name}" does not have its shape (src/lib/log-fields.ts)`);
       continue;
     }

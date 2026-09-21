@@ -5,6 +5,7 @@ import { bindDynamoDocumentClient } from "./container-dynamodb";
 import { bindLogger } from "./container-shared";
 import { loadEnqueuerConfig } from "./lib/config";
 import type { EnqueuerConfig } from "./lib/config";
+import { tracedPort } from "./lib/tracing";
 import { DynamoDeliveryRepository } from "./repositories/dynamodb-delivery-repository";
 import type { DeliveryQueue } from "./repositories/delivery-queue";
 import type { DeliveryRepository } from "./repositories/delivery-repository";
@@ -29,7 +30,7 @@ container
   .bind<DeliveryRepository>(TOKENS.DeliveryRepository)
   .toResolvedValue(
     (client: DynamoDBDocumentClient, { tableName }: EnqueuerConfig) =>
-      new DynamoDeliveryRepository(client, tableName),
+      tracedPort(new DynamoDeliveryRepository(client, tableName), "deliveries"),
     [TOKENS.DynamoDocumentClient, TOKENS.EnqueuerConfig],
   )
   .inSingletonScope();
@@ -37,7 +38,8 @@ container
 container
   .bind<DeliveryQueue>(TOKENS.DeliveryQueue)
   .toResolvedValue(
-    (client: SQSClient, { queueUrl }: EnqueuerConfig) => new SqsDeliveryQueue(client, queueUrl),
+    (client: SQSClient, { queueUrl }: EnqueuerConfig) =>
+      tracedPort(new SqsDeliveryQueue(client, queueUrl), "queue"),
     [TOKENS.SqsClient, TOKENS.EnqueuerConfig],
   )
   .inSingletonScope();

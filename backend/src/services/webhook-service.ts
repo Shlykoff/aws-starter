@@ -6,6 +6,7 @@ import { UNREADABLE_DOCUMENT_RULES, isUnreadableDocument } from "../domain/valid
 import { checkSignatureHeaders, signatureMatches } from "../domain/webhook-signature";
 import type { LogFields, Logger } from "../lib/logger";
 import { logRequestEvent } from "../lib/request-events";
+import { contextFromTraceparent, withSpan } from "../lib/tracing";
 import type { DecisionRepository, RecordOutcome } from "../repositories/decision-repository";
 import type { SecretProvider } from "../repositories/secret-provider";
 
@@ -115,16 +116,33 @@ export class WebhookService {
       receivedAt: now.toISOString(),
       eventId: facts.eventId,
     };
-    const outcome = await this.decisions.recordDecision(facts.relatesTo, decision, facts.occurredAtMs);
+    const { outcome, traceparent } = await this.decisions.recordDecision(facts.relatesTo, decision, facts.occurredAtMs);
     // An event of the request only when the decision was stored: not for a duplicate, an older
     // event that was ignored, or a request that does not exist.
-    if (outcome === "applied") {
-      logRequestEvent(log, {
-        event: "decision_recorded",
-        role: "recipient",
-        requestId: facts.relatesTo,
-        decision: decision.decision,
-      });
+    const logEvent = (): void => {
+      if (outcome === "applied") {
+        logRequestEvent(log, {
+          event: "decision_recorded",
+          role: "recipient",
+          requestId: facts.relatesTo,
+          decision: decision.decision,
+        });
+      }
+    };
+    // The webhook call carries no trace, so its span is recorded AFTER the fact, in the trace that
+    // is stored with the request: it starts when this call began and ends now, and its parent is
+    // the span of the request's creation. The event is logged inside it, so its line has the
+    // request's trace id. A request without a stored trace gets no span.
+    const parent = contextFromTraceparent(traceparent);
+    if (parent === undefined) {
+      logEvent();
+    } else {
+      await withSpan(
+        "record decision",
+        { requestId: facts.relatesTo, decision: facts.decision, outcome },
+        logEvent,
+        { parent, startTime: now.getTime() },
+      );
     }
     // The ids and the decision come from fields the schema checked (a ULID, a UUID, one of two words).
     return finish(outcome, {

@@ -26,7 +26,8 @@ import { applyUpdate, evaluateCondition } from "./dynamo-condition";
 // lets it through and the item is missing, a failed condition hands the old item back, in
 // DynamoDB's typed format, when the request asks for it (ReturnValuesOnConditionCheckFailure),
 // and a successful one hands the new item back as a plain object for ReturnValues ALL_NEW
-// (the retry of a failed request, which also counts with `ADD retryCount :one`).
+// (the retry of a failed request, which also counts with `ADD retryCount :one`) and the old one
+// for ALL_OLD (the decision of the webhook, which reads the `traceparent` of the request).
 
 export interface StoredItem {
   pk: string;
@@ -130,10 +131,14 @@ export function stubTable(mock: AwsClientStub<DynamoDBDocumentClient>): FakeTabl
     }
     // UpdateItem CREATES an item that does not exist: only a condition can prevent it.
     const item = stored ?? { pk: input.Key.pk, sk: input.Key.sk };
+    const before = stored === undefined ? undefined : structuredClone(stored);
     applyUpdate(item, input.UpdateExpression ?? "", context);
     table.set(keyOf(input.Key.pk, input.Key.sk), item);
-    // The document client hands the new item back as a plain object when asked (ALL_NEW).
-    return input.ReturnValues === "ALL_NEW" ? { Attributes: structuredClone(item) } : {};
+    // The document client hands the item back as a plain object when asked: as it is now
+    // (ALL_NEW), or as it was before the update (ALL_OLD, nothing for an item that was created).
+    if (input.ReturnValues === "ALL_NEW") return { Attributes: structuredClone(item) };
+    if (input.ReturnValues === "ALL_OLD" && before !== undefined) return { Attributes: before };
+    return {};
   }
 
   mock.on(QueryCommand).callsFake(

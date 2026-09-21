@@ -398,21 +398,25 @@ Written down as they are made; each stage adds its own.
   archive a line twice) and writes it. The price: a batch that fails three times is lost from the
   archive (the lines are still in CloudWatch for 30 days). Rejected: a scheduled export task (a
   batch job per day, hours of delay, one export at a time) and paying for Firehose.
-- **Traces start with X-Ray active tracing and no code; the calls inside a function are not traced
-  (yet).** Lambda records a trace per sampled invocation: how long the start-up took (the cold start),
-  how long the run took, errors. It is on for the functions that write and the two of the pipeline. The
-  functions the browser polls stay off: the sampling of active tracing is fixed (one a second, then
-  5 %) and cannot be lowered, and one forgotten browser tab polling every 30 s makes about 86,000
-  calls a month, most of the 100,000 free traces. Rejected, each for a reason found in the
-  documentation: the X-Ray SDK (in maintenance mode since 25 February 2026, security fixes only); the
-  ADOT auto-instrumentation layer (it asks for the handler to be exported with `module.exports` and
-  hooks `require`, while our functions are ES-module bundles with the AWS SDK inlined; its
-  documentation says Node.js 18+ and does not mention 24; AWS itself warns of more memory and a
-  longer cold start); OpenTelemetry spans in our code with the collector as a layer (it works with
-  bundles, but adds a layer to every function and a flush before every return; kept for later, when the
-  traces show what is missing). Cost: nothing. What is missing: an invocation split into its DynamoDB,
-  SQS and recipient calls, and one trace per request (the HTTP API and the DynamoDB stream carry no
-  trace); the request id in the logs does that job.
+- **A request has one trace: AWS's layer records, our code carries the context.** The layer
+  `AWSOpenTelemetryDistroJs` (nodejs24.x, arm64, ES-module bundles; found by reading the layer itself)
+  adds the OpenTelemetry SDK and sends the spans to the X-Ray OTLP endpoint, signed with the function's
+  role, so there is no collector to run. AWS requires CloudWatch Transaction Search for that endpoint:
+  the spans are kept as logs (`aws/spans`, 30 days, all of them), 1 % of the traces are indexed for the
+  X-Ray console (free). The DynamoDB stream and the HTTP webhook carry no trace, so the code stores a W3C
+  `traceparent` on the request item and passes it in the queue message; only the OpenTelemetry API is in
+  the code, which does nothing without the layer. Found on the way, and measured: with the layer a
+  cold start is about a second longer (0.3 to 0.4 s before, 1.1 to 2.4 s after) and a function uses about
+  100 MB more (so 512 MB, not 256); and the XML validator's worker threads each started the whole SDK
+  again (a warm webhook 1.7 s instead of 0.75 s), fixed in the build. Rejected: the X-Ray SDK (in
+  maintenance mode since 25 February 2026, security fixes only); the older ADOT layer (it asks for the
+  handler to be exported with `module.exports`); Lambda's active tracing alone (seen on AWS: six
+  unconnected traces); a collector layer or the CloudWatch agent (a second process in every function);
+  a REST API instead of the HTTP API, which would make the gateway a node of the trace (a rewrite of the
+  API module and of the event format of six handlers, $3.50 instead of $1 per million calls, and it does
+  not carry a trace over the stream or the queue, which is the part done in code). Left out, on
+  purpose: the browser and the gateway, and the functions the browser polls (every 5 s, and every 30 s
+  while a decision is awaited).
 - **The recipient runs on a free container host, not on a laptop.** A laptop that sleeps breaks
   deliveries and keeps the data on a personal machine. The image is built by a workflow, so what runs
   is what was tested, and the host only pulls it. Rejected: Render's free tier (no persistent disk,

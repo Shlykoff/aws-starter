@@ -55,6 +55,18 @@ describe("DynamoRequestRepository.create", () => {
     });
   });
 
+  it("stores the traceparent in the same item when there is one, and no attribute when there is none", async () => {
+    ddb.on(PutCommand).resolves({});
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    await repository.create("user-a", request, traceparent);
+    await repository.create("user-a", request);
+
+    const [withTrace, withoutTrace] = ddb.commandCalls(PutCommand).map((call) => call.args[0].input.Item);
+    expect(withTrace).toMatchObject({ id: ID, traceparent });
+    expect(withoutTrace).not.toHaveProperty("traceparent");
+  });
+
   it("lets a failed conditional put reach the caller", async () => {
     ddb.on(PutCommand).rejects(
       new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} }),
@@ -111,6 +123,19 @@ describe("DynamoRequestRepository.listByOwner", () => {
     expect(first).not.toHaveProperty("pk");
     expect(first).not.toHaveProperty("sk");
     expect(JSON.stringify(first)).not.toContain("user-a");
+  });
+
+  it("does not return the trace of a request: `traceparent` is for the pipeline, not for the API", async () => {
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    ddb.on(QueryCommand).resolves({ Items: [{ pk: "USER#user-a", sk: `REQ#${ID}`, ...request, traceparent }] });
+    ddb.on(GetCommand).resolves({ Item: { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, traceparent } });
+
+    const [listed] = await repository.listByOwner("user-a", 50);
+    const found = await repository.findById("user-a", ID);
+
+    expect(listed).toEqual(request);
+    expect(found).toEqual(request);
+    expect(JSON.stringify([listed, found])).not.toContain("traceparent");
   });
 
   it("returns an empty list when DynamoDB returns no Items", async () => {
@@ -222,6 +247,30 @@ describe("DynamoRequestRepository.retry", () => {
       ReturnValues: "ALL_NEW",
       ReturnValuesOnConditionCheckFailure: "ALL_OLD",
     });
+  });
+
+  it("replaces the stored trace in the same update when there is a new one", async () => {
+    ddb.on(UpdateCommand).resolves({ Attributes: { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, retryCount: 1 } });
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    await repository.retry("user-a", ID, traceparent);
+
+    // One update: the status, the count and the trace change together, under the same condition.
+    expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({
+      UpdateExpression: "SET #status = :created, traceparent = :traceparent ADD retryCount :one",
+      ConditionExpression: "attribute_exists(pk) AND #status = :failed",
+      ExpressionAttributeValues: { ":created": "created", ":failed": "failed", ":one": 1, ":traceparent": traceparent },
+    });
+  });
+
+  it("does not return the trace either, when the item that came back has one", async () => {
+    const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    ddb.on(UpdateCommand).resolves({ Attributes: { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, retryCount: 1, traceparent } });
+
+    const outcome = await repository.retry("user-a", ID, traceparent);
+
+    expect(JSON.stringify(outcome)).not.toContain("traceparent");
   });
 
   it("returns the item after the update as the API model, without keys or the retry count, and the new count next to it", async () => {

@@ -1,3 +1,4 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { describe, expect, it } from "vitest";
 import type { PartnerSubmission } from "../../src/clients/partner-client";
 import type { PartnerAnswer } from "../../src/domain/partner-answer";
@@ -21,6 +22,8 @@ import {
 } from "../helpers/fakes";
 import type { Journal } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
+import { parentIdOf, recordSpans, wholeSpan } from "../helpers/tracing";
+import { withSpan } from "../../src/lib/tracing";
 
 const MAX_RECEIVE_COUNT = 5;
 const idNumber = (n: number): string => `01J8Z3K5W0ABCDEFGHJKMN${String(n).padStart(4, "0")}`;
@@ -1169,5 +1172,82 @@ describe("DeliveryService: request events", () => {
 
       expect(requestEvents(logs)[1]).toMatchObject({ event: "request_sent", sinceCreatedMs: 0 });
     });
+  });
+});
+
+// The span `call recipient` (lib/tracing.ts): the part of the request's trace that the recipient
+// answers for. The worker has no code to join the trace: the queue message brings it (Lambda's
+// tracing), so here the span is simply a child of whatever span is active.
+describe("DeliveryService: the span `call recipient`", () => {
+  const spans = recordSpans();
+
+  it("wraps the call: ids and the attempt at the start, the status and the duration after it", async () => {
+    const { deliver } = setup();
+
+    await deliver(job(1, 3));
+
+    const span = spans.only("call recipient");
+    expect(span.attributes).toEqual({ requestId: idNumber(1), attempt: 3, httpStatus: 200, partnerMs: 0 });
+    expect(span.ended).toBe(true);
+    expect(span.status.code).toBe(SpanStatusCode.UNSET);
+  });
+
+  it("is a child of the active span, so it belongs to the trace of the message", async () => {
+    const { deliver } = setup();
+
+    await withSpan("invocation", {}, () => deliver(job(1)));
+
+    expect(parentIdOf(spans.only("call recipient"))).toBe(spans.only("invocation").spanContext().spanId);
+  });
+
+  it("has the status of a refusal or of an outage as they came, and the partnerMs of the call", async () => {
+    const { partner, deliver } = setup(2);
+    partner.answer = (submission) => (submission.idempotencyKey === idNumber(1) ? refusedAnswer(submission) : unavailableAnswer);
+
+    await deliver(job(1), job(2));
+
+    expect(spans.named("call recipient").map((span) => span.attributes.httpStatus)).toEqual([422, 503]);
+  });
+
+  it("has no httpStatus when nobody answered (a timeout), but still the duration", async () => {
+    const { partner, deliver } = setup();
+    partner.answer = () => ({ kind: "no-answer", reason: "timeout" });
+
+    await deliver(job(1));
+
+    expect(spans.only("call recipient").attributes).toEqual({ requestId: idNumber(1), attempt: 1, partnerMs: 0 });
+  });
+
+  it("is not made when nobody is called (the text cannot be written as XML)", async () => {
+    const { repository, deliver } = setup(0);
+    repository.seed(aRequest({ id: idNumber(1), subject: "bad \u0000 character" }));
+
+    await deliver(job(1));
+
+    expect(spans.named("call recipient")).toEqual([]);
+  });
+
+  it("carries no text of the request, no partner name and no key, however the call ends", async () => {
+    const { partner, deliver } = setup();
+    partner.answer = (submission) => refusedAnswer(submission);
+
+    await deliver(job(1));
+
+    const whole = wholeSpan(spans.only("call recipient"));
+    for (const secret of ["Order 42", "Please ship.", "Acme", "fake-api-key-for-tests", "aws-starter"]) {
+      expect(whole).not.toContain(secret);
+    }
+  });
+
+  it("ends the span and marks it failed when the call itself throws, and the message is still reported as error", async () => {
+    const { partner, deliver } = setup();
+    partner.send = () => Promise.reject(new TypeError("fetch failed canary-key"));
+
+    const result = await deliver(job(1));
+
+    expect(result.counts.error).toBe(1);
+    const span = spans.only("call recipient");
+    expect(span.status).toEqual({ code: SpanStatusCode.ERROR, message: "TypeError" });
+    expect(wholeSpan(span)).not.toContain("canary-key");
   });
 });

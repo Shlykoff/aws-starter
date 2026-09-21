@@ -7,6 +7,7 @@ import { bindDynamoDocumentClient } from "./container-dynamodb";
 import { bindLogger } from "./container-shared";
 import { loadWebhookConfig } from "./lib/config";
 import type { WebhookConfig } from "./lib/config";
+import { tracedPort } from "./lib/tracing";
 import { SCHEMAS_DIRECTORY } from "./lib/schemas-location";
 import type { DecisionRepository } from "./repositories/decision-repository";
 import { DynamoDecisionRepository } from "./repositories/dynamodb-decision-repository";
@@ -33,7 +34,7 @@ container
   .bind<DecisionRepository>(TOKENS.DecisionRepository)
   .toResolvedValue(
     (client: DynamoDBDocumentClient, { tableName }: WebhookConfig) =>
-      new DynamoDecisionRepository(client, tableName),
+      tracedPort(new DynamoDecisionRepository(client, tableName), "decisions"),
     [TOKENS.DynamoDocumentClient, TOKENS.WebhookConfig],
   )
   .inSingletonScope();
@@ -45,7 +46,7 @@ container
   .bind<SecretProvider>(TOKENS.WebhookToken)
   .toResolvedValue(
     (client: SSMClient, { webhookTokenParam }: WebhookConfig) =>
-      new SsmApiKeyProvider(client, webhookTokenParam),
+      tracedPort(new SsmApiKeyProvider(client, webhookTokenParam), "webhook-token"),
     [TOKENS.SsmClient, TOKENS.WebhookConfig],
   )
   .inSingletonScope();
@@ -53,7 +54,7 @@ container
 // Reads the four schema files here, once per cold start, not on every call.
 container
   .bind<XmlValidator>(TOKENS.XmlValidator)
-  .toResolvedValue(() => new XsdXmlValidator(SCHEMAS_DIRECTORY))
+  .toResolvedValue(() => tracedPort(new XsdXmlValidator(SCHEMAS_DIRECTORY), "xml-validator"))
   .inSingletonScope();
 
 container

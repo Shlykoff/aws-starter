@@ -11,6 +11,7 @@ import { buildSubmissionXml } from "../domain/submission-xml";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
 import { logRequestEvent } from "../lib/request-events";
+import { withSpan } from "../lib/tracing";
 import type { ApiKeyProvider } from "../repositories/api-key-provider";
 import type { DeliveryRepository } from "../repositories/delivery-repository";
 import type { ExchangeStore } from "../repositories/exchange-store";
@@ -237,11 +238,23 @@ export class DeliveryService {
     // Step 4: send it. Not being able to get the key is a problem of ours (SSM, a missing
     // permission): it throws, and the message comes back later ("error").
     const apiKey = await this.apiKeys.get();
-    // How long the recipient took (the call only, not the key or the checks), for the request event.
-    // A clock can step back, so the duration is never below 0.
-    const calledAt = this.now().getTime();
-    const answer = await this.partner.send({ xml, idempotencyKey: request.id, apiKey });
-    const partnerMs = Math.max(0, this.now().getTime() - calledAt);
+    // The span `call recipient` is the part of the request's trace that the recipient is answerable
+    // for (the trace itself is joined from the queue message by Lambda's tracing: nothing to do
+    // here). Only ids and numbers go into it, like the log.
+    const { answer, partnerMs } = await withSpan(
+      "call recipient",
+      { requestId: request.id, attempt: receiveCount },
+      async (span) => {
+        // How long the recipient took (the call only, not the key or the checks), for the request event.
+        // A clock can step back, so the duration is never below 0.
+        const calledAt = this.now().getTime();
+        const reply = await this.partner.send({ xml, idempotencyKey: request.id, apiKey });
+        const took = Math.max(0, this.now().getTime() - calledAt);
+        // `undefined` (a timeout, a network error: no status) is left out by the guard.
+        span.setAttributes({ httpStatus: reply.kind === "answer" ? reply.httpStatus : undefined, partnerMs: took });
+        return { answer: reply, partnerMs: took };
+      },
+    );
     if (answer.kind === "answer" && (answer.httpStatus === 401 || answer.httpStatus === 403)) {
       // The recipient does not accept our key. It may have been rotated since we read it, so
       // forget it: the next attempt reads it from SSM again.

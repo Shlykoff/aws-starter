@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { StoredClientDecision } from "../../src/domain/client-decision";
-import type { DecisionRepository, RecordOutcome } from "../../src/repositories/decision-repository";
+import type { DecisionRepository, RecordOutcome, RecordResult } from "../../src/repositories/decision-repository";
 import type { SecretProvider } from "../../src/repositories/secret-provider";
 import { MAX_BODY_BYTES, WebhookService } from "../../src/services/webhook-service";
 import type { WebhookCall } from "../../src/services/webhook-service";
 import { FakeXmlValidator } from "../helpers/fakes";
 import type { Journal } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
+import { STORED_SPAN_ID, STORED_TRACEPARENT, STORED_TRACE_ID, parentIdOf, recordSpans, wholeSpan } from "../helpers/tracing";
 import { NOW_SECONDS, REQUEST_ID, WEBHOOK_TOKEN, eventXml, sign } from "../helpers/webhook";
 import { createLogger } from "../../src/lib/logger";
 
@@ -27,13 +28,15 @@ class FakeSecret implements SecretProvider {
 class FakeDecisions implements DecisionRepository {
   readonly recorded: { requestId: string; decision: StoredClientDecision; occurredAtMs: number }[] = [];
   outcome: RecordOutcome = "applied";
+  /** The trace stored with the request, as the repository would hand it back. */
+  traceparent: string | undefined;
   failWith: Error | undefined;
   constructor(private readonly journal: Journal) {}
-  recordDecision(requestId: string, decision: StoredClientDecision, occurredAtMs: number): Promise<RecordOutcome> {
+  recordDecision(requestId: string, decision: StoredClientDecision, occurredAtMs: number): Promise<RecordResult> {
     this.journal.push("decisions.record");
     if (this.failWith) return Promise.reject(this.failWith);
     this.recorded.push({ requestId, decision, occurredAtMs });
-    return Promise.resolve(this.outcome);
+    return Promise.resolve({ outcome: this.outcome, ...(this.traceparent !== undefined && { traceparent: this.traceparent }) });
   }
 }
 
@@ -318,5 +321,91 @@ describe("WebhookService: request events", () => {
 
     expect(decisions.recorded).toEqual([]);
     expect(requestEvents(logs)).toEqual([]);
+  });
+});
+
+// The webhook call carries no trace. The span `record decision` is recorded AFTER the update, in the
+// trace that the update learned from the old item: it starts when the call began.
+describe("WebhookService: the span `record decision`", () => {
+  const spans = recordSpans();
+
+  // A service whose clock is a moment in the recent past, so that the span has a real duration:
+  // the start of the span is the time the call BEGAN, not the time the span is made.
+  function setupLate(elapsedMs = 750) {
+    const began = new Date(Date.now() - elapsedMs);
+    const journal: Journal = [];
+    const decisions = new FakeDecisions(journal);
+    const logs = captureLogs();
+    const service = new WebhookService(new FakeSecret(journal), new FakeXmlValidator(journal), decisions, () => began);
+    const timestamp = String(Math.floor(began.getTime() / 1000));
+    const receive = (change: Parameters<typeof call>[0] = {}) => service.receive(call({ timestamp, ...change }), createLogger("debug"));
+    return { began, decisions, logs, receive };
+  }
+
+  it("is a child of the stored span, in its trace, with the ids and the outcome, and starts when the call began", async () => {
+    const { began, decisions, receive } = setupLate();
+    decisions.traceparent = STORED_TRACEPARENT;
+
+    await receive();
+
+    const span = spans.only("record decision");
+    expect(parentIdOf(span)).toBe(STORED_SPAN_ID);
+    expect(span.spanContext().traceId).toBe(STORED_TRACE_ID);
+    expect(span.attributes).toEqual({ requestId: REQUEST_ID, decision: "Approved", outcome: "applied" });
+    const startMs = span.startTime[0] * 1000 + span.startTime[1] / 1e6;
+    expect(startMs).toBeCloseTo(began.getTime(), 0);
+    const durationMs = span.duration[0] * 1000 + span.duration[1] / 1e6;
+    expect(durationMs).toBeGreaterThanOrEqual(700); // the time since the call began, at least
+  });
+
+  it("is written for a duplicate or an ignored event too (the request is known), with the outcome that says so", async () => {
+    const { decisions, receive } = setupLate();
+    decisions.traceparent = STORED_TRACEPARENT;
+
+    decisions.outcome = "duplicate";
+    await receive();
+    decisions.outcome = "ignored";
+    await receive();
+
+    expect(spans.named("record decision").map((span) => span.attributes.outcome)).toEqual(["duplicate", "ignored"]);
+  });
+
+  it("is not written when there is no trace stored with the request, or what is stored is not a trace", async () => {
+    const { decisions, receive } = setupLate();
+
+    await receive(); // the request has no trace (also what the repository says for an unknown request)
+    decisions.traceparent = "not-a-traceparent";
+    await receive();
+
+    expect(spans.named("record decision")).toEqual([]);
+  });
+
+  it("is not written for a call that was refused before the decision", async () => {
+    const { decisions, receive } = setupLate();
+    decisions.traceparent = STORED_TRACEPARENT;
+
+    await receive({ token: "another-token" });
+
+    expect(spans.named("record decision")).toEqual([]);
+  });
+
+  it("logs the event of the request inside the span, so the line has the request's trace id, and never the reason", async () => {
+    const { decisions, logs, receive } = setupLate();
+    decisions.traceparent = STORED_TRACEPARENT;
+
+    await receive();
+
+    const event = logs.entries().find((entry) => entry.message === "Request event");
+    expect(event).toMatchObject({ event: "decision_recorded", traceId: STORED_TRACE_ID });
+    expect(wholeSpan(spans.only("record decision"))).not.toContain("Out of stock");
+  });
+
+  it("does not hide a failure of the table: the error is thrown, and no span is made", async () => {
+    const { decisions, receive } = setupLate();
+    decisions.traceparent = STORED_TRACEPARENT;
+    decisions.failWith = new Error("throttled");
+
+    await expect(receive()).rejects.toThrow("throttled");
+    expect(spans.named("record decision")).toEqual([]);
   });
 });

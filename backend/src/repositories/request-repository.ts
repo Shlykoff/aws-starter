@@ -15,8 +15,12 @@ export type RetryOutcome =
 // Every method takes the owner explicitly: there is no way to read or write a request
 // without saying whose it is.
 export interface RequestRepository {
-  /** Stores a new request for `ownerId`. */
-  create(ownerId: string, request: PartnerRequest): Promise<void>;
+  /**
+   * Stores a new request for `ownerId`. `traceparent` (W3C, lib/tracing.ts) is the trace the
+   * request belongs to, stored with it so that the enqueuer and the webhook can continue that
+   * trace: the stream and the webhook carry none. It is never part of a `PartnerRequest`.
+   */
+  create(ownerId: string, request: PartnerRequest, traceparent?: string): Promise<void>;
 
   /** The owner's requests, newest first, at most `limit` of them. */
   listByOwner(ownerId: string, limit: number): Promise<PartnerRequest[]>;
@@ -27,7 +31,8 @@ export interface RequestRepository {
   /**
    * Sends a request again: one conditional update that moves it from `failed` back to
    * `created` and counts the send. It answers "not found" and "not failed" as values, not as
-   * errors: they are answers for the caller, not failures of the storage.
+   * errors: they are answers for the caller, not failures of the storage. `traceparent` REPLACES
+   * the stored one in the same update: sending again starts a new trace.
    */
-  retry(ownerId: string, id: string): Promise<RetryOutcome>;
+  retry(ownerId: string, id: string, traceparent?: string): Promise<RetryOutcome>;
 }

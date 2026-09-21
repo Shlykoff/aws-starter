@@ -11,6 +11,7 @@ import { bindDynamoDocumentClient } from "./container-dynamodb";
 import { bindLogger } from "./container-shared";
 import { loadWorkerConfig } from "./lib/config";
 import type { WorkerConfig } from "./lib/config";
+import { tracedPort } from "./lib/tracing";
 import { SCHEMAS_DIRECTORY } from "./lib/schemas-location";
 import type { ApiKeyProvider } from "./repositories/api-key-provider";
 import type { DeliveryRepository } from "./repositories/delivery-repository";
@@ -44,7 +45,7 @@ container
   .bind<DeliveryRepository>(TOKENS.DeliveryRepository)
   .toResolvedValue(
     (client: DynamoDBDocumentClient, { tableName }: WorkerConfig) =>
-      new DynamoDeliveryRepository(client, tableName),
+      tracedPort(new DynamoDeliveryRepository(client, tableName), "deliveries"),
     [TOKENS.DynamoDocumentClient, TOKENS.WorkerConfig],
   )
   .inSingletonScope();
@@ -52,7 +53,8 @@ container
 container
   .bind<StatusNotifier>(TOKENS.StatusNotifier)
   .toResolvedValue(
-    (client: SNSClient, { topicArn }: WorkerConfig) => new SnsStatusNotifier(client, topicArn),
+    (client: SNSClient, { topicArn }: WorkerConfig) =>
+      tracedPort(new SnsStatusNotifier(client, topicArn), "notifier"),
     [TOKENS.SnsClient, TOKENS.WorkerConfig],
   )
   .inSingletonScope();
@@ -60,7 +62,8 @@ container
 container
   .bind<ExchangeStore>(TOKENS.ExchangeStore)
   .toResolvedValue(
-    (client: S3Client, { auditBucket }: WorkerConfig) => new S3ExchangeStore(client, auditBucket),
+    (client: S3Client, { auditBucket }: WorkerConfig) =>
+      tracedPort(new S3ExchangeStore(client, auditBucket), "exchanges"),
     [TOKENS.S3Client, TOKENS.WorkerConfig],
   )
   .inSingletonScope();
@@ -70,7 +73,7 @@ container
   .bind<ApiKeyProvider>(TOKENS.ApiKeyProvider)
   .toResolvedValue(
     (client: SSMClient, { partnerApiKeyParam }: WorkerConfig) =>
-      new SsmApiKeyProvider(client, partnerApiKeyParam),
+      tracedPort(new SsmApiKeyProvider(client, partnerApiKeyParam), "api-key"),
     [TOKENS.SsmClient, TOKENS.WorkerConfig],
   )
   .inSingletonScope();
@@ -78,14 +81,15 @@ container
 // Reads the three schema files here, once per cold start, not on every message.
 container
   .bind<XmlValidator>(TOKENS.XmlValidator)
-  .toResolvedValue(() => new XsdXmlValidator(SCHEMAS_DIRECTORY))
+  .toResolvedValue(() => tracedPort(new XsdXmlValidator(SCHEMAS_DIRECTORY), "xml-validator"))
   .inSingletonScope();
 
 container
   .bind<PartnerClient>(TOKENS.PartnerClient)
-  .toResolvedValue(({ partnerUrl }: WorkerConfig) => new HttpPartnerClient({ baseUrl: partnerUrl }), [
-    TOKENS.WorkerConfig,
-  ])
+  .toResolvedValue(
+    ({ partnerUrl }: WorkerConfig) => tracedPort(new HttpPartnerClient({ baseUrl: partnerUrl }), "partner"),
+    [TOKENS.WorkerConfig],
+  )
   .inSingletonScope();
 
 container
