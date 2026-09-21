@@ -18,6 +18,7 @@ explained in two sentences, simplify it, or write down why in the README "Decisi
   teaches. Nothing an agent produces reaches the owner before the lead has reviewed it.
 - **Agents** (`.claude/agents/`):
   - `terraform-engineer`, `backend-engineer`, `frontend-engineer` implement.
+  - `python-engineer` implements the partner simulator in `partner-sim/`.
   - `walkthrough-coach` turns the finished code into study notes (questions and
     honest answers).
 
@@ -85,6 +86,10 @@ and say what is good too.
   container built once per cold start, AWS SDK v3, esbuild, Vitest, Yarn workspaces.
 - **Frontend**: React 19, Vite, MobX, Tailwind, Feature-Sliced Design (a layer imports
   only from layers below it; every slice exposes an `index.ts`).
+- **Partner simulator**: Python (FastAPI, lxml, SQLite) in `partner-sim/`, an independent
+  application that plays the recipient of the messages. It is not part of the AWS stack and
+  never imports from `backend/`, `frontend/` or `infra/`. The two sides share only
+  `contracts/` (XSD, the HTTP contract, fixtures). Its tests run in Docker, not in CI.
 - **DynamoDB**: provisioned, small and fixed (5 RCU / 5 WCU per table and per GSI, no
   autoscaling) to stay inside the always-free limits; key design is explained in the
   README.

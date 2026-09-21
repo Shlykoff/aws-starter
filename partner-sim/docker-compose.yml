@@ -1,0 +1,75 @@
+# Partner simulator: the recipient of the messages the main system sends.
+#
+#   docker compose up --build                          the service
+#   docker compose --profile tests run --rm tests      the tests
+#   docker compose --profile tunnel up --build         the service plus an ngrok tunnel (optional)
+#
+# Run these from this folder (partner-sim/).
+
+name: partner-sim
+
+services:
+  partner-sim:
+    build:
+      context: ..                       # the repository root: the image copies contracts/xsd/
+      dockerfile: partner-sim/Dockerfile
+      target: runtime
+    image: partner-sim:local
+    ports:
+      # Published on this computer only unless PARTNER_BIND says otherwise.
+      - "${PARTNER_BIND:-127.0.0.1}:${PARTNER_PORT:-8080}:8080"
+    environment:
+      # DEMO VALUES. They are public (they are in the repository) and protect nothing: they
+      # exist so that a stranger can run the service with one command. Override them (see
+      # .env.example) before anybody else can reach the service.
+      PARTNER_API_KEY: ${PARTNER_API_KEY:-demo-key-change-me}
+      UI_USER: ${UI_USER:-demo}
+      UI_PASSWORD: ${UI_PASSWORD:-demo-password-change-me}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - partner-data:/data              # the SQLite file lives here and survives restarts
+    restart: unless-stopped
+    # Hardening. The service only needs to write to /data (and /tmp).
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Runs pytest inside the image. The shared fixtures are mounted read-only from contracts/;
+  # the schemas are the image's own copy.
+  tests:
+    profiles: ["tests"]
+    build:
+      context: ..
+      dockerfile: partner-sim/Dockerfile
+      target: test
+    image: partner-sim-tests:local
+    environment:
+      FIXTURES_DIR: /contracts/fixtures
+    volumes:
+      - ../contracts/fixtures:/contracts/fixtures:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # OPTIONAL. Gives the service a public https address through ngrok, so that a sender that is
+  # not on this computer (for example the main system on AWS) can reach it. Needs the ngrok
+  # account of the person running it (NGROK_AUTHTOKEN, NGROK_DOMAIN). See README.md.
+  tunnel:
+    profiles: ["tunnel"]
+    image: ngrok/ngrok:3.39.11-alpine
+    command: ["http", "partner-sim:8080", "--url", "https://${NGROK_DOMAIN:-}"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    ports:
+      - "127.0.0.1:4040:4040"           # ngrok's local page that shows the traffic
+    depends_on:
+      partner-sim:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  partner-data:
