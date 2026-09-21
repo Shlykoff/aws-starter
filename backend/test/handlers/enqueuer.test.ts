@@ -362,7 +362,7 @@ describe("enqueuer: logging", () => {
       lambdaContext("aws-request-1"),
     );
 
-    const summaries = logs.entries().filter((line) => line.level === "info");
+    const summaries = logs.entries().filter((line) => line.message === "Stream batch handled");
     expect(summaries).toEqual([
       {
         level: "info",

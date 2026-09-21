@@ -30,6 +30,9 @@ const matches =
     typeof value === "string" && pattern.test(value) ? value : REJECTED;
 
 const finiteNumber: Check = (value) => (typeof value === "number" && Number.isFinite(value) ? value : REJECTED);
+// A count or a duration: it is never negative.
+const nonNegativeNumber: Check = (value) =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : REJECTED;
 const boolean: Check = (value) => (typeof value === "boolean" ? value : REJECTED);
 
 const listOf =
@@ -55,6 +58,14 @@ const ROUTE = /^[A-Z]{3,7} (\/([a-z][a-z-]{0,30}|\{[a-z]{1,20}\})){1,6}$/;
 
 const id = matches(ID);
 const word = matches(WORD);
+
+/** One word of a short closed list: anything else is rejected. */
+const oneOf =
+  (words: readonly string[]): Check =>
+  (value) =>
+    typeof value === "string" && words.includes(value) ? value : REJECTED;
+
+const requestStatus = oneOf(["created", "queued", "sent", "failed", "rejected"]);
 
 /**
  * The text of an error, from a library or from us. It cannot be given a narrow shape, so it is
@@ -89,7 +100,28 @@ const FIELDS: Record<string, Check> = {
   replyCode: word,
   signatureProblem: word,
   errorName: word,
+  // the life of a request (lib/request-events.ts): closed lists, so no other word gets through
+  // the eight names of the events
+  event: oneOf([
+    "request_created",
+    "request_queued",
+    "delivery_attempted",
+    "request_sent",
+    "request_rejected",
+    "request_failed",
+    "retry_requested",
+    "decision_recorded",
+  ]),
+  // who acted: the owner, the enqueuer, the delivery worker, the recipient (never a user id)
+  role: oneOf(["user", "enqueuer", "worker", "recipient"]),
+  // the status before and after a change: the five statuses of a request
+  fromStatus: requestStatus,
+  toStatus: requestStatus,
   // numbers and flags
+  attempt: nonNegativeNumber, // which delivery attempt: the receive count of the queue message
+  retryCount: nonNegativeNumber, // how many times the owner has sent the request again
+  partnerMs: nonNegativeNumber, // how long the call to the recipient took, in milliseconds
+  sinceCreatedMs: nonNegativeNumber, // from the creation of the request to this event, in milliseconds
   httpStatus: finiteNumber,
   statusCode: finiteNumber,
   occurredAtMs: finiteNumber,

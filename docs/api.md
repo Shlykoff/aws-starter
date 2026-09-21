@@ -365,5 +365,36 @@ checks ownership in the table before it touches S3).
   that made them fail. Nested objects are never written.
 - **In tests the guard throws** (`LOG_STRICT=1` in `vitest.config.ts`): a log call it would have to change
   fails the test. In Lambda it never throws, because logging must not break a handler.
+- **Request events**: one line for each change in the life of a request, written when the change is
+  really applied (a conditional update that succeeded; never for a duplicate, an ignored event or a
+  refused change). The message is always `Request event`; the fields are:
+
+  | `event` | written by | `role` | other fields |
+  |---|---|---|---|
+  | `request_created` | `create-request` | `user` | `toStatus` = `created` |
+  | `request_queued` | `enqueuer` | `enqueuer` | `fromStatus` `created`, `toStatus` `queued` |
+  | `delivery_attempted` | `delivery-worker`, after every attempt | `worker` | `attempt` (the receive count), `outcome` (`delivered`, `refused`, `retry`, `invalid_request`, `unrepresentable`), `httpStatus` and `partnerMs` when the recipient was called |
+  | `request_sent`, `request_rejected`, `request_failed` | `delivery-worker` | `worker` | `toStatus`, `attempt`, `sinceCreatedMs` (from creation to this moment) |
+  | `retry_requested` | `retry-request` | `user` | `fromStatus` `failed`, `toStatus` `created`, `retryCount` (the new value) |
+  | `decision_recorded` | `receive-webhook` | `recipient` | `decision` (`Approved` or `Declined`) |
+
+  All lines carry `requestId` (and, like every line of a function, `awsRequestId`). There is no user
+  id and no text: `role` says who acted. The events are the audit trail of the request (the table
+  keeps only the current status), and the source of the delivery metrics and of the request
+  timeline. What to know when reading them:
+  - An event is written **after** its write. A crash between the two loses the line, and the retried
+    message then finds the request already finished and writes nothing: the trail is at most once.
+  - `delivery_attempted` is written before the exchange record and the status. If the record cannot
+    be written, the message is retried and writes another attempt with a higher `attempt`. An
+    attempt that ends in an error of ours (a crash) has no `delivery_attempted` line, only the
+    technical line `Delivery attempt crashed`.
+- **The timeline of one request**, across all functions, in Logs Insights (select all the log groups
+  of the project; the JSON fields of our lines are parsed by Insights, no `parse` needed):
+
+  ```
+  fields @timestamp, event, fromStatus, toStatus, role, attempt, outcome, httpStatus, partnerMs, sinceCreatedMs
+  | filter requestId = "<the ULID>" and ispresent(event)
+  | sort @timestamp asc
+  ```
 - **Never in a log**: the text of a request, the partner's name, a reason, the XML, a token, a
   signature, a header, an event. A new field is added to the list in a reviewed diff.

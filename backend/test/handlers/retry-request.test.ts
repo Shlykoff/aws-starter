@@ -206,6 +206,27 @@ describe("POST /requests/{id}/retry: failures", () => {
     );
   });
 
+  it("writes the retry_requested event with the new retryCount for a failed request, and none for a refused one", async () => {
+    seed("failed");
+    await handler(retryRequestEvent({ sub: "user-a", id: ID }), lambdaContext("req-5"));
+    seed("sent", { id: ID }); // the same request, finished by the pipeline: the second send is refused (409)
+    await retry();
+
+    expect(logs.entries().filter((line) => line.message === "Request event")).toEqual([
+      {
+        level: "info",
+        message: "Request event",
+        awsRequestId: "req-5",
+        event: "retry_requested",
+        role: "user",
+        requestId: ID,
+        fromStatus: "failed",
+        toStatus: "created",
+        retryCount: 1,
+      },
+    ]);
+  });
+
   it("logs the route template and the status code, not the id", async () => {
     seed("sent");
 

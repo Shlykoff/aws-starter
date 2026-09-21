@@ -10,6 +10,7 @@ import type { TerminalStatus } from "../domain/request-status";
 import { buildSubmissionXml } from "../domain/submission-xml";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
+import { logRequestEvent } from "../lib/request-events";
 import type { ApiKeyProvider } from "../repositories/api-key-provider";
 import type { DeliveryRepository } from "../repositories/delivery-repository";
 import type { ExchangeStore } from "../repositories/exchange-store";
@@ -172,6 +173,13 @@ export class DeliveryService {
     });
     if (!submission.ok) {
       log.warn("The request cannot be written as XML", { elements: submission.elements });
+      logRequestEvent(log, {
+        event: "delivery_attempted",
+        role: "worker",
+        requestId: message.requestId,
+        attempt: receiveCount,
+        outcome: "unrepresentable", // nobody was called: no `partnerMs`, no `httpStatus`
+      });
       return this.recordAndFinish(
         message,
         {
@@ -190,6 +198,7 @@ export class DeliveryService {
           reply: null,
         },
         "rejected",
+        request.createdAt,
         log,
       );
     }
@@ -203,6 +212,13 @@ export class DeliveryService {
         problemCount: checked.findings.length,
         problems: checked.findings.map(describeProblem),
       });
+      logRequestEvent(log, {
+        event: "delivery_attempted",
+        role: "worker",
+        requestId: message.requestId,
+        attempt: receiveCount,
+        outcome: "invalid_request", // nobody was called
+      });
       return this.recordAndFinish(
         message,
         {
@@ -213,6 +229,7 @@ export class DeliveryService {
           reply: null,
         },
         "rejected",
+        request.createdAt,
         log,
       );
     }
@@ -220,7 +237,11 @@ export class DeliveryService {
     // Step 4: send it. Not being able to get the key is a problem of ours (SSM, a missing
     // permission): it throws, and the message comes back later ("error").
     const apiKey = await this.apiKeys.get();
+    // How long the recipient took (the call only, not the key or the checks), for the request event.
+    // A clock can step back, so the duration is never below 0.
+    const calledAt = this.now().getTime();
     const answer = await this.partner.send({ xml, idempotencyKey: request.id, apiKey });
+    const partnerMs = Math.max(0, this.now().getTime() - calledAt);
     if (answer.kind === "answer" && (answer.httpStatus === 401 || answer.httpStatus === 403)) {
       // The recipient does not accept our key. It may have been rotated since we read it, so
       // forget it: the next attempt reads it from SSM again.
@@ -257,18 +278,29 @@ export class DeliveryService {
       reply: reading.reply,
     };
 
+    // The attempt is over: say how it ended, before the record and the status are written.
+    logRequestEvent(log, {
+      event: "delivery_attempted",
+      role: "worker",
+      requestId: message.requestId,
+      attempt: receiveCount,
+      outcome: reading.decision,
+      httpStatus: answer.kind === "answer" ? answer.httpStatus : undefined, // none for a timeout
+      partnerMs,
+    });
+
     // Step 6: the record, then the status.
     switch (reading.decision) {
       case "delivered":
-        return this.recordAndFinish(message, exchange, "sent", log);
+        return this.recordAndFinish(message, exchange, "sent", request.createdAt, log);
 
       case "refused":
         // No retry: asking again would get the same answer. Acknowledge the message.
         log.warn("Partner refused the request", { reason: reading.reason });
-        return this.recordAndFinish(message, exchange, "rejected", log);
+        return this.recordAndFinish(message, exchange, "rejected", request.createdAt, log);
 
       case "retry":
-        return this.onRetry(message, receiveCount, exchange, reading.reason, log);
+        return this.onRetry(message, receiveCount, exchange, reading.reason, request.createdAt, log);
     }
   }
 
@@ -281,10 +313,11 @@ export class DeliveryService {
     message: DeliveryMessage,
     exchange: Exchange,
     status: TerminalStatus,
+    createdAt: string,
     log: Logger,
   ): Promise<DeliveryOutcome> {
     await this.exchanges.save(message.requestId, exchange);
-    return this.finish(message, status, log);
+    return this.finish(message, status, exchange.attempt, createdAt, log);
   }
 
   private async onRetry(
@@ -292,6 +325,7 @@ export class DeliveryService {
     receiveCount: number,
     exchange: Exchange,
     reason: string,
+    createdAt: string,
     log: Logger,
   ): Promise<DeliveryOutcome> {
     const isLastAttempt = receiveCount >= this.settings.maxReceiveCount;
@@ -312,16 +346,19 @@ export class DeliveryService {
     // outcome "failed" is in ACKNOWLEDGED), not left to move to the DLQ: the failure is handled
     // and the owner can send the request again. If writing "failed" throws, the outcome is
     // "error", the message goes back to the queue and ends in the DLQ, with the alarm.
-    return this.finish(message, "failed", log);
+    return this.finish(message, "failed", receiveCount, createdAt, log);
   }
 
   // Writes a terminal status and announces it. The outcome has the same name as the status.
   // A `false` from the repository means the request was no longer in a status that may lead
   // here, so somebody else finished it first (a duplicate run, for instance). Then there is
   // nothing left to do and nothing to announce: the run that won has done both.
+  // `attempt` and `createdAt` (of the request) are only for the request event.
   private async finish(
     message: DeliveryMessage,
     status: TerminalStatus,
+    attempt: number,
+    createdAt: string,
     log: Logger,
   ): Promise<DeliveryOutcome> {
     const applied = await this.writeStatus(message, status);
@@ -330,13 +367,36 @@ export class DeliveryService {
       return "alreadyDone";
     }
 
+    // One clock reading: it is the time of the event and of the announcement.
+    const finishedAt = this.now();
+
+    // The request event, only now that the status change has really been applied.
+    const closing = {
+      role: "worker",
+      requestId: message.requestId,
+      attempt,
+      // From the creation of the request to now, never below 0 (a clock can step back).
+      sinceCreatedMs: Math.max(0, finishedAt.getTime() - Date.parse(createdAt)),
+    } as const;
+    switch (status) {
+      case "sent":
+        logRequestEvent(log, { event: "request_sent", toStatus: "sent", ...closing });
+        break;
+      case "rejected":
+        logRequestEvent(log, { event: "request_rejected", toStatus: "rejected", ...closing });
+        break;
+      case "failed":
+        logRequestEvent(log, { event: "request_failed", toStatus: "failed", ...closing });
+        break;
+    }
+
     // Best effort: the status is already saved, and a missing e-mail must not send a
     // delivered request through the retry loop.
     try {
       await this.notifier.publish({
         requestId: message.requestId,
         status,
-        at: this.now().toISOString(),
+        at: finishedAt.toISOString(),
       });
     } catch (error) {
       log.warn("Status notification failed", { status, ...describeError(error) });

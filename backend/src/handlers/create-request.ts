@@ -10,10 +10,10 @@ import { TOKENS } from "../tokens";
 const service = container.get<RequestService>(TOKENS.RequestService);
 const logger = container.get<Logger>(TOKENS.Logger);
 
-export const handler = createHandler(logger, async (event) => {
+export const handler = createHandler(logger, async (event, log) => {
   const ownerId = getOwnerId(event);
   const input = parseJsonBody(event, createRequestSchema);
 
-  const request = await service.create(ownerId, input);
+  const request = await service.create(ownerId, input, log);
   return jsonResponse(201, request);
 });

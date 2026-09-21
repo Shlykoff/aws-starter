@@ -155,7 +155,9 @@ export class DynamoRequestRepository implements RequestRepository {
           ReturnValuesOnConditionCheckFailure: "ALL_OLD",
         }),
       );
-      return { kind: "restarted", request: toPartnerRequest(result.Attributes as RequestItem) };
+      // `ADD retryCount` ran in the same update, so the count is there in the answer.
+      const item = result.Attributes as RequestItem & { retryCount: number };
+      return { kind: "restarted", request: toPartnerRequest(item), retryCount: item.retryCount };
     } catch (error) {
       if (!(error instanceof ConditionalCheckFailedException)) throw error;
 

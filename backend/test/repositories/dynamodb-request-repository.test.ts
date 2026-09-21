@@ -224,13 +224,13 @@ describe("DynamoRequestRepository.retry", () => {
     });
   });
 
-  it("returns the item after the update as the API model, without keys or the retry count", async () => {
+  it("returns the item after the update as the API model, without keys or the retry count, and the new count next to it", async () => {
     ddb.on(UpdateCommand).resolves({ Attributes: { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, retryCount: 2 } });
 
     const outcome = await repository.retry("user-a", ID);
 
-    expect(outcome).toEqual({ kind: "restarted", request });
-    expect(JSON.stringify(outcome)).not.toContain("retryCount");
+    expect(outcome).toEqual({ kind: "restarted", request, retryCount: 2 });
+    expect(JSON.stringify(outcome.kind === "restarted" && outcome.request)).not.toContain("retryCount"); // never in the API model
     expect(JSON.stringify(outcome)).not.toContain("user-a");
   });
 

@@ -8,11 +8,11 @@ import { TOKENS } from "../tokens";
 const service = container.get<RequestService>(TOKENS.RequestService);
 const logger = container.get<Logger>(TOKENS.Logger);
 
-export const handler = createHandler(logger, async (event) => {
+export const handler = createHandler(logger, async (event, log) => {
   const ownerId = getOwnerId(event);
 
   // API Gateway always fills `id` for this route. If it were ever missing, the empty
   // string is not a valid ULID, so the service answers 404.
-  const request = await service.retry(ownerId, event.pathParameters?.id ?? "");
+  const request = await service.retry(ownerId, event.pathParameters?.id ?? "", log);
   return jsonResponse(200, request);
 });
