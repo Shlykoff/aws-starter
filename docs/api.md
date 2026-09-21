@@ -414,3 +414,30 @@ checks ownership in the table before it touches S3).
   ```
 - **Never in a log**: the text of a request, the partner's name, a reason, the XML, a token, a
   signature, a header, an event. A new field is added to the list in a reviewed diff.
+
+## Log archive
+
+Logs older than the 30 days of CloudWatch Logs are kept in S3 for **395 days** (13 months) and
+queried with Athena. The logs hold no personal data (the log guard, "Logs"), so a long archive is safe.
+
+- **Pipeline** (module `infra/modules/log-archive`): a subscription filter on every Lambda log group
+  and on the API access log group (empty pattern: everything) sends each batch of log events to a
+  Firehose stream, which decompresses it, puts a newline after each record and writes it to S3,
+  gzip-compressed, every 5 minutes or 5 MB: `s3://<project>-<env>-log-archive-<account id>/logs/year=YYYY/month=MM/day=DD/`.
+  One line is the envelope CloudWatch Logs sends: `messageType`, `owner` (the AWS account id, which is
+  why the bucket is private), `logGroup`, `logStream`, `logEvents[]` (`id`, `timestamp` in
+  milliseconds, `message`). A Firehose delivery failure is written to its own log group,
+  `/aws/kinesisfirehose/<project>-<env>-log-archive`, and the failed records to `errors/`.
+- **Only what is logged after the archive exists is in it**: there is no backfill of older lines.
+- **Querying**: Athena workgroup `<project>-<env>-logs` (a fixed result location under
+  `athena-results/`, kept 7 days, and a **1 GB scan limit per query**), Glue database
+  `<project>_<env>_logs`, table `log_archive`, partitioned by `year`, `month` and `day` (partition
+  projection: nothing to crawl or repair). **Every query filters on the date**: without it Athena
+  reads every day of the range. Two saved queries: the timeline of one request (the archive
+  counterpart of the Logs Insights query in "Logs") and failed requests per day. A line is
+  `timestamp<TAB>requestId<TAB>LEVEL<TAB>{json}`, so the queries take the JSON out of `message` with
+  `regexp_extract` first.
+- **Cost**: Firehose has no free tier (about $0.03 per GB ingested, at least 5 KB per record), S3 and
+  Athena are billed by use; at a few MB of logs a month the archive costs cents. Standard-IA is not
+  used: it bills at least 128 KB per object and the objects here are tiny.
+
