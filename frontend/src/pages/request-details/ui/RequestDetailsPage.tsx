@@ -4,7 +4,10 @@ import { observer } from "mobx-react-lite";
 import { ArrowLeft, CircleAlert } from "lucide-react";
 import { ExchangePanel, useExchangeStore } from "@/entities/exchange";
 import {
+  ClientDecisionCard,
+  DECISION_POLL_INTERVAL_MS,
   getStatusExplanation,
+  isAwaitingDecision,
   isTerminalStatus,
   RequestStatusBadge,
   STATUS_POLL_INTERVAL_MS,
@@ -48,6 +51,17 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
     STATUS_POLL_INTERVAL_MS,
     polling,
   );
+
+  // A delivered request may still get the client's decision, minutes or months later (it is
+  // independent of the delivery status). So a `sent` request without one is asked for again,
+  // slowly, until a decision shows up. usePolling pauses in a hidden tab and refreshes at once
+  // when the tab is visible again. Only the request is read: the exchange is final by now.
+  // Never for `failed` and `rejected`: nothing was delivered, so nothing is expected. The two
+  // polls are never on at the same time: `polling` needs a status that can still change and
+  // this one needs `sent`.
+  const awaitingDecision = request !== undefined && isAwaitingDecision(request);
+  usePolling(() => requests.refreshDetail(id), DECISION_POLL_INTERVAL_MS, awaitingDecision);
+
   const explanation = request ? getStatusExplanation(request.status) : undefined;
 
   let content: ReactNode;
@@ -116,6 +130,9 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
         </Link>
       </Button>
       {content}
+      {/* The business outcome first, the technical detail (the exchange) after it. The card
+          draws nothing when no decision is expected. */}
+      {request && <ClientDecisionCard request={request} />}
       {/* Only for a request that exists: the exchange belongs to it. */}
       {request && <ExchangePanel state={exchanges.stateFor(id)} onRetry={() => void exchanges.load(id)} />}
     </div>

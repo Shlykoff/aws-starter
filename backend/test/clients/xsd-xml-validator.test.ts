@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { KNOWN_ELEMENTS } from "../../src/clients/xsd-findings";
 import type { Problem } from "../../src/domain/exchange";
+import { isUnreadableDocument } from "../../src/domain/validation-result";
 import { XSD_DIRECTORY, createRealValidator, expected, fixture, fixturesOnDisk } from "../helpers/contracts";
 import type { FixtureKind } from "../helpers/contracts";
 
@@ -9,7 +10,11 @@ import type { FixtureKind } from "../helpers/contracts";
 // contracts/xsd/. Each validation starts a worker thread, so a test takes tens of ms.
 const validator = createRealValidator();
 const validate = (kind: FixtureKind, xml: string) =>
-  kind === "submission" ? validator.validateSubmission(xml) : validator.validateReply(xml);
+  kind === "submission"
+    ? validator.validateSubmission(xml)
+    : kind === "reply"
+      ? validator.validateReply(xml)
+      : validator.validateEvent(xml);
 
 const NOT_WELL_FORMED: Problem = { element: "(document)", rule: "not well-formed XML" };
 const DOCTYPE: Problem = { element: "(document)", rule: "DOCTYPE not allowed" };
@@ -44,16 +49,36 @@ const FINDINGS: Record<FixtureKind, Record<string, Problem[]>> = {
     "invalid/missing-result.xml": [{ element: "Reply", rule: "missing child element" }],
     "invalid/uppercase-uuid.xml": [{ element: "MessageId", rule: "does not match the allowed pattern" }],
   },
+  event: {
+    "invalid/decision-lowercase.xml": [{ element: "Decision", rule: "value not allowed" }],
+    "invalid/decision-unknown.xml": [{ element: "Decision", rule: "value not allowed" }],
+    "invalid/doctype-entity-expansion.xml": [DOCTYPE],
+    "invalid/doctype-external-entity.xml": [DOCTYPE],
+    "invalid/event-id-uppercase.xml": [{ element: "EventId", rule: "does not match the allowed pattern" }],
+    "invalid/missing-decision.xml": [{ element: "DecisionEvent", rule: "missing child element" }],
+    "invalid/missing-event-id.xml": [{ element: "OccurredAt", rule: "unexpected element" }],
+    "invalid/not-well-formed.xml": [NOT_WELL_FORMED],
+    "invalid/not-xml.xml": [NOT_WELL_FORMED],
+    "invalid/occurred-at-no-time-zone.xml": [{ element: "OccurredAt", rule: "does not match the allowed pattern" }],
+    "invalid/occurred-at-not-a-date.xml": [{ element: "OccurredAt", rule: "not a valid value of its type" }],
+    "invalid/reason-empty.xml": [{ element: "Reason", rule: "too short" }],
+    "invalid/reason-too-long.xml": [{ element: "Reason", rule: "too long" }],
+    "invalid/relates-to-not-a-ulid.xml": [{ element: "RelatesTo", rule: "does not match the allowed pattern" }],
+    "invalid/unknown-element.xml": [{ element: "(unknown)", rule: "unexpected element" }],
+    "invalid/wrong-element-order.xml": [{ element: "RelatesTo", rule: "unexpected element" }],
+    "invalid/wrong-namespace.xml": [{ element: "DecisionEvent", rule: "unexpected root element" }],
+    "invalid/wrong-version.xml": [{ element: "DecisionEvent", rule: "attribute value not allowed" }],
+  },
 };
 
 describe("the contract fixtures (contracts/fixtures/expected.json)", () => {
-  it.each(["submission", "reply"] as const)("lists every %s fixture that is on disk, and only those", (kind) => {
+  it.each(["submission", "reply", "event"] as const)("lists every %s fixture that is on disk, and only those", (kind) => {
     expect(Object.keys(expected[kind]).sort()).toEqual(fixturesOnDisk(kind));
   });
 
   // "SCHEMA_INVALID" and "MALFORMED_XML" are the two ways for the RECIPIENT to say no (a 422
   // and a 400). For the sender both are the same thing: the document is not valid.
-  describe.each(["submission", "reply"] as const)("%s", (kind) => {
+  describe.each(["submission", "reply", "event"] as const)("%s", (kind) => {
     it.each(Object.entries(expected[kind]))("%s must be %s", async (name, want) => {
       const result = await validate(kind, fixture(kind, name));
 
@@ -71,11 +96,23 @@ describe("the contract fixtures (contracts/fixtures/expected.json)", () => {
   );
 
   it("has a table of findings for every invalid fixture", () => {
-    for (const kind of ["submission", "reply"] as const) {
+    for (const kind of ["submission", "reply", "event"] as const) {
       const invalid = Object.keys(expected[kind]).filter((name) => expected[kind][name] !== "valid");
       expect(Object.keys(FINDINGS[kind]).sort()).toEqual(invalid.sort());
     }
   });
+
+  // The webhook answers 422 for SCHEMA_INVALID and 400 for MALFORMED_XML (which covers a DOCTYPE).
+  // It tells them apart by the findings, so the split is checked against every event fixture.
+  it.each(Object.entries(expected.event).filter(([, want]) => want !== "valid"))(
+    "event %s is told apart as %s (422 or 400)",
+    async (name, want) => {
+      const result = await validator.validateEvent(fixture("event", name));
+
+      if (result.valid) throw new Error("expected a problem");
+      expect(isUnreadableDocument(result)).toBe(want === "MALFORMED_XML");
+    },
+  );
 
   it("refuses the malformed submissions the way the recipient does: as not well-formed, without crashing", async () => {
     const malformed = Object.entries(expected.submission).filter(([, want]) => want === "MALFORMED_XML");
@@ -155,10 +192,46 @@ describe("findings never hold a value of the document", () => {
   });
 });
 
+describe("findings of an event never hold a value of the document", () => {
+  const CANARY = "CANARY-9f3a7c";
+  const eventWith = (change: (xml: string) => string) => change(fixture("event", "valid/declined-with-reason.xml"));
+  const documents: [string, string][] = [
+    ["a decision that is not one of the two", eventWith((xml) => xml.replace("Declined", CANARY))],
+    ["an event id that breaks the pattern", eventWith((xml) => xml.replace(/<EventId>.*<\/EventId>/, `<EventId>${CANARY}</EventId>`))],
+    ["a date that is not a date", eventWith((xml) => xml.replace(/<OccurredAt>.*<\/OccurredAt>/, `<OccurredAt>${CANARY}</OccurredAt>`))],
+    ["a reason that is too long", eventWith((xml) => xml.replace("Out of stock", `${CANARY}${"x".repeat(500)}`))],
+    ["a version that is not allowed", eventWith((xml) => xml.replace('version="1"', `version="${CANARY}"`))],
+    ["an element nobody knows", eventWith((xml) => xml.replace("</DecisionEvent>", `<${CANARY}>x</${CANARY}></DecisionEvent>`))],
+    ["a root element nobody knows", eventWith((xml) => xml.replaceAll("DecisionEvent", CANARY))],
+    ["a document that is not well-formed", `${CANARY} <a><b></a>`],
+  ];
+
+  it.each(documents)("%s", async (_label, xml) => {
+    const result = await validator.validateEvent(xml);
+
+    expect(result.valid).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(CANARY);
+  });
+
+  it("refuses an event with a DOCTYPE, in another encoding, or over 64 KiB, before the parser sees it", async () => {
+    const valid = fixture("event", "valid/approved.xml");
+
+    expect(await validator.validateEvent(valid.replace("<DecisionEvent", "<!DOCTYPE x><DecisionEvent"))).toEqual({ valid: false, findings: [DOCTYPE] });
+    expect(await validator.validateEvent(valid.replace("UTF-8", "ISO-8859-1"))).toEqual({
+      valid: false,
+      findings: [{ element: "(document)", rule: "encoding must be UTF-8" }],
+    });
+    expect(await validator.validateEvent(valid + " ".repeat(64 * 1024))).toEqual({
+      valid: false,
+      findings: [{ element: "(document)", rule: "document too large" }],
+    });
+  });
+});
+
 describe("KNOWN_ELEMENTS", () => {
   it("is exactly the list of elements declared in contracts/xsd/*.xsd", () => {
     const declared = new Set<string>();
-    for (const file of ["submission.xsd", "reply.xsd", "common-types.xsd"]) {
+    for (const file of ["submission.xsd", "reply.xsd", "event.xsd", "common-types.xsd"]) {
       const text = readFileSync(new URL(file, XSD_DIRECTORY), "utf8");
       for (const match of text.matchAll(/<xs:element\s+name="([^"]+)"/g)) declared.add(match[1] ?? "");
     }

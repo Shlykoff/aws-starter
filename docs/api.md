@@ -3,9 +3,9 @@
 The single source of truth for backend, infrastructure and frontend. Change it here
 first, then in the code.
 
-Base URL: the `api_url` Terraform output. All routes need
+Base URL: the `api_url` Terraform output. All routes except the webhook need
 `Authorization: Bearer <Cognito access token>`; the API Gateway JWT authorizer rejects
-anything else with `401` before a Lambda runs. Bodies are JSON.
+anything else with `401` before a Lambda runs. Bodies are JSON, except the webhook's (XML).
 
 ## Model
 
@@ -15,10 +15,20 @@ Request {
   partner:   string   // 1-100 chars
   subject:   string   // 1-200 chars
   body:      string   // 1-5000 chars
-  status:    "created" | "queued" | "sent" | "failed" | "rejected"
+  status:    "created" | "queued" | "sent" | "failed" | "rejected"   // DELIVERY of the message
   createdAt: string   // ISO 8601, UTC
+  clientDecision?: {  // what the client did with the delivered message; absent until they act
+    decision:   "Approved" | "Declined"
+    reason?:    string   // 1-500 chars, text from the recipient's side: show it as text only
+    at:         string   // ISO 8601, UTC: when the client acted (OccurredAt of the event)
+    receivedAt: string   // ISO 8601, UTC: when we started handling the event
+  }
 }
 ```
+
+`status` says whether the message was **delivered**; `clientDecision` says what the client **did**
+with it (approved, for example paid; declined, for example out of stock). They are independent:
+the decision arrives by webhook, minutes or months after `sent`, and there is no deadline.
 
 The owner (`sub` claim of the token) is stored with the item but never returned.
 
@@ -41,6 +51,29 @@ created --(enqueuer put it on the queue)--> queued --(partner answered 2xx)-----
   A failed condition means somebody else already moved the request on: treat it as done,
   not as an error.
 
+## Client decision (webhook)
+
+The recipient calls `POST /webhooks/partner` when the client acts. The contract, its schema and
+its signature are in `contracts/webhook-api.md` and `contracts/xsd/event.xsd`; this section is
+what it means for the request.
+
+- The route is **public** (no Cognito token): it is protected by the signature (HMAC-SHA256 with
+  a shared token, in SSM Parameter Store as `/<env>/<project>/webhook-token`, SecureString) and
+  throttling: the stage's default limits, and a lower limit of its own for this route (2 requests
+  per second, burst 4; the caller reads `429` as "try again", so an event is delayed, never lost). It answers `413`, `401`, `415`, `400`, `422`, `404` and `200` as the
+  contract says, without a body.
+- The event names the request only by id, and the table's key starts with the owner, so the
+  function finds the item through the index `by-request-id` (see "Storage") and then updates it.
+- `clientDecision` is set with one conditional `UpdateItem`, whatever the delivery `status` is
+  (the event may come before `sent` is written, and for a `failed` request too):
+  it is written if there is no decision yet, or if the event's `OccurredAt` is later than the
+  stored one and the event is not the one already stored (another `EventId`). Anything else (the
+  same event again, whatever time it carries; an older one arriving late) changes nothing and is
+  answered `200`. The latest `OccurredAt` wins, not the last one received.
+- Times are compared as epoch milliseconds, kept in the item next to the text (`decisionAtMs`),
+  because ISO strings with different offsets do not sort.
+- Nothing waits for the event and nothing expires: no timer, no alarm for a missing decision.
+
 ## Endpoints
 
 | Method | Path | Body | Success | Errors |
@@ -49,6 +82,7 @@ created --(enqueuer put it on the queue)--> queued --(partner answered 2xx)-----
 | GET | `/requests` | | `200` `{ items: Request[] }`, newest first, at most 50 (pagination later) | `500` |
 | GET | `/requests/{id}` | | `200` `Request` | `404` (also for a malformed id), `500` |
 | GET | `/requests/{id}/exchange` | | `200` `Exchange` | `404` (no such request, or no delivery attempt yet), `500` |
+| POST | `/webhooks/partner` | XML `DecisionEvent`, signed | `200`, empty body | `413`, `401`, `415`, `400`, `422`, `404`, `5xx` (see "Client decision"); **no Cognito token** |
 
 `Exchange` is what the worker recorded about the **latest** delivery attempt (see "The exchange
 record"). The XML in it is text for a person to read: clients must show it as text and never
@@ -98,12 +132,21 @@ Table `<project>-<env>-requests`, provisioned 5 RCU / 5 WCU, no autoscaling.
 | partition | `pk` (S) | `USER#<sub>` |
 | sort | `sk` (S) | `REQ#<ULID>` |
 
-Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`.
+Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`, and once the
+client has acted `clientDecision` (a map: the fields of "Model" plus `eventId`, the id of the event
+that set it, kept for the "same event" rule and never returned) and `decisionAtMs` (number, epoch
+milliseconds of `clientDecision.at`, for the comparison of the webhook).
+
+Index `by-request-id` (GSI): partition key `sk` (S), no sort key, projection `KEYS_ONLY`
+(`pk` and `sk`), provisioned 5 RCU / 5 WCU. It serves one access pattern: find an item by
+request id without knowing the owner (the webhook). `sk` is `REQ#<ULID>`, unique across the
+table because ULIDs are. Items that existed before the index are added to it by DynamoDB.
 
 - List = `Query` on `pk`, `ScanIndexForward=false`, `Limit=50`.
 - Get = `GetItem` on (`pk`, `REQ#<id>`).
 - `pk` is always built from the token's `sub`, never from client input, so one user cannot
-  address another user's items. No GSI.
+  address another user's items. The webhook is the one caller without a `sub`: it reaches an
+  item only through `by-request-id` and only to set `clientDecision`.
 - Known limit: read capacity is charged by the size of the items read, not by the fields
   returned, so dropping `body` from the list response would not lower it. A page of 50
   items with maximum-size bodies (about 265 KB) costs roughly 33 RCU per call with
@@ -245,10 +288,11 @@ checks ownership in the table before it touches S3).
 | `get-request` | `GET /requests/{id}` | `GetItem` | |
 | `enqueuer` | DynamoDB stream | `UpdateItem` | stream read; `sqs:SendMessage` on the queue; `sns:Publish` on `alerts` |
 | `delivery-worker` | SQS queue | `GetItem`, `UpdateItem` | queue receive/delete/attributes; `sns:Publish` on `request-status`; `s3:PutObject` on `exchanges/*`; `ssm:GetParameter` on the API key parameter |
+| `receive-webhook` | `POST /webhooks/partner` (public) | `Query` on `by-request-id`, `UpdateItem` | `ssm:GetParameter` on the webhook token parameter |
 | `get-exchange` | `GET /requests/{id}/exchange` | `GetItem` | `s3:GetObject` on `exchanges/*`; `s3:ListBucket` on the bucket (without it S3 answers a missing key with 403 instead of 404; a prefix condition would not help, a GetObject request carries no prefix) |
 
 - Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. Timeouts:
-  API functions and `enqueuer` 10 s, `delivery-worker` 15 s.
+  API functions, `receive-webhook` and `enqueuer` 10 s, `delivery-worker` 15 s.
 - The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
   event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
 - API events: HTTP API payload format 2.0 with JWT authorizer
@@ -258,7 +302,8 @@ checks ownership in the table before it touches S3).
   API functions `TABLE_NAME`; `get-exchange` `TABLE_NAME`, `AUDIT_BUCKET`; `enqueuer`
   `TABLE_NAME`, `QUEUE_URL`; `delivery-worker` `TABLE_NAME`, `PARTNER_URL`,
   `PARTNER_API_KEY_PARAM`, `SENDER_NAME` (default `aws-starter`), `TOPIC_ARN` (request-status),
-  `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`.
+  `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`; `receive-webhook` `TABLE_NAME`, `WEBHOOK_TOKEN_PARAM` (the
+  SSM parameter name).
 - The XSD files of `contracts/xsd/` are copied into the package of every function that needs
   them (`schemas/` next to `index.mjs`) by the build; the packaged copy is the sender's own copy
   of the contract.

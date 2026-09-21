@@ -193,8 +193,10 @@ export class FakeApiKeyProvider implements ApiKeyProvider {
 export class FakeXmlValidator implements XmlValidator {
   readonly submissions: string[] = [];
   readonly replies: string[] = [];
+  readonly events: string[] = [];
   submissionResult: ValidationResult = { valid: true };
   replyResult: ValidationResult = { valid: true };
+  eventResult: ValidationResult = { valid: true };
 
   constructor(private readonly journal: Journal) {}
 
@@ -208,6 +210,12 @@ export class FakeXmlValidator implements XmlValidator {
     this.journal.push("validator.reply");
     this.replies.push(xml);
     return Promise.resolve(this.replyResult);
+  }
+
+  validateEvent(xml: string): Promise<ValidationResult> {
+    this.journal.push("validator.event");
+    this.events.push(xml);
+    return Promise.resolve(this.eventResult);
   }
 }
 

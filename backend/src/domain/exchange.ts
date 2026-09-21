@@ -22,6 +22,10 @@ export type ExchangeOutcome = (typeof EXCHANGE_OUTCOMES)[number];
 export const problemSchema = z.object({ element: z.string(), rule: z.string() });
 export type Problem = z.infer<typeof problemSchema>;
 
+// A problem as one line of a log: "element: rule". Both come from closed lists (see
+// src/clients/xsd-findings.ts), never from the document.
+export const describeProblem = ({ element, rule }: Problem): string => `${element}: ${rule}`;
+
 export const exchangeSchema = z.object({
   /** Which attempt this describes (1 = the first): the receive count of the queue message. */
   attempt: z.number(),

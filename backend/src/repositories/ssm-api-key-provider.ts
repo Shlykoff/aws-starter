@@ -3,10 +3,13 @@ import type { SSMClient } from "@aws-sdk/client-ssm";
 import type { ApiKeyProvider } from "./api-key-provider";
 
 // The key is a SecureString parameter in SSM Parameter Store (docs/api.md, "The recipient").
-// It is read once and kept in memory for 5 minutes: a warm Lambda environment handles many
-// messages, and asking SSM for every one of them would cost time and count against its
+// The class reads ANY SecureString parameter, so it also serves the webhook token (bound as a
+// `SecretProvider`; the name is from its first use).
+//
+// The value is read once and kept in memory for 5 minutes: a warm Lambda environment handles
+// many messages, and asking SSM for every one of them would cost time and count against its
 // request limits, while a rotated key is picked up within minutes (or at once after a 401,
-// see `invalidate`).
+// see `invalidate`, which only the worker uses).
 const CACHE_MS = 5 * 60 * 1000;
 
 export class SsmApiKeyProvider implements ApiKeyProvider {
@@ -52,7 +55,7 @@ export class SsmApiKeyProvider implements ApiKeyProvider {
     );
     const value = response.Parameter?.Value;
     if (value === undefined || value === "") {
-      throw new Error("The API key parameter has no value");
+      throw new Error("The SSM parameter has no value");
     }
 
     // A failure never gets here, so it is never cached: the next call tries again. And if

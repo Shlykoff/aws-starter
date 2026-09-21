@@ -1,10 +1,10 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeExchange, makeExchangeApi, makeRequest, makeRequestsApi } from "@test/factories";
+import { makeClientDecision, makeExchange, makeExchangeApi, makeRequest, makeRequestsApi } from "@test/factories";
 import { renderWithProviders } from "@test/render";
 import { ApiError } from "@/shared/api";
 import { ExchangeStore } from "@/entities/exchange";
-import { RequestsStore, STATUS_POLL_INTERVAL_MS } from "@/entities/request";
+import { DECISION_POLL_INTERVAL_MS, RequestsStore, STATUS_POLL_INTERVAL_MS } from "@/entities/request";
 import { RequestDetailsPage } from "./RequestDetailsPage";
 
 function setup() {
@@ -140,9 +140,11 @@ describe("RequestDetailsPage status polling", () => {
     expect(api.get).toHaveBeenCalledTimes(3);
   });
 
-  it("does not poll a request that is already terminal", async () => {
+  it("does not poll a request that is already terminal and needs nothing more", async () => {
     const { api, open } = setup();
-    const request = makeRequest({ status: "sent" });
+    // `failed`: nothing was delivered, so no decision is awaited either (`sent` without a
+    // decision is asked for slowly, see "decision polling" below).
+    const request = makeRequest({ status: "failed" });
     api.get.mockResolvedValue(request);
 
     open(request.id);
@@ -337,7 +339,8 @@ describe("RequestDetailsPage exchange polling", () => {
     expect(screen.getByText("Delivered")).toBeInTheDocument();
     expect(exchangeApi.get).toHaveBeenCalledTimes(4);
 
-    // The request is terminal now: no more asking, for the request or for the exchange.
+    // The request is `sent` now: the exchange is final and is never asked for again (the
+    // request itself is, slowly, for a decision).
     await advance(60_000);
     expect(exchangeApi.get).toHaveBeenCalledTimes(4);
   });
@@ -373,5 +376,228 @@ describe("RequestDetailsPage exchange polling", () => {
 
     await advance(STATUS_POLL_INTERVAL_MS);
     expect(screen.getByText("Attempt 2")).toBeInTheDocument();
+  });
+});
+
+describe("RequestDetailsPage client decision", () => {
+  const cardOf = () => screen.queryByRole("region", { name: "Client decision" });
+
+  it("shows the decision between the request and the exchange", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({
+      status: "sent",
+      clientDecision: makeClientDecision({ decision: "Declined", reason: "Out of stock." }),
+    });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+
+    const heading = await screen.findByRole("heading", { level: 1 });
+    const card = await screen.findByRole("region", { name: "Client decision" });
+    const exchange = screen.getByRole("region", { name: "Exchange" });
+    expect(within(card).getByText("Declined")).toBeInTheDocument();
+    expect(within(card).getByText("Out of stock.")).toBeInTheDocument();
+    expect(heading.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(card.compareDocumentPosition(exchange) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("says that it waits for a delivered request without a decision", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "sent" });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+
+    expect(await screen.findByText("Waiting for the client's decision. It can arrive at any time.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each(["created", "queued", "failed", "rejected"] as const)(
+    "shows no decision card for a %s request without a decision",
+    async (status) => {
+      const { api, open } = setup();
+      const request = makeRequest({ status, subject: "No card here" });
+      api.get.mockResolvedValue(request);
+
+      open(request.id);
+
+      await screen.findByRole("heading", { name: "No card here" });
+      expect(cardOf()).not.toBeInTheDocument();
+    },
+  );
+
+  it("still shows a decision on a failed request", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "failed", clientDecision: makeClientDecision({ decision: "Approved" }) });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(within(await screen.findByRole("region", { name: "Client decision" })).getByText("Approved")).toBeInTheDocument();
+  });
+
+  it("shows no decision card when the request was not found", async () => {
+    const { api, open } = setup();
+    api.get.mockRejectedValue(new ApiError(404, "not_found", "Request not found"));
+
+    open("nope");
+
+    expect(await screen.findByText("Request not found")).toBeInTheDocument();
+    expect(cardOf()).not.toBeInTheDocument();
+  });
+});
+
+describe("RequestDetailsPage decision polling", () => {
+  // jsdom has no real tab: the tests decide what the page visibility is and announce a change
+  // the way a browser does (set the value, then fire `visibilitychange`).
+  let visibility: DocumentVisibilityState;
+  beforeEach(() => {
+    visibility = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const changeVisibility = (state: DocumentVisibilityState) =>
+    act(async () => {
+      visibility = state;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+  const WAITING = "Waiting for the client's decision. It can arrive at any time.";
+  const decided = (request: ReturnType<typeof makeRequest>) => ({
+    ...request,
+    clientDecision: makeClientDecision({ decision: "Approved", reason: "Paid by card." }),
+  });
+
+  it("asks every 30 seconds while a delivered request has no decision, then shows it and stops", async () => {
+    const { api, exchangeApi, open } = setup();
+    const request = makeRequest({ status: "sent" });
+    api.get.mockResolvedValueOnce(request).mockResolvedValueOnce(request).mockResolvedValue(decided(request));
+
+    open(request.id);
+    await advance(0);
+    expect(screen.getByText(WAITING)).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledTimes(1);
+
+    // Slow, not the 5 seconds of the status poll.
+    await advance(DECISION_POLL_INTERVAL_MS - 1);
+    expect(api.get).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(WAITING)).toBeInTheDocument();
+
+    await advance(DECISION_POLL_INTERVAL_MS);
+    expect(api.get).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText(WAITING)).not.toBeInTheDocument();
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(screen.getByText("Paid by card.")).toBeInTheDocument();
+
+    // The decision is here: no more asking, however long the page stays open.
+    await advance(20 * DECISION_POLL_INTERVAL_MS);
+    expect(api.get).toHaveBeenCalledTimes(3);
+    // Only the request is asked for: the exchange was final when the request became `sent`.
+    expect(exchangeApi.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches from the status pace to the slow pace when the request becomes sent", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "queued" });
+    api.get.mockResolvedValueOnce(request).mockResolvedValue({ ...request, status: "sent" });
+
+    open(request.id);
+    await advance(0);
+    await advance(STATUS_POLL_INTERVAL_MS);
+    expect(screen.getByText("Sent")).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledTimes(2);
+
+    await advance(DECISION_POLL_INTERVAL_MS - 1);
+    expect(api.get).toHaveBeenCalledTimes(2);
+    await advance(1);
+    expect(api.get).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not ask while the tab is hidden, and asks once at once when it is visible again", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "sent" });
+    api.get.mockResolvedValueOnce(request).mockResolvedValueOnce(request).mockResolvedValue(decided(request));
+
+    open(request.id);
+    await advance(0);
+    expect(api.get).toHaveBeenCalledTimes(1);
+
+    await changeVisibility("hidden");
+    await advance(10 * DECISION_POLL_INTERVAL_MS);
+    expect(api.get).toHaveBeenCalledTimes(1);
+
+    await changeVisibility("visible");
+    expect(api.get).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(WAITING)).toBeInTheDocument();
+
+    // The slow rhythm goes on from the moment the tab came back.
+    await advance(DECISION_POLL_INTERVAL_MS);
+    expect(api.get).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+  });
+
+  it.each(["failed", "rejected"] as const)("never asks for a decision of a %s request", async (status) => {
+    const { api, open } = setup();
+    const request = makeRequest({ status });
+    api.get.mockResolvedValue(request);
+
+    open(request.id);
+    await advance(10 * 60_000);
+
+    expect(api.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ask when the decision is already known", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "sent" });
+    api.get.mockResolvedValue(decided(request));
+
+    open(request.id);
+    await advance(10 * 60_000);
+
+    expect(api.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps waiting, and keeps asking, when a refresh fails", async () => {
+    const { api, open } = setup();
+    const request = makeRequest({ status: "sent" });
+    api.get
+      .mockResolvedValueOnce(request)
+      .mockRejectedValueOnce(new ApiError(500, "internal_error", "Internal server error"))
+      .mockResolvedValue(decided(request));
+
+    open(request.id);
+    await advance(0);
+    await advance(DECISION_POLL_INTERVAL_MS);
+
+    expect(screen.getByText(WAITING)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    await advance(DECISION_POLL_INTERVAL_MS);
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+  });
+
+  it("stops asking when the page is left", async () => {
+    const { api, open } = setup();
+    api.get.mockResolvedValue(makeRequest({ status: "sent" }));
+
+    const { unmount } = open("any");
+    await advance(0);
+    unmount();
+    await advance(10 * DECISION_POLL_INTERVAL_MS);
+
+    expect(api.get).toHaveBeenCalledTimes(1);
   });
 });

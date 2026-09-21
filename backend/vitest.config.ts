@@ -12,6 +12,7 @@ export default defineConfig({
       QUEUE_URL: "https://sqs.eu-north-1.amazonaws.com/000000000000/test-deliveries.fifo",
       PARTNER_URL: "https://partner.example.test/",
       PARTNER_API_KEY_PARAM: "/test/partner-api-key",
+      WEBHOOK_TOKEN_PARAM: "/test/webhook-token",
       TOPIC_ARN: "arn:aws:sns:eu-north-1:000000000000:test-request-status",
       AUDIT_BUCKET: "test-deliveries",
       MAX_RECEIVE_COUNT: "5",

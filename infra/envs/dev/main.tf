@@ -2,10 +2,12 @@ locals {
   prefix = "${var.project}-${var.env}" # every resource name is <project>-<env>-<thing>
 
   # One entry per API function; the routes are the ones in docs/api.md. Every function gets
-  # TABLE_NAME and exactly one DynamoDB action, the one its handler needs. An entry may add
-  # `environment` and `policy_statements` of its own (only get-exchange does); the module
-  # block below treats a missing one as "none". One loop, not a second module block, so that
-  # the routes, environments and permissions of all API functions stay in this one map.
+  # TABLE_NAME and exactly one DynamoDB action on the table, the one its handler needs. An entry
+  # may add `environment` and `policy_statements` of its own (get-exchange and receive-webhook
+  # do); the module block below treats a missing one as "none". `public = true` takes the
+  # route off the Cognito authorizer; a missing `public` means protected. One loop, not a
+  # second module block, so that the routes, environments and permissions of all API
+  # functions stay in this one map.
   functions = {
     create-request = { route_key = "POST /requests", dynamodb_action = "dynamodb:PutItem" }
     list-requests  = { route_key = "GET /requests", dynamodb_action = "dynamodb:Query" }
@@ -36,7 +38,39 @@ locals {
         },
       ]
     }
+
+    # The recipient's decision event (contracts/webhook-api.md). The only PUBLIC route: the
+    # caller is another system, not a signed-in user, so it has no Cognito token. Instead the
+    # function checks an HMAC signature (made with the shared token in SSM) before it does
+    # anything else, and the route is throttled: the stage's default limits apply as to every
+    # route, and the http-api module gives a public route a lower limit of its own.
+    # Memory 256 MB (it also covers the WASM schema check) and the 10 s timeout are the
+    # lambda-function module's defaults.
+    receive-webhook = {
+      route_key       = "POST ${local.webhook_path}"
+      public          = true
+      dynamodb_action = "dynamodb:UpdateItem"                                          # sets clientDecision on the request
+      environment     = { WEBHOOK_TOKEN_PARAM = aws_ssm_parameter.webhook_token.name } # the name only, never the token
+      policy_statements = [
+        {
+          # The event names the request but not its owner, so the item is found by id through
+          # the index. A Query on an index is authorized on the index ARN, not the table's.
+          actions   = ["dynamodb:Query"]
+          resources = [module.requests_table.by_request_id_index_arn]
+        },
+        {
+          # Reads the token. No kms:Decrypt statement, for the same reason as the delivery-worker's
+          # API key statement below: the AWS-managed key alias/aws/ssm lets the account's
+          # principals use it through SSM.
+          actions   = ["ssm:GetParameter"]
+          resources = [aws_ssm_parameter.webhook_token.arn]
+        },
+      ]
+    }
   }
+
+  # The path the recipient calls. Named once: the route above and the webhook_url output use it.
+  webhook_path = "/webhooks/partner"
 
   # Origins the browser app runs on: Vite's dev server always, CloudFront when it exists.
   # They feed both CORS (API) and the login redirects (Cognito). The for-expression is
@@ -94,6 +128,7 @@ module "api" {
       route_key     = fn.route_key
       function_name = module.function[name].name
       invoke_arn    = module.function[name].invoke_arn
+      public        = lookup(fn, "public", false)
     }
   }
 }
@@ -359,6 +394,28 @@ resource "aws_lambda_event_source_mapping" "delivery_worker" {
   scaling_config {
     maximum_concurrency = 2
   }
+}
+
+# ---------------------------------------------------------------------------
+# Webhook (docs/api.md, "Client decision (webhook)"): the recipient tells us what the client
+# did with a delivered message. The function is receive-webhook in local.functions above; the
+# webhook_url output is the address the recipient is given.
+# ---------------------------------------------------------------------------
+
+# The token the recipient signs its webhook calls with (HMAC-SHA256, contracts/webhook-api.md);
+# receive-webhook reads it at run time, so it is in no environment variable and no code.
+# Everything said at aws_ssm_parameter.partner_api_key applies here too: SecureString on the
+# AWS-managed key, Standard tier, write-only value, the SSM naming rule, and the rotation recipe
+# (with webhook_token, webhook_token_version and the GitHub secret PARTNER_WEBHOOK_TOKEN in
+# place of the API key's). Both sides must hold the same token: until the recipient has the new
+# one, its calls are answered with 401 (contracts/webhook-api.md).
+resource "aws_ssm_parameter" "webhook_token" {
+  name = "/${var.env}/${var.project}/webhook-token" # env first, see partner_api_key
+
+  type             = "SecureString"
+  tier             = "Standard"
+  value_wo         = var.webhook_token
+  value_wo_version = var.webhook_token_version
 }
 
 # ---------------------------------------------------------------------------

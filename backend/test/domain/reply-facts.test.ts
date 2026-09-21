@@ -44,6 +44,12 @@ describe("readReplyFacts", () => {
       expect(readReplyFacts(xml)).toMatchObject({ status: "Rejected", code: "SCHEMA_INVALID" });
     });
 
+    it("keeps U+0085 and U+2028 in a description (XML 1.0 line ends: only CR and CR LF change)", () => {
+      const xml = `<Reply xmlns="${NS}" version="1"><MessageId>${UUID}</MessageId><ReceivedAt>2026-09-21T10:00:00Z</ReceivedAt><Result><Status>Rejected</Status><Code>SCHEMA_INVALID</Code><Description>a\u0085b\u2028c\r\nd\re</Description></Result></Reply>`;
+
+      expect(readReplyFacts(xml)?.description).toBe("a\u0085b\u2028c\nd\ne");
+    });
+
     it("with a comment or CDATA inside a value, and character references", () => {
       const xml = `<Reply xmlns="${NS}" version="1"><MessageId>${UUID}</MessageId><ReceivedAt>2026-09-21T10:00:00Z</ReceivedAt><Result><Status>Rej<!-- x -->ected</Status><Code><![CDATA[SCHEMA_INVALID]]></Code><Description>a &amp; b &lt; c &#65;</Description></Result></Reply>`;
 

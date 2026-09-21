@@ -1,3 +1,8 @@
+locals {
+  # Named once: the index below and the ARN in outputs.tf must agree on it.
+  by_request_id_index = "by-request-id"
+}
+
 # Single-table design: one partition per user (pk = USER#<sub>), one item per request
 # (sk = REQ#<ULID>). Key design is described in docs/api.md.
 resource "aws_dynamodb_table" "this" {
@@ -29,6 +34,32 @@ resource "aws_dynamodb_table" "this" {
   attribute {
     name = "sk"
     type = "S"
+  }
+
+  # Finds a request by its id alone. The webhook event names the request but not its owner,
+  # and the table's key starts with the owner (docs/api.md, "Storage"). An index may use the
+  # table's sort key as its own partition key, so no new attribute is needed; sk = REQ#<ULID>
+  # is unique across the table because ULIDs are.
+  #
+  # KEYS_ONLY: the index holds pk and sk and nothing else, which is all the webhook needs to
+  # address the item. It stays tiny and holds no request text.
+  #
+  # Capacity is the index's own (an index is billed like a small table): 5 RCU / 5 WCU, as the
+  # table. The always-free allowance is 25 RCU / 25 WCU per account for tables and indexes
+  # together, so table + index use 10 of 25 of each. Adding the index to a table that already
+  # holds items is an in-place update: DynamoDB backfills the index by itself.
+  #
+  # `key_schema` instead of `hash_key`: the provider marks `hash_key` in this block deprecated.
+  global_secondary_index {
+    name            = local.by_request_id_index
+    projection_type = "KEYS_ONLY"
+    read_capacity   = 5
+    write_capacity  = 5
+
+    key_schema {
+      attribute_name = "sk"
+      key_type       = "HASH"
+    }
   }
 
   # Point-in-time recovery is off (it is billed per GB) and the table uses the default

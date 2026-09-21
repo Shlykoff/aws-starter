@@ -1,6 +1,6 @@
 import type { ValidationResult } from "../domain/validation-result";
 
-// What the delivery service needs from an XSD validator: is this document valid against the
+// What the delivery service and the webhook service need from an XSD validator: is this document valid against the
 // contract schema of a message, and if not, what is wrong (the element and the rule, never
 // the value). Both methods return a result for anything they are given: a document that is
 // too large, has a DOCTYPE or is not even well-formed is "not valid", not an exception. An
@@ -10,4 +10,6 @@ export interface XmlValidator {
   validateSubmission(xml: string): Promise<ValidationResult>;
   /** Checks the body of the recipient's answer against contracts/xsd/reply.xsd. */
   validateReply(xml: string): Promise<ValidationResult>;
+  /** Checks a DecisionEvent (the client's decision, sent to our webhook) against contracts/xsd/event.xsd. */
+  validateEvent(xml: string): Promise<ValidationResult>;
 }

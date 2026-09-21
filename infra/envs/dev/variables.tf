@@ -97,3 +97,29 @@ variable "sender_name" {
     error_message = "Expected 1 to 100 characters: letters, digits, space and . , ' & - only."
   }
 }
+
+# ---------------------------------------------------------------------------
+# The webhook the recipient calls (docs/api.md, "Client decision (webhook)"; its HTTP
+# contract is contracts/webhook-api.md).
+# ---------------------------------------------------------------------------
+
+variable "webhook_token" {
+  description = "The token the recipient signs its webhook calls with (the key of an HMAC-SHA256, contracts/webhook-api.md): a secret shared with it, stored in SSM Parameter Store. Ephemeral: Terraform never writes it to the state or to a plan file, so it has to be given again on every plan and every apply, best as TF_VAR_webhook_token (in CI: the GitHub secret PARTNER_WEBHOOK_TOKEN). To rotate it, see webhook_token_version."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  nullable    = false
+
+  validation {
+    # A length check only. The message does not repeat the value.
+    condition     = length(var.webhook_token) >= 16
+    error_message = "The webhook token must be at least 16 characters long."
+  }
+}
+
+variable "webhook_token_version" {
+  description = "Version counter of webhook_token. Terraform cannot compare a write-only value with what is stored, so it sends the token to SSM again only when this number changes. To rotate the token: give the new value AND raise this number by one (the same recipe as partner_api_key_version, at aws_ssm_parameter.partner_api_key in main.tf)."
+  type        = number
+  default     = 1
+  nullable    = false
+}

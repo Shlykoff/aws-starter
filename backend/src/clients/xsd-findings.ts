@@ -1,4 +1,5 @@
 import type { Problem } from "../domain/exchange";
+import { UNREADABLE_DOCUMENT_RULES } from "../domain/validation-result";
 
 // Turns the error lines of libxml2 into problems that are safe to store and to log.
 //
@@ -23,6 +24,7 @@ const UNKNOWN_ELEMENT = "(unknown)";
 export const KNOWN_ELEMENTS: ReadonlySet<string> = new Set([
   "Submission", "Header", "MessageId", "SentAt", "Sender", "Recipient", "Name", "Content", "Subject", "Text",
   "Reply", "RelatesTo", "ReceivedAt", "Result", "Status", "Code", "Description",
+  "DecisionEvent", "EventId", "OccurredAt", "Decision", "Reason",
 ]);
 
 // The message shapes we know, in the order they are tried. Each pattern is anchored at the
@@ -44,7 +46,7 @@ const RULES: readonly (readonly [RegExp, string])[] = [
 ];
 
 const FALLBACK_RULE = "schema violation";
-const NOT_WELL_FORMED: Problem = { element: WHOLE_DOCUMENT, rule: "not well-formed XML" };
+const NOT_WELL_FORMED: Problem = { element: WHOLE_DOCUMENT, rule: UNREADABLE_DOCUMENT_RULES.notWellFormed };
 
 // One line of the schema errors: `<file>:<line>: Schemas validity error : Element '{ns}Name'...`.
 // The optional `, attribute '...'` part says that the value of an attribute is meant.

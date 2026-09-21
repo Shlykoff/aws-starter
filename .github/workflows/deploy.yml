@@ -83,6 +83,8 @@ jobs:
           # The API key the recipient checks. An ephemeral variable: it goes into the SSM
           # parameter and into no state file and no plan file.
           TF_VAR_partner_api_key: ${{ secrets.PARTNER_API_KEY }}
+          # The secret the recipient signs its webhook calls with. Ephemeral like the key above.
+          TF_VAR_webhook_token: ${{ secrets.PARTNER_WEBHOOK_TOKEN }}
         run: terraform -chdir="$TF_DIR" plan -input=false -out=tfplan
 
       # A guard rail for unattended deploys: an automatic apply may create and change things
@@ -102,6 +104,7 @@ jobs:
         env:
           # Not stored in the plan file (see above), so it is given again.
           TF_VAR_partner_api_key: ${{ secrets.PARTNER_API_KEY }}
+          TF_VAR_webhook_token: ${{ secrets.PARTNER_WEBHOOK_TOKEN }}
         run: terraform -chdir="$TF_DIR" apply -input=false tfplan
 
       # The app is configured at build time with the addresses Terraform just produced.

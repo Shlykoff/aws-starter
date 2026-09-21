@@ -10,6 +10,7 @@ export const TOKENS = {
   ExchangeConfig: Symbol("ExchangeConfig"), // get-exchange
   EnqueuerConfig: Symbol("EnqueuerConfig"),
   WorkerConfig: Symbol("WorkerConfig"),
+  WebhookConfig: Symbol("WebhookConfig"),
 
   Logger: Symbol("Logger"),
 
@@ -27,6 +28,8 @@ export const TOKENS = {
   StatusNotifier: Symbol("StatusNotifier"),
   ExchangeStore: Symbol("ExchangeStore"),
   ApiKeyProvider: Symbol("ApiKeyProvider"),
+  DecisionRepository: Symbol("DecisionRepository"),
+  WebhookToken: Symbol("WebhookToken"), // a SecretProvider
   XmlValidator: Symbol("XmlValidator"),
   PartnerClient: Symbol("PartnerClient"),
 
@@ -35,4 +38,5 @@ export const TOKENS = {
   EnqueueService: Symbol("EnqueueService"),
   DeliveryService: Symbol("DeliveryService"),
   ExchangeService: Symbol("ExchangeService"),
+  WebhookService: Symbol("WebhookService"),
 } as const;

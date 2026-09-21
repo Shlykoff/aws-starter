@@ -2,8 +2,8 @@
 //   dist/<function>/index.mjs   (+ index.mjs.map, the source map)
 // Terraform zips each dist/<function>/ directory; this script does not create zips.
 //
-// The functions that check XML against a schema (only the delivery-worker) get two more
-// things in their directory, see `validatesXml` below:
+// The functions that check XML against a schema (the delivery-worker and the receive-webhook)
+// get two more things in their directory, see `validatesXml` below:
 //   dist/<function>/schemas/*.xsd                the sender's own copy of contracts/xsd/
 //   dist/<function>/node_modules/xmllint-wasm/   the XSD validator, NOT bundled
 import { build } from "esbuild";
@@ -18,11 +18,12 @@ const functions = [
   "get-exchange",
   "enqueuer",
   "delivery-worker",
+  "receive-webhook",
 ];
 
 // Functions that validate XML. get-exchange only hands a stored record back, so it needs
 // neither the schemas nor the validator.
-const validatesXml = ["delivery-worker"];
+const validatesXml = ["delivery-worker", "receive-webhook"];
 
 // xmllint-wasm (libxml2 compiled to WebAssembly) cannot go into a bundle. For every
 // validation it starts a worker thread from a script FILE and reads its `.wasm` file, and

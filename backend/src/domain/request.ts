@@ -1,3 +1,5 @@
+import type { ClientDecision } from "./client-decision";
+
 // The request model from docs/api.md ("Request"). It is called `PartnerRequest` here so it
 // does not shadow the global `Request` type of the fetch API.
 
@@ -15,4 +17,7 @@ export interface PartnerRequest {
   body: string;
   status: RequestStatus;
   createdAt: string; // ISO 8601, UTC
+  // What the client did with the delivered message. Absent until the webhook stores it (a
+  // new request never has one); independent of `status`.
+  clientDecision?: ClientDecision;
 }

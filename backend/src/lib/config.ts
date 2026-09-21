@@ -162,3 +162,27 @@ export function loadWorkerConfig(env: Record<string, string | undefined>): Worke
     logLevel: values.LOG_LEVEL,
   };
 }
+
+// ---- receive-webhook ----
+
+export interface WebhookConfig {
+  tableName: string;
+  /** The name of the SSM parameter (SecureString) that holds the token that signs the webhook. */
+  webhookTokenParam: string;
+  logLevel: LogLevel;
+}
+
+const webhookSchema = z.object({
+  TABLE_NAME: requiredString,
+  WEBHOOK_TOKEN_PARAM: requiredString,
+  LOG_LEVEL: logLevel,
+});
+
+export function loadWebhookConfig(env: Record<string, string | undefined>): WebhookConfig {
+  const values = parseEnvironment(webhookSchema, env);
+  return {
+    tableName: values.TABLE_NAME,
+    webhookTokenParam: values.WEBHOOK_TOKEN_PARAM,
+    logLevel: values.LOG_LEVEL,
+  };
+}

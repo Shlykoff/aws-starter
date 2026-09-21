@@ -286,3 +286,51 @@ describe("enqueuer: logging", () => {
     expect(everything).not.toContain("Acme");
   });
 });
+
+// The webhook stores the client's decision on the request item (clientDecision, decisionAtMs).
+// That is a MODIFY record in the stream, and the new attributes may also be in the image of a
+// later record: neither may break the enqueuer, queue a request twice or reach the queue.
+describe("enqueuer: the client's decision in the stream", () => {
+  const decisionImage = (n: number) => ({
+    pk: { S: "USER#user-a" },
+    sk: { S: `REQ#${idNumber(n)}` },
+    id: { S: idNumber(n) },
+    partner: { S: "Acme" },
+    subject: { S: "Order 42" },
+    body: { S: "Please ship." },
+    status: { S: "sent" },
+    createdAt: { S: "2026-09-21T09:00:00.000Z" },
+    decisionAtMs: { N: "1789985732000" },
+    clientDecision: {
+      M: {
+        decision: { S: "Declined" },
+        reason: { S: "Out of stock" },
+        at: { S: "2026-09-21T10:15:32.000Z" },
+        receivedAt: { S: "2026-09-21T10:15:40.000Z" },
+        eventId: { S: "3f0c6b1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c" },
+      },
+    },
+  });
+
+  it("does not queue a request again when a decision is stored (a MODIFY record)", async () => {
+    table.seed({ pk: "USER#user-a", sk: `REQ#${idNumber(1)}`, id: idNumber(1), partner: "Acme", status: "sent" });
+
+    const response = await run(streamRecord({ eventName: "MODIFY", sequenceNumber: "100000000000000000001", image: decisionImage(1) }));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(sqs.commandCalls(SendMessageBatchCommand)).toHaveLength(0);
+    expect(statusOf(1)).toBe("sent");
+  });
+
+  it("still enqueues a request whose image carries the decision attributes, and puts ids only on the queue", async () => {
+    table.seed({ pk: "USER#user-a", sk: `REQ#${idNumber(1)}`, id: idNumber(1), partner: "Acme", status: "created" });
+
+    const response = await run(streamRecord({ sequenceNumber: "100000000000000000001", image: decisionImage(1) }));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    const body = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries?.[0]?.MessageBody;
+    expect(JSON.parse(body ?? "") as unknown).toEqual({ requestId: idNumber(1), ownerId: "user-a" });
+    expect(body).not.toContain("Declined");
+    expect(body).not.toContain("eventId");
+  });
+});
