@@ -1,0 +1,95 @@
+name: Recipient image
+
+# Builds the Docker image of the recipient (partner-sim/) and publishes it to the GitHub Container
+# Registry, where a hosting platform can pull it. The recipient is a separate system: it does not
+# run in the AWS stack, so this workflow has nothing to do with deploy.yml and never touches AWS.
+#
+# A pull request only tests; a push to main tests, then publishes.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "partner-sim/**"
+      - "contracts/**"
+      - ".github/workflows/partner-sim-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "partner-sim/**"
+      - "contracts/xsd/**"
+      - ".github/workflows/partner-sim-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two publishes at once could leave `latest` pointing at the older build.
+concurrency:
+  group: partner-sim-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The same commands as on a laptop (partner-sim/README.md, "Tests"): pytest, then the linter.
+      - name: pytest
+        working-directory: partner-sim
+        run: docker compose --profile tests run --rm --build tests
+      - name: ruff
+        working-directory: partner-sim
+        run: |
+          docker compose --profile tests run --rm tests ruff check .
+          docker compose --profile tests run --rm tests ruff format --check .
+
+  publish:
+    name: publish
+    needs: test
+    # Not for a pull request: only what is on main is published.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # lets this job push the image with the workflow's own token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A registry wants a lower-case name, and the owner of this repository is not lower case.
+      - name: Name the image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aws-starter-partner-sim" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The build context is the repository root: the Dockerfile copies contracts/xsd/ (the
+      # schemas the recipient validates against) next to the code. linux/amd64 only: that is
+      # what hosting platforms run, and the one platform this image has been built and run on.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: partner-sim/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          # `latest` moves with main; the commit tag is what to pin when a deploy must be repeatable.
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          # The source label links the package to this repository on GitHub.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=A demo recipient of signed XML messages (partner simulator)
+            org.opencontainers.image.revision=${{ github.sha }}
