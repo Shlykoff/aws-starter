@@ -278,7 +278,11 @@ resource "aws_lambda_event_source_mapping" "enqueuer" {
 # new key once its 5-minute cache runs out or a new instance starts. A wrong key is answered
 # with 401, which the worker retries.
 resource "aws_ssm_parameter" "partner_api_key" {
-  name = "/${var.project}/${var.env}/partner-api-key" # the name docs/api.md gives; SSM names are paths, not <project>-<env>-<thing>
+  # SSM names are paths, not <project>-<env>-<thing>. The environment comes first because SSM
+  # refuses any name that starts with "aws" or "ssm" (reserved for AWS itself), and the
+  # project is called aws-starter: /aws-starter/dev/... failed with "No access to reserved
+  # parameter name".
+  name = "/${var.env}/${var.project}/partner-api-key"
 
   type             = "SecureString"
   tier             = "Standard"

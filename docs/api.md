@@ -207,7 +207,8 @@ on the last attempt before writing `failed`: the request stays `queued` and only
 
 **The recipient** is another system: it may run in another cloud or behind a tunnel, and this
 stack knows two things about it: a base URL (`PARTNER_URL`) and an API key (SSM Parameter Store,
-SecureString, `/<project>/<env>/partner-api-key`; the function reads the parameter whose name is
+SecureString, `/<env>/<project>/partner-api-key` (SSM refuses names that start with `aws` or `ssm`, so the
+environment comes first); the function reads the parameter whose name is
 in `PARTNER_API_KEY_PARAM`). Its contract is `contracts/partner-api.md`; the schemas and the
 sample messages are in `contracts/`. Nothing here knows how it is built. The stand-in used for
 demos and tests is `partner-sim/`, an independent application.
