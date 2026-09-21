@@ -1,15 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { PartnerResult } from "../../src/clients/partner-client";
+import type { PartnerSubmission } from "../../src/clients/partner-client";
+import type { PartnerAnswer } from "../../src/domain/partner-answer";
 import { createLogger } from "../../src/lib/logger";
 import { DeliveryService } from "../../src/services/delivery-service";
 import type { DeliveryJob } from "../../src/services/delivery-service";
+import { createRealValidator } from "../helpers/contracts";
 import {
-  FakeAuditStore,
+  FakeApiKeyProvider,
   FakeDeliveryRepository,
+  FakeExchangeStore,
   FakePartnerClient,
   FakeStatusNotifier,
+  FakeXmlValidator,
   NOW,
   aRequest,
+  acceptedAnswer,
+  refusedAnswer,
+  replyXml,
+  unavailableAnswer,
 } from "../helpers/fakes";
 import type { Journal } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
@@ -23,35 +31,51 @@ const job = (n: number, receiveCount = 1): DeliveryJob => ({
   receiveCount,
 });
 
-const DELIVERED: PartnerResult = { kind: "delivered", statusCode: 200 };
-const REJECTED: PartnerResult = { kind: "rejected", statusCode: 422 };
-const UNAVAILABLE: PartnerResult = { kind: "retryable", reason: "http_503", statusCode: 503 };
+const answer = (httpStatus: number, body?: string): PartnerAnswer => ({ kind: "answer", httpStatus, body });
 
-// `count` requests (numbered 1..count), all in status "queued", ready to be delivered.
-function setup(count = 1) {
+// `count` requests (numbered 1..count), all in status "queued", ready to be delivered. The
+// validator is a fake that says "valid" unless a test tells it otherwise; the tests that need
+// the real messages of libxml2 use `setupWithRealValidator`.
+function setup(count = 1, validator?: FakeXmlValidator | ReturnType<typeof createRealValidator>) {
   const journal: Journal = [];
   const repository = new FakeDeliveryRepository(journal);
   const partner = new FakePartnerClient(journal);
-  const audit = new FakeAuditStore(journal);
+  const fakeValidator = new FakeXmlValidator(journal);
+  const apiKeys = new FakeApiKeyProvider(journal);
+  const exchanges = new FakeExchangeStore(journal);
   const notifier = new FakeStatusNotifier(journal);
   for (let n = 1; n <= count; n++) repository.seed(aRequest({ id: idNumber(n) }));
 
   const logs = captureLogs();
-  const service = new DeliveryService(repository, partner, audit, notifier, MAX_RECEIVE_COUNT, () => NOW);
+  const service = new DeliveryService(
+    repository,
+    partner,
+    validator ?? fakeValidator,
+    apiKeys,
+    exchanges,
+    notifier,
+    { senderName: "aws-starter", maxReceiveCount: MAX_RECEIVE_COUNT },
+    () => NOW,
+  );
   const deliver = (...jobs: DeliveryJob[]) => service.deliver(jobs, createLogger("debug"));
-  return { journal, repository, partner, audit, notifier, logs, deliver };
+  return { journal, repository, partner, validator: fakeValidator, apiKeys, exchanges, notifier, logs, deliver };
 }
 
-describe("DeliveryService: delivered (2xx)", () => {
-  it("sends, stores the audit copy, sets sent and publishes, in this order, then acknowledges", async () => {
+const lastExchange = (exchanges: FakeExchangeStore) => exchanges.saved.at(-1)?.exchange;
+
+describe("DeliveryService: delivered (200 + Accepted)", () => {
+  it("builds, checks, sends, checks the reply, records, sets sent and publishes, in this order", async () => {
     const { journal, repository, deliver } = setup();
 
     const result = await deliver(job(1));
 
     expect(journal).toEqual([
       "repo.find",
+      "validator.submission",
+      "apiKey.get",
       "partner.send",
-      "audit.save",
+      "validator.reply",
+      "exchange.save",
       "repo.markSent",
       "sns.publish:sent",
     ]);
@@ -60,43 +84,58 @@ describe("DeliveryService: delivered (2xx)", () => {
     expect(result.counts.sent).toBe(1);
   });
 
-  it("sends the five fields of the contract to the partner, without the status", async () => {
-    const { partner, deliver } = setup();
+  it("sends the XML built from the request, with the request id as MessageId and as Idempotency-Key", async () => {
+    const { partner, validator, deliver } = setup();
 
     await deliver(job(1));
 
-    expect(partner.sent).toEqual([
+    const sent = partner.sent[0] as PartnerSubmission;
+    expect(sent.idempotencyKey).toBe(idNumber(1));
+    expect(sent.apiKey).toBe("fake-api-key-for-tests");
+    expect(sent.xml).toContain('<Submission xmlns="urn:aws-starter:submission:v1" version="1">');
+    expect(sent.xml).toContain(`<MessageId>${idNumber(1)}</MessageId>`);
+    expect(sent.xml).toContain("<SentAt>2026-09-21T10:00:00.000Z</SentAt>");
+    expect(sent.xml).toContain("<Sender><Name>aws-starter</Name></Sender>");
+    expect(sent.xml).toContain("<Recipient><Name>Acme</Name></Recipient>");
+    expect(sent.xml).toContain("<Subject>Order 42</Subject>");
+    expect(sent.xml).toContain("<Text>Please ship.</Text>");
+    // The document that was checked against the schema is the document that was sent.
+    expect(validator.submissions).toEqual([sent.xml]);
+  });
+
+  it("records the whole exchange: what was sent, what came back, and how it was read", async () => {
+    const { partner, exchanges, deliver } = setup();
+
+    await deliver(job(1, 3));
+
+    const sent = partner.sent[0] as PartnerSubmission;
+    expect(exchanges.saved).toEqual([
       {
-        id: idNumber(1),
-        partner: "Acme",
-        subject: "Order 42",
-        body: "Please ship.",
-        createdAt: "2026-09-21T09:00:00.000Z",
+        requestId: idNumber(1),
+        exchange: {
+          attempt: 3,
+          at: "2026-09-21T10:00:00.000Z",
+          outcome: "delivered",
+          request: { xml: sent.xml, valid: true, problems: [] },
+          reply: {
+            httpStatus: 200,
+            xml: replyXml({ relatesTo: idNumber(1) }),
+            valid: true,
+            status: "Accepted",
+            code: undefined,
+            description: undefined,
+          },
+        },
       },
     ]);
   });
 
-  it("stores the audit copy { sentAt, payload, partnerStatus }", async () => {
-    const { audit, deliver } = setup();
+  it("checks the reply body the recipient sent", async () => {
+    const { validator, deliver } = setup();
 
     await deliver(job(1));
 
-    expect(audit.saved).toEqual([
-      {
-        requestId: idNumber(1),
-        copy: {
-          sentAt: "2026-09-21T10:00:00.000Z",
-          payload: {
-            id: idNumber(1),
-            partner: "Acme",
-            subject: "Order 42",
-            body: "Please ship.",
-            createdAt: "2026-09-21T09:00:00.000Z",
-          },
-          partnerStatus: 200,
-        },
-      },
-    ]);
+    expect(validator.replies).toEqual([replyXml({ relatesTo: idNumber(1) })]);
   });
 
   it("publishes { requestId, status, at } for the sent status", async () => {
@@ -119,28 +158,40 @@ describe("DeliveryService: delivered (2xx)", () => {
     expect(result.failedMessageIds).toEqual([]);
   });
 
-  it("records the status the partner really answered with (for example 202)", async () => {
-    const { partner, audit, deliver } = setup();
-    partner.answer = () => ({ kind: "delivered", statusCode: 202 });
+  it("uses the sender name from its settings", async () => {
+    const journal: Journal = [];
+    const repository = new FakeDeliveryRepository(journal);
+    const partner = new FakePartnerClient(journal);
+    repository.seed(aRequest({ id: idNumber(1) }));
+    const service = new DeliveryService(
+      repository,
+      partner,
+      new FakeXmlValidator(journal),
+      new FakeApiKeyProvider(journal),
+      new FakeExchangeStore(journal),
+      new FakeStatusNotifier(journal),
+      { senderName: "Sender & Sons", maxReceiveCount: MAX_RECEIVE_COUNT },
+      () => NOW,
+    );
 
-    await deliver(job(1));
+    await service.deliver([job(1)], createLogger("error"));
 
-    expect(audit.saved[0]?.copy.partnerStatus).toBe(202);
+    expect(partner.sent[0]?.xml).toContain("<Sender><Name>Sender &amp; Sons</Name></Sender>");
   });
 });
 
 describe("DeliveryService: a finished request", () => {
   it.each(["sent", "rejected", "failed"] as const)(
-    "acknowledges a %s request without calling the partner or changing anything",
+    "acknowledges a %s request without building, calling or changing anything",
     async (status) => {
-      const { journal, repository, partner, audit, notifier, deliver } = setup();
+      const { journal, repository, partner, exchanges, notifier, deliver } = setup();
       repository.setStatus(idNumber(1), status);
 
       const result = await deliver(job(1));
 
       expect(journal).toEqual(["repo.find"]);
       expect(partner.sent).toEqual([]);
-      expect(audit.saved).toEqual([]);
+      expect(exchanges.saved).toEqual([]);
       expect(notifier.published).toEqual([]);
       expect(repository.statusOf(idNumber(1))).toBe(status);
       expect(result.failedMessageIds).toEqual([]);
@@ -159,56 +210,243 @@ describe("DeliveryService: a finished request", () => {
   });
 });
 
-describe("DeliveryService: the partner refuses (4xx)", () => {
-  it("sets rejected, publishes, acknowledges and does not retry", async () => {
-    const { journal, repository, partner, audit, deliver } = setup();
-    partner.answer = () => REJECTED;
+describe("DeliveryService: the recipient refuses (400 or 422 + Rejected)", () => {
+  it("records, sets rejected, publishes, acknowledges and does not retry", async () => {
+    const { journal, repository, partner, exchanges, deliver } = setup();
+    partner.answer = refusedAnswer;
 
     const result = await deliver(job(1));
 
-    expect(journal).toEqual(["repo.find", "partner.send", "repo.markRejected", "sns.publish:rejected"]);
+    expect(journal).toEqual([
+      "repo.find",
+      "validator.submission",
+      "apiKey.get",
+      "partner.send",
+      "validator.reply",
+      "exchange.save",
+      "repo.markRejected",
+      "sns.publish:rejected",
+    ]);
     expect(repository.statusOf(idNumber(1))).toBe("rejected");
-    expect(audit.saved).toEqual([]); // the audit copy is for delivered requests only
+    expect(lastExchange(exchanges)).toMatchObject({
+      outcome: "refused",
+      reply: { httpStatus: 422, valid: true, status: "Rejected", code: "RECIPIENT_REJECTED" },
+    });
     expect(result.failedMessageIds).toEqual([]);
     expect(result.counts.rejected).toBe(1);
   });
 
   it("does not retry even on the first attempt of a message that could still be retried", async () => {
     const { partner, deliver } = setup();
-    partner.answer = () => REJECTED;
+    partner.answer = refusedAnswer;
 
     await deliver(job(1, 1));
 
     expect(partner.sent).toHaveLength(1);
   });
+
+  it("refuses for good on any other 4xx too, even without a body", async () => {
+    const { repository, partner, exchanges, deliver } = setup();
+    partner.answer = () => answer(415);
+
+    const result = await deliver(job(1));
+
+    expect(repository.statusOf(idNumber(1))).toBe("rejected");
+    expect(lastExchange(exchanges)).toMatchObject({ outcome: "refused", reply: { httpStatus: 415, xml: null, valid: false } });
+    expect(result.failedMessageIds).toEqual([]);
+  });
 });
 
-describe("DeliveryService: the partner cannot take it now (retryable)", () => {
-  const retryables: [string, PartnerResult][] = [
-    ["503", UNAVAILABLE],
-    ["429", { kind: "retryable", reason: "http_429", statusCode: 429 }],
-    ["408", { kind: "retryable", reason: "http_408", statusCode: 408 }],
-    ["a timeout", { kind: "retryable", reason: "timeout" }],
-    ["a network error", { kind: "retryable", reason: "network_error" }],
+describe("DeliveryService: a request that must not be sent (nobody is called)", () => {
+  it("text that XML cannot carry: recorded as unrepresentable, rejected", async () => {
+    const { journal, repository, partner, apiKeys, exchanges, notifier, deliver } = setup();
+    repository.seed(aRequest({ id: idNumber(1), subject: "bad\u0000subject" }));
+
+    const result = await deliver(job(1));
+
+    expect(journal).toEqual(["repo.find", "exchange.save", "repo.markRejected", "sns.publish:rejected"]);
+    expect(partner.sent).toEqual([]);
+    expect(apiKeys.invalidations).toBe(0);
+    expect(lastExchange(exchanges)).toEqual({
+      attempt: 1,
+      at: "2026-09-21T10:00:00.000Z",
+      outcome: "unrepresentable",
+      request: { xml: "", valid: false, problems: [{ element: "Subject", rule: "character not allowed in XML" }] },
+      reply: null,
+    });
+    expect(repository.statusOf(idNumber(1))).toBe("rejected");
+    expect(notifier.published).toHaveLength(1);
+    expect(result.failedMessageIds).toEqual([]);
+    expect(result.counts.rejected).toBe(1);
+  });
+
+  it("names every element that has such a character, and never the character", async () => {
+    const { repository, exchanges, deliver } = setup();
+    repository.seed(aRequest({ id: idNumber(1), partner: "p\u0001", subject: "s\u0002", body: "b\uD800" }));
+
+    await deliver(job(1));
+
+    const problems = lastExchange(exchanges)?.request.problems;
+    expect(problems?.map((problem) => problem.element)).toEqual(["Name", "Subject", "Text"]);
+    expect(JSON.stringify(lastExchange(exchanges))).not.toMatch(/\\u000[12]|\\ud800/i);
+  });
+
+  it("XML that does not match submission.xsd: recorded as invalid_request with the problems, rejected", async () => {
+    const { journal, repository, validator, partner, apiKeys, exchanges, deliver } = setup();
+    const problems = [{ element: "Name", rule: "does not match the allowed pattern" }];
+    validator.submissionResult = { valid: false, findings: problems };
+
+    const result = await deliver(job(1));
+
+    expect(journal).toEqual([
+      "repo.find",
+      "validator.submission",
+      "exchange.save",
+      "repo.markRejected",
+      "sns.publish:rejected",
+    ]);
+    expect(partner.sent).toEqual([]);
+    expect(apiKeys.invalidations).toBe(0);
+    const record = lastExchange(exchanges);
+    expect(record).toMatchObject({ outcome: "invalid_request", reply: null });
+    expect(record?.request).toEqual({ xml: validator.submissions[0], valid: false, problems });
+    expect(repository.statusOf(idNumber(1))).toBe("rejected");
+    expect(result.failedMessageIds).toEqual([]);
+  });
+
+  it("does not call the key store: the key is not needed for a request that is not sent", async () => {
+    const { journal, validator, deliver } = setup();
+    validator.submissionResult = { valid: false, findings: [{ element: "Text", rule: "too long" }] };
+
+    await deliver(job(1));
+
+    expect(journal).not.toContain("apiKey.get");
+  });
+});
+
+describe("DeliveryService: the real validator finds what the schema forbids", () => {
+  const real = createRealValidator();
+
+  it.each([
+    ["text over 5000 characters", { body: "x".repeat(5001) }, [{ element: "Text", rule: "too long" }]],
+    ["a subject over 200 characters", { subject: "s".repeat(201) }, [{ element: "Subject", rule: "too long" }]],
+    ["a partner name with a character the schema does not allow", { partner: "Acme #1" }, [{ element: "Name", rule: "does not match the allowed pattern" }]],
+    ["a partner name over 100 characters", { partner: "p".repeat(101) }, [{ element: "Name", rule: "too long" }]],
+  ])("%s ends as invalid_request, and nobody is called", async (_label, overrides, problems) => {
+    const { repository, partner, exchanges, deliver } = setup(1, real);
+    repository.seed(aRequest({ id: idNumber(1), ...overrides }));
+
+    const result = await deliver(job(1));
+
+    expect(partner.sent).toEqual([]);
+    expect(lastExchange(exchanges)).toMatchObject({ outcome: "invalid_request", request: { valid: false, problems } });
+    expect(repository.statusOf(idNumber(1))).toBe("rejected");
+    expect(result.failedMessageIds).toEqual([]);
+  });
+
+  it("delivers a request with characters that need escaping", async () => {
+    const { repository, partner, deliver } = setup(1, real);
+    repository.seed(aRequest({ id: idNumber(1), partner: "Smith & Sons, Inc.", subject: "Fish & chips <3", body: "a > b ]]> c\r\n😀" }));
+
+    const result = await deliver(job(1));
+
+    expect(partner.sent).toHaveLength(1);
+    expect(result.counts.sent).toBe(1);
+  });
+});
+
+describe("DeliveryService: the recipient cannot take it now (retry)", () => {
+  const retryables: [string, PartnerAnswer][] = [
+    ["503 without a body", unavailableAnswer],
+    ["429", answer(429)],
+    ["408", answer(408)],
+    ["500", answer(500, "<html>error</html>")],
+    ["a timeout", { kind: "no-answer", reason: "timeout" }],
+    ["a network error", { kind: "no-answer", reason: "network_error" }],
+    ["a redirect (never followed)", answer(302)],
+    ["a 200 without a body", answer(200)],
+    ["a 200 with a body that is too large", { kind: "answer", httpStatus: 200, body: undefined, bodyProblem: "too_large" }],
+    ["a 200 with a body that is not a Reply", answer(200, "<html>a proxy error page</html>")],
   ];
 
-  it.each(retryables)("reports the message as failed after %s, and changes nothing", async (_label, answer) => {
-    const { journal, repository, notifier, audit, partner, deliver } = setup();
-    partner.answer = () => answer;
+  it.each(retryables)("reports the message as failed after %s, and changes nothing but the record", async (_label, given) => {
+    const { journal, repository, notifier, exchanges, partner, validator, deliver } = setup();
+    partner.answer = () => given;
+    // A 200 that is "not a Reply": the validator refuses it. The others do not depend on this.
+    validator.replyResult = { valid: false, findings: [{ element: "(document)", rule: "not well-formed XML" }] };
 
     const result = await deliver(job(1, 1));
 
     expect(result.failedMessageIds).toEqual(["msg-1"]);
     expect(result.counts.retry).toBe(1);
     expect(repository.statusOf(idNumber(1))).toBe("queued");
-    expect(audit.saved).toEqual([]);
     expect(notifier.published).toEqual([]);
-    expect(journal).toEqual(["repo.find", "partner.send"]);
+    expect(lastExchange(exchanges)).toMatchObject({ attempt: 1, outcome: "retry" });
+    expect(journal.filter((entry) => entry.startsWith("repo.mark"))).toEqual([]);
+  });
+
+  it("records a reply that was received, even though it is not valid", async () => {
+    const { exchanges, partner, validator, deliver } = setup();
+    partner.answer = () => answer(200, "<html>oops</html>");
+    validator.replyResult = { valid: false, findings: [{ element: "(document)", rule: "not well-formed XML" }] };
+
+    await deliver(job(1));
+
+    expect(lastExchange(exchanges)?.reply).toEqual({ httpStatus: 200, xml: "<html>oops</html>", valid: false });
+  });
+
+  it("records no reply at all when nobody answered", async () => {
+    const { exchanges, partner, deliver } = setup();
+    partner.answer = () => ({ kind: "no-answer", reason: "timeout" });
+
+    await deliver(job(1));
+
+    expect(lastExchange(exchanges)).toMatchObject({ outcome: "retry", reply: null });
+  });
+
+  it("does not check a reply that does not exist", async () => {
+    const { validator, partner, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    await deliver(job(1));
+
+    expect(validator.replies).toEqual([]);
+  });
+
+  it("treats a valid Reply that contradicts the status code as a retry, not as a refusal or a delivery", async () => {
+    const { repository, partner, exchanges, deliver } = setup();
+    partner.answer = (submission) => answer(200, replyXml({ status: "Rejected", relatesTo: submission.idempotencyKey, code: "SCHEMA_INVALID", description: "x" }));
+
+    const result = await deliver(job(1));
+
+    expect(repository.statusOf(idNumber(1))).toBe("queued");
+    expect(lastExchange(exchanges)).toMatchObject({ outcome: "retry", reply: { httpStatus: 200, valid: true, status: "Rejected" } });
+    expect(result.failedMessageIds).toEqual(["msg-1"]);
+  });
+
+  it("treats a Reply about another submission as a retry", async () => {
+    const { repository, partner, deliver } = setup();
+    partner.answer = () => answer(200, replyXml({ relatesTo: "01J8Z3K5W0ABCDEFGHJKMNPQR9" }));
+
+    const result = await deliver(job(1));
+
+    expect(repository.statusOf(idNumber(1))).toBe("queued");
+    expect(result.counts.retry).toBe(1);
+  });
+
+  it("treats an Accepted Reply that carries a Code as a retry (the rule XSD cannot express)", async () => {
+    const { repository, partner, deliver } = setup();
+    partner.answer = (submission) => answer(200, replyXml({ relatesTo: submission.idempotencyKey, code: "SCHEMA_INVALID" }));
+
+    const result = await deliver(job(1));
+
+    expect(repository.statusOf(idNumber(1))).toBe("queued");
+    expect(result.counts.retry).toBe(1);
   });
 
   it("still only retries on the attempt before the last one", async () => {
     const { repository, partner, deliver } = setup();
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT - 1));
 
@@ -217,14 +455,65 @@ describe("DeliveryService: the partner cannot take it now (retryable)", () => {
   });
 });
 
-describe("DeliveryService: the last attempt", () => {
-  it("writes failed and publishes first, and STILL reports the message so SQS moves it to the DLQ", async () => {
-    const { journal, repository, notifier, partner, deliver } = setup();
-    partner.answer = () => UNAVAILABLE;
+describe("DeliveryService: the exchange record of a retry is diagnostics only", () => {
+  it("does not turn a failed write into an error: the retry goes on, and the failure is logged", async () => {
+    const { repository, exchanges, partner, logs, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+    exchanges.failWith = new Error("S3 down");
+
+    const result = await deliver(job(1));
+
+    expect(result.counts).toMatchObject({ retry: 1, error: 0 });
+    expect(result.failedMessageIds).toEqual(["msg-1"]);
+    expect(repository.statusOf(idNumber(1))).toBe("queued");
+    expect(logs.entries().find((line) => line.message === "The exchange record could not be written")).toMatchObject({
+      level: "warn",
+      errorMessage: "S3 down",
+    });
+  });
+
+  it("still writes failed on the last attempt when the record cannot be written", async () => {
+    const { repository, notifier, exchanges, partner, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+    exchanges.failWith = new Error("S3 down");
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
 
-    expect(journal).toEqual(["repo.find", "partner.send", "repo.markFailed", "sns.publish:failed"]);
+    expect(repository.statusOf(idNumber(1))).toBe("failed");
+    expect(notifier.published).toHaveLength(1);
+    expect(result.failedMessageIds).toEqual(["msg-1"]);
+  });
+
+  it("each attempt overwrites the record: it describes the latest attempt", async () => {
+    const { exchanges, partner, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    await deliver(job(1, 1));
+    await deliver(job(1, 2));
+
+    expect(exchanges.saved.map((saved) => [saved.requestId, saved.exchange.attempt])).toEqual([
+      [idNumber(1), 1],
+      [idNumber(1), 2],
+    ]);
+  });
+});
+
+describe("DeliveryService: the last attempt", () => {
+  it("writes failed and publishes first, and STILL reports the message so SQS moves it to the DLQ", async () => {
+    const { journal, repository, notifier, partner, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    const result = await deliver(job(1, MAX_RECEIVE_COUNT));
+
+    expect(journal).toEqual([
+      "repo.find",
+      "validator.submission",
+      "apiKey.get",
+      "partner.send",
+      "exchange.save",
+      "repo.markFailed",
+      "sns.publish:failed",
+    ]);
     expect(repository.statusOf(idNumber(1))).toBe("failed");
     expect(notifier.published).toEqual([
       { requestId: idNumber(1), status: "failed", at: "2026-09-21T10:00:00.000Z" },
@@ -233,9 +522,18 @@ describe("DeliveryService: the last attempt", () => {
     expect(result.counts.failed).toBe(1);
   });
 
+  it("keeps the record of the last attempt as a retry: it says what the recipient answered", async () => {
+    const { exchanges, partner, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    await deliver(job(1, MAX_RECEIVE_COUNT));
+
+    expect(lastExchange(exchanges)).toMatchObject({ attempt: MAX_RECEIVE_COUNT, outcome: "retry", reply: { httpStatus: 503 } });
+  });
+
   it("also treats a receive count above the maximum as the last attempt", async () => {
     const { repository, partner, deliver } = setup();
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT + 1));
 
@@ -254,7 +552,7 @@ describe("DeliveryService: the last attempt", () => {
 
   it("acknowledges a refusal on the last attempt (rejected is final, the DLQ has nothing to keep)", async () => {
     const { repository, partner, deliver } = setup();
-    partner.answer = () => REJECTED;
+    partner.answer = refusedAnswer;
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
 
@@ -264,7 +562,7 @@ describe("DeliveryService: the last attempt", () => {
 
   it("acknowledges the message when somebody else finished the request in the meantime", async () => {
     const { repository, notifier, partner, deliver } = setup();
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
     repository.afterFind = () => repository.setStatus(idNumber(1), "sent");
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
@@ -277,7 +575,7 @@ describe("DeliveryService: the last attempt", () => {
 
   it("still reports the message when the notification fails", async () => {
     const { repository, notifier, partner, deliver } = setup();
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
     notifier.failWith = new Error("SNS down");
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
@@ -288,7 +586,7 @@ describe("DeliveryService: the last attempt", () => {
 
   it("still reports the message when writing failed itself throws", async () => {
     const { repository, notifier, partner, deliver } = setup();
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
     repository.failures.set("markFailed", new Error("throttled"));
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
@@ -298,15 +596,66 @@ describe("DeliveryService: the last attempt", () => {
   });
 });
 
+describe("DeliveryService: the API key", () => {
+  it.each([401, 403])("forgets the key after a %i, so the next attempt reads it again; the message is retried", async (status) => {
+    const { journal, apiKeys, repository, partner, deliver } = setup();
+    partner.answer = () => answer(status);
+
+    const result = await deliver(job(1));
+
+    expect(apiKeys.invalidations).toBe(1);
+    expect(journal.indexOf("apiKey.invalidate")).toBeGreaterThan(journal.indexOf("partner.send"));
+    expect(repository.statusOf(idNumber(1))).toBe("queued");
+    expect(result.failedMessageIds).toEqual(["msg-1"]);
+  });
+
+  it("on the last attempt a 401 ends as failed with an alarm, not as a silent rejected", async () => {
+    const { repository, notifier, partner, deliver } = setup();
+    partner.answer = () => answer(401);
+
+    await deliver(job(1, MAX_RECEIVE_COUNT));
+
+    expect(repository.statusOf(idNumber(1))).toBe("failed");
+    expect(notifier.published[0]?.status).toBe("failed");
+  });
+
+  it.each([
+    ["a 200", () => acceptedAnswer({ xml: "", idempotencyKey: idNumber(1), apiKey: "" })],
+    ["a 422", () => answer(422)],
+    ["a 503", () => unavailableAnswer],
+    ["a timeout", (): PartnerAnswer => ({ kind: "no-answer", reason: "timeout" })],
+  ])("keeps the key after %s", async (_label, given) => {
+    const { apiKeys, partner, deliver } = setup();
+    partner.answer = given;
+
+    await deliver(job(1));
+
+    expect(apiKeys.invalidations).toBe(0);
+  });
+
+  it("reports the message as an error of ours when the key cannot be read, without calling the recipient", async () => {
+    const { repository, partner, exchanges, apiKeys, deliver } = setup();
+    apiKeys.failWith = new Error("AccessDeniedException");
+
+    const result = await deliver(job(1, MAX_RECEIVE_COUNT));
+
+    expect(result.counts.error).toBe(1);
+    expect(result.failedMessageIds).toEqual(["msg-1"]);
+    expect(partner.sent).toEqual([]);
+    expect(exchanges.saved).toEqual([]);
+    expect(repository.statusOf(idNumber(1))).toBe("queued"); // an error of ours never writes failed
+  });
+});
+
 describe("DeliveryService: a batch of several messages", () => {
   it("stops at the first failure and reports it and every message after it", async () => {
     const { journal, repository, partner, deliver } = setup(4);
-    partner.answer = (payload) => (payload.id === idNumber(2) ? UNAVAILABLE : DELIVERED);
+    partner.answer = (submission) => (submission.idempotencyKey === idNumber(2) ? unavailableAnswer : acceptedAnswer(submission));
 
     const result = await deliver(job(1), job(2), job(3), job(4));
 
     expect(result.failedMessageIds).toEqual(["msg-2", "msg-3", "msg-4"]);
-    expect(partner.sent.map((payload) => payload.id)).toEqual([idNumber(1), idNumber(2)]);
+    expect(partner.sent.map((sent) => sent.idempotencyKey)).toEqual([idNumber(1), idNumber(2)]);
     expect(repository.statusOf(idNumber(1))).toBe("sent");
     expect(repository.statusOf(idNumber(3))).toBe("queued"); // never touched
     expect(repository.statusOf(idNumber(4))).toBe("queued");
@@ -316,7 +665,7 @@ describe("DeliveryService: a batch of several messages", () => {
 
   it("reports the whole batch when the first message fails", async () => {
     const { partner, deliver } = setup(3);
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
 
     const result = await deliver(job(1), job(2), job(3));
 
@@ -330,23 +679,26 @@ describe("DeliveryService: a batch of several messages", () => {
     const result = await deliver(job(1), job(2), job(3));
 
     expect(result.failedMessageIds).toEqual([]);
-    expect(partner.sent.map((payload) => payload.id)).toEqual([idNumber(1), idNumber(2), idNumber(3)]);
+    expect(partner.sent.map((sent) => sent.idempotencyKey)).toEqual([idNumber(1), idNumber(2), idNumber(3)]);
   });
 
-  it("does not stop for a refused or a finished request: those are acknowledged", async () => {
-    const { repository, partner, deliver } = setup(3);
+  it("does not stop for a refused, an invalid or a finished request: those are acknowledged", async () => {
+    const { repository, validator, partner, deliver } = setup(4);
     repository.setStatus(idNumber(1), "sent");
-    partner.answer = (payload) => (payload.id === idNumber(2) ? REJECTED : DELIVERED);
+    partner.answer = (submission) => (submission.idempotencyKey === idNumber(2) ? refusedAnswer(submission) : acceptedAnswer(submission));
+    repository.seed(aRequest({ id: idNumber(3), subject: "bad\u0000" })); // unrepresentable
+    validator.submissionResult = { valid: true };
 
-    const result = await deliver(job(1), job(2), job(3));
+    const result = await deliver(job(1), job(2), job(3), job(4));
 
     expect(result.failedMessageIds).toEqual([]);
-    expect(repository.statusOf(idNumber(3))).toBe("sent");
+    expect(repository.statusOf(idNumber(3))).toBe("rejected");
+    expect(repository.statusOf(idNumber(4))).toBe("sent");
   });
 
   it("stops after a last-attempt failure too: that message and the rest are reported", async () => {
     const { repository, partner, deliver } = setup(2);
-    partner.answer = () => UNAVAILABLE;
+    partner.answer = () => unavailableAnswer;
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT), job(2, 1));
 
@@ -373,7 +725,7 @@ describe("DeliveryService: best-effort and idempotent steps", () => {
 
   it("does not fail the message when the SNS publish fails after a refusal", async () => {
     const { repository, partner, notifier, deliver } = setup();
-    partner.answer = () => REJECTED;
+    partner.answer = refusedAnswer;
     notifier.failWith = new Error("SNS down");
 
     const result = await deliver(job(1));
@@ -396,7 +748,7 @@ describe("DeliveryService: best-effort and idempotent steps", () => {
 
   it("treats a lost conditional update after a refusal as already handled", async () => {
     const { repository, partner, notifier, deliver } = setup();
-    partner.answer = () => REJECTED;
+    partner.answer = refusedAnswer;
     repository.afterFind = () => repository.setStatus(idNumber(1), "sent");
 
     const result = await deliver(job(1));
@@ -405,28 +757,34 @@ describe("DeliveryService: best-effort and idempotent steps", () => {
     expect(result.failedMessageIds).toEqual([]);
   });
 
-  it("makes the message retry when the S3 put fails: the partner is idempotent, the status stays queued", async () => {
-    const { journal, repository, notifier, audit, deliver } = setup();
-    audit.failWith = new Error("S3 down");
+  it.each([
+    ["a delivery", () => undefined, ["repo.find", "validator.submission", "apiKey.get", "partner.send", "validator.reply", "exchange.save"]],
+    ["a refusal", (context: ReturnType<typeof setup>) => { context.partner.answer = refusedAnswer; }, ["repo.find", "validator.submission", "apiKey.get", "partner.send", "validator.reply", "exchange.save"]],
+    ["an invalid request", (context: ReturnType<typeof setup>) => { context.validator.submissionResult = { valid: false, findings: [{ element: "Text", rule: "too long" }] }; }, ["repo.find", "validator.submission", "exchange.save"]],
+  ])("does not set the status when the record of %s cannot be written: the message retries", async (_label, arrange, expectedJournal) => {
+    const context = setup();
+    arrange(context);
+    context.exchanges.failWith = new Error("S3 down");
 
-    const result = await deliver(job(1));
+    const result = await context.deliver(job(1));
 
-    expect(journal).toEqual(["repo.find", "partner.send", "audit.save"]);
-    expect(repository.statusOf(idNumber(1))).toBe("queued");
-    expect(notifier.published).toEqual([]);
+    expect(context.journal).toEqual(expectedJournal);
+    expect(context.repository.statusOf(idNumber(1))).toBe("queued");
+    expect(context.notifier.published).toEqual([]);
     expect(result.failedMessageIds).toEqual(["msg-1"]);
     expect(result.counts.error).toBe(1);
   });
 
-  it("sends the retry with the same Idempotency-Key (the request id) as the first attempt", async () => {
-    const { audit, partner, deliver } = setup();
-    audit.failWith = new Error("S3 down");
+  it("sends the retry with the same MessageId as the first attempt (the recipient answers a known id with its stored answer)", async () => {
+    const { exchanges, partner, deliver } = setup();
+    exchanges.failWith = new Error("S3 down");
 
     await deliver(job(1, 1));
-    audit.failWith = undefined;
+    exchanges.failWith = undefined;
     await deliver(job(1, 2));
 
-    expect(partner.sent.map((payload) => payload.id)).toEqual([idNumber(1), idNumber(1)]);
+    expect(partner.sent.map((sent) => sent.idempotencyKey)).toEqual([idNumber(1), idNumber(1)]);
+    for (const sent of partner.sent) expect(sent.xml).toContain(`<MessageId>${idNumber(1)}</MessageId>`);
   });
 });
 
@@ -441,9 +799,19 @@ describe("DeliveryService: errors on our side", () => {
     expect(result.counts.error).toBe(1);
   });
 
+  it("reports the message when the validator cannot run, without calling the recipient", async () => {
+    const { validator, partner, deliver } = setup();
+    validator.validateSubmission = () => Promise.reject(new Error("XSD validation could not run"));
+
+    const result = await deliver(job(1, MAX_RECEIVE_COUNT));
+
+    expect(result.counts.error).toBe(1);
+    expect(partner.sent).toEqual([]);
+  });
+
   it("does not write failed on the last attempt for an error of our own (it is left to the DLQ alarm)", async () => {
-    const { repository, notifier, audit, deliver } = setup();
-    audit.failWith = new Error("S3 down");
+    const { repository, notifier, exchanges, deliver } = setup();
+    exchanges.failWith = new Error("S3 down");
 
     const result = await deliver(job(1, MAX_RECEIVE_COUNT));
 
@@ -468,7 +836,7 @@ describe("DeliveryService: errors on our side", () => {
     expect(crash?.stack).toEqual(expect.stringContaining("throttled"));
   });
 
-  it("reports a request that does not exist (goes to the DLQ in the end) and does not call the partner", async () => {
+  it("reports a request that does not exist (goes to the DLQ in the end) and does not call the recipient", async () => {
     const { partner, deliver } = setup(0);
 
     const result = await deliver(job(1));
@@ -507,22 +875,121 @@ describe("DeliveryService: errors on our side", () => {
   });
 });
 
+// The rule of this class: what a request contains never reaches a log line. Every branch of
+// a delivery runs here with a CANARY in the subject, the text and the partner name, and the
+// recipient's answers hold it too; then all captured log lines are searched for it. The
+// validator is the REAL one, so the real messages of libxml2 (which quote values) are in play.
 describe("DeliveryService: logging", () => {
-  it("never logs the request text, whatever happens", async () => {
-    const { repository, partner, audit, notifier, logs, deliver } = setup(4);
-    partner.answer = (payload) => {
-      if (payload.id === idNumber(2)) return REJECTED;
-      if (payload.id === idNumber(3)) return UNAVAILABLE;
-      return DELIVERED;
-    };
-    notifier.failWith = new Error("SNS down");
-    audit.failWith = new Error("S3 down");
-    repository.failures.set("markFailed", new Error("throttled"));
+  const CANARY = "CANARY9f3a7c";
+  const canaryRequest = (n: number, overrides: Partial<Parameters<typeof aRequest>[0]> = {}) =>
+    aRequest({
+      id: idNumber(n),
+      partner: `Partner ${CANARY}`,
+      subject: `Subject ${CANARY}`,
+      body: `Text ${CANARY} <b>&</b>`,
+      ...overrides,
+    });
 
-    await deliver(job(1), job(2), job(3, MAX_RECEIVE_COUNT), job(4));
+  it("never logs the text of the request or of the reply, on any branch", async () => {
+    const { repository, partner, exchanges, notifier, logs, deliver } = setup(0, createRealValidator());
+    const scripted: Record<number, (submission: PartnerSubmission) => PartnerAnswer> = {
+      1: acceptedAnswer, // delivered
+      2: (submission) => // refused, and the recipient's description quotes the text
+        answer(422, replyXml({ status: "Rejected", relatesTo: submission.idempotencyKey, code: "SCHEMA_INVALID", description: `The value '${CANARY}' is wrong` })),
+      3: () => unavailableAnswer, // retry: 503
+      4: () => answer(200, `<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e "${CANARY}">]><Reply>&e;</Reply>`), // a DOCTYPE in the reply
+      5: () => answer(200, `not a reply at all ${CANARY}`), // not XML
+      6: (submission) => answer(200, replyXml({ status: "Accepted", relatesTo: submission.idempotencyKey, code: "SCHEMA_INVALID", description: CANARY })), // breaks the Code rule
+      7: () => ({ kind: "no-answer", reason: "timeout" }), // retry: nobody answered
+      8: (submission) => acceptedAnswer(submission), // delivered, but the notification fails below
+      9: () => unavailableAnswer, // the last attempt: failed
+      10: () => answer(401), // the key is refused
+    };
+    partner.answer = (submission) => {
+      const n = Number(submission.idempotencyKey.slice(-4));
+      return (scripted[n] ?? acceptedAnswer)(submission);
+    };
+    for (let n = 1; n <= 10; n++) repository.seed(canaryRequest(n));
+    repository.seed(canaryRequest(11, { partner: `Partner ${CANARY} #` })); // invalid: libxml2 quotes the name
+    repository.seed(canaryRequest(12, { subject: `Subject ${CANARY}\u0000` })); // unrepresentable
+    repository.seed(canaryRequest(13, { body: `x${CANARY}`.padEnd(5100, "y") })); // invalid: too long
+    repository.seed(canaryRequest(14)); // the record cannot be written
+    repository.seed(canaryRequest(15)); // the status cannot be written
+
+    // One message at a time: a failure would stop a batch. A message that fails is delivered
+    // again with the last attempt's receive count where the script says so.
+    const receiveCounts: Record<number, number> = { 9: MAX_RECEIVE_COUNT };
+    for (let n = 1; n <= 13; n++) {
+      if (n === 8) notifier.failWith = new Error("SNS down");
+      await deliver(job(n, receiveCounts[n] ?? 1));
+      notifier.failWith = undefined;
+    }
+    exchanges.failWith = new Error("S3 down");
+    await deliver(job(14));
+    exchanges.failWith = undefined;
+    repository.failures.set("markSent", new Error("throttled"));
+    await deliver(job(15));
 
     const everything = logs.lines.join("\n");
-    expect(everything).not.toContain("Order 42");
-    expect(everything).not.toContain("Please ship.");
+    expect(logs.lines.length).toBeGreaterThan(20); // the branches did log something
+    // (Words like "Subject" or "DOCTYPE" may appear: they are element and rule names.)
+    for (const forbidden of [CANARY, "<Submission", "<Reply", "<?xml", "<b>", "The value", "is wrong"]) {
+      expect(everything).not.toContain(forbidden);
+    }
+    // ... but the useful facts are there: ids, outcomes, status codes, rule names.
+    expect(everything).toContain(idNumber(1));
+    expect(everything).toContain('"httpStatus":422');
+    expect(everything).toContain("Name: does not match the allowed pattern");
+    expect(everything).toContain("Text: too long");
+  });
+
+  it("logs the status, the code and the recipient's message id of a reply, but not its description", async () => {
+    const { repository, partner, logs, deliver } = setup(0, createRealValidator());
+    repository.seed(canaryRequest(1));
+    partner.answer = (submission) =>
+      answer(422, replyXml({ status: "Rejected", relatesTo: submission.idempotencyKey, code: "RECIPIENT_REJECTED", description: `Because ${CANARY}` }));
+
+    await deliver(job(1));
+
+    const line = logs.entries().find((entry) => entry.message === "The partner answered");
+    expect(line).toMatchObject({
+      httpStatus: 422,
+      decision: "refused",
+      reason: "rejected",
+      replyValid: true,
+      replyStatus: "Rejected",
+      replyCode: "RECIPIENT_REJECTED",
+      replyMessageId: "3f2b8c1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c",
+    });
+    expect(JSON.stringify(logs.entries())).not.toContain(CANARY);
+  });
+
+  it("logs which element and rule of the schema a reply broke, as names", async () => {
+    const { repository, partner, logs, deliver } = setup(0, createRealValidator());
+    repository.seed(canaryRequest(1));
+    partner.answer = () => answer(200, `<Reply xmlns="urn:aws-starter:reply:v1" version="1"><MessageId>${CANARY}</MessageId></Reply>`);
+
+    await deliver(job(1));
+
+    const line = logs.entries().find((entry) => entry.message === "The partner answered");
+    expect(line).toMatchObject({ decision: "retry", reason: "reply_invalid", replyValid: false });
+    expect(line?.replyProblems).toEqual(expect.arrayContaining(["MessageId: does not match the allowed pattern"]));
+    expect(JSON.stringify(logs.entries())).not.toContain(CANARY);
+  });
+
+  it("writes the same kind of line as before for a plain retry", async () => {
+    const { partner, logs, deliver } = setup();
+    partner.answer = () => unavailableAnswer;
+
+    await deliver(job(1, 2));
+
+    expect(logs.entries().find((entry) => entry.message === "Partner could not take the request")).toEqual({
+      level: "warn",
+      message: "Partner could not take the request",
+      requestId: idNumber(1),
+      reason: "http_503",
+      receiveCount: 2,
+      isLastAttempt: false,
+    });
   });
 });

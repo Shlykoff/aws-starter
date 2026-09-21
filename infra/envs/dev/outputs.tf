@@ -51,16 +51,8 @@ output "dlq_url" {
   value       = module.deliveries_queue.dlq_url
 }
 
-# Not a secret, but not open either: the Function URL uses auth type AWS_IAM, so a request
-# is served only if it is signed (SigV4) by a principal allowed lambda:InvokeFunctionUrl on
-# partner-mock. This stack grants that permission to the delivery-worker's role only.
-output "partner_url" {
-  description = "Function URL of partner-mock. Not secret, but IAM-protected: unsigned requests are refused."
-  value       = module.partner_mock.function_url
-}
-
 output "audit_bucket" {
-  description = "Bucket that holds the audit copies of delivered requests (they expire automatically)."
+  description = "Bucket that holds the exchange records (the XML sent and the reply, per request); they expire automatically."
   value       = module.audit_bucket.name
 }
 

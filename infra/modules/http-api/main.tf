@@ -74,7 +74,7 @@ resource "aws_apigatewayv2_stage" "default" {
   auto_deploy = true # route and integration changes go live without a separate deployment resource
 
   # Throttling protects the account's Lambda concurrency limit (10) from a runaway client.
-  # Even if every route used its full limit (3 x 5 requests/s), that is far below what 10
+  # Even if every route used its full limit (4 routes x 5 requests/s), that is far below what 10
   # concurrent executions of a ~100 ms handler can serve.
   default_route_settings {
     throttling_burst_limit = 10

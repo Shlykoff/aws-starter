@@ -43,3 +43,57 @@ variable "enable_static_site" {
   type        = bool
   default     = true
 }
+
+# ---------------------------------------------------------------------------
+# The recipient of the messages: another system, outside this stack (docs/api.md,
+# "The recipient"; its HTTP contract is contracts/partner-api.md).
+# ---------------------------------------------------------------------------
+
+variable "partner_url" {
+  description = "Base URL of the recipient: https://<host>[:<port>], with no trailing slash, path or query (the worker appends /v1/submissions). Not defaulted: set it in the git-ignored terraform.tfvars (in CI: TF_VAR_partner_url from the GitHub variable PARTNER_URL)."
+  type        = string
+  nullable    = false
+
+  validation {
+    # https only, because the API key travels in a header. A plain host name with an optional
+    # port: no user:password@, path, query or fragment, so the worker's URL building cannot
+    # go wrong.
+    condition     = can(regex("^https://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$", var.partner_url))
+    error_message = "Expected https://<host>[:<port>] with no trailing slash, path or query, e.g. https://partner.example.com."
+  }
+}
+
+variable "partner_api_key" {
+  description = "The API key the recipient checks (header X-API-Key): a secret shared with it, stored in SSM Parameter Store. Ephemeral: Terraform never writes it to the state or to a plan file, so it has to be given again on every plan and every apply, best as TF_VAR_partner_api_key (in CI: the GitHub secret PARTNER_API_KEY). To rotate it, see partner_api_key_version."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  nullable    = false
+
+  validation {
+    # A length check only. The message does not repeat the value.
+    condition     = length(var.partner_api_key) >= 16
+    error_message = "The API key must be at least 16 characters long."
+  }
+}
+
+variable "partner_api_key_version" {
+  description = "Version counter of partner_api_key. Terraform cannot compare a write-only value with what is stored, so it sends the key to SSM again only when this number changes. To rotate the key: give the new value AND raise this number by one (details at aws_ssm_parameter.partner_api_key in main.tf)."
+  type        = number
+  default     = 1
+  nullable    = false
+}
+
+variable "sender_name" {
+  description = "How this system names itself in the messages (Sender/Name in the XML). Letters, digits, space and . , ' & - only, 1 to 100 characters: the recipient's schema (PartyName in contracts/xsd/common-types.xsd) accepts nothing else."
+  type        = string
+  default     = "aws-starter"
+  nullable    = false
+
+  validation {
+    # The same rule as the schema's PartyName pattern, written in Terraform's (RE2) regular
+    # expressions: \p{L} = any letter, \p{N} = any digit-like character.
+    condition     = can(regex("^[\\p{L}\\p{N} .,'&-]{1,100}$", var.sender_name))
+    error_message = "Expected 1 to 100 characters: letters, digits, space and . , ' & - only."
+  }
+}

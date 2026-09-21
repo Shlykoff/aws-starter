@@ -1,4 +1,5 @@
 import { AuthStore, createAuthStore } from "@/features/auth";
+import { ExchangeStore, createExchangeApi } from "@/entities/exchange";
 import { RequestsStore, createRequestsApi } from "@/entities/request";
 import { createApiClient } from "@/shared/api";
 import type { AppConfig } from "@/shared/config";
@@ -9,6 +10,7 @@ import type { AppConfig } from "@/shared/config";
 export interface RootStore {
   auth: AuthStore;
   requests: RequestsStore;
+  exchange: ExchangeStore;
 }
 
 export function createRootStore(config: AppConfig): RootStore {
@@ -22,5 +24,9 @@ export function createRootStore(config: AppConfig): RootStore {
     onUnauthorized: () => auth.handleUnauthorized(),
   });
 
-  return { auth, requests: new RequestsStore(createRequestsApi(apiClient)) };
+  return {
+    auth,
+    requests: new RequestsStore(createRequestsApi(apiClient)),
+    exchange: new ExchangeStore(createExchangeApi(apiClient)),
+  };
 }

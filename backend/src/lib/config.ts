@@ -70,29 +70,82 @@ export function loadEnqueuerConfig(env: Record<string, string | undefined>): Enq
   return { tableName: values.TABLE_NAME, queueUrl: values.QUEUE_URL, logLevel: values.LOG_LEVEL };
 }
 
+// ---- get-exchange ----
+
+export interface ExchangeConfig {
+  tableName: string;
+  /** The bucket of the exchange records (its variable is called AUDIT_BUCKET in docs/api.md). */
+  auditBucket: string;
+  logLevel: LogLevel;
+}
+
+const getExchangeSchema = z.object({
+  TABLE_NAME: requiredString,
+  AUDIT_BUCKET: requiredString,
+  LOG_LEVEL: logLevel,
+});
+
+export function loadExchangeConfig(env: Record<string, string | undefined>): ExchangeConfig {
+  const values = parseEnvironment(getExchangeSchema, env);
+  return { tableName: values.TABLE_NAME, auditBucket: values.AUDIT_BUCKET, logLevel: values.LOG_LEVEL };
+}
+
 // ---- delivery-worker ----
 
 export interface WorkerConfig {
   tableName: string;
+  /** The recipient's address: scheme, host and port only. The client adds the path. */
   partnerUrl: string;
+  /** The name of the SSM parameter (SecureString) that holds the recipient's API key. */
+  partnerApiKeyParam: string;
+  /** The name in `Sender/Name` of every submission. */
+  senderName: string;
   topicArn: string;
   auditBucket: string;
   /** Must equal the `maxReceiveCount` of the queue's redrive policy (both come from Terraform). */
   maxReceiveCount: number;
-  /** The region of the function; the request to the partner is signed for it. */
-  region: string;
   logLevel: LogLevel;
 }
 
+// Hosts that mean "this same machine". Plain http is allowed for them and for nothing else.
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
+// The base address of the recipient. The API key travels in a header, so the address must
+// be https. The one exception is a recipient on this very machine: it lets the local
+// integration test talk to partner-sim over plain http, and nothing leaves the computer.
+// The URL must be just scheme, host and port, because the client adds the path itself: a
+// path, a query, a fragment or credentials (https://user:pass@host) would be a mistake, and
+// would be silently thrown away or misused later. The one comparison below rules them all
+// out: `href` is the whole normalised URL, and `origin` is scheme + host + port.
+function isPartnerBaseUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false;
+  const url = new URL(value);
+  if (url.href !== `${url.origin}/`) return false;
+  return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.includes(url.hostname));
+}
+
+const partnerUrl = requiredString.refine(
+  isPartnerBaseUrl,
+  "must be an https URL made of host and port only, like https://partner.example.com (http is allowed only for localhost)",
+);
+
+// The same rule as `PartyName` in contracts/xsd/common-types.xsd: letters, digits, space and
+// . , ' & - , 1 to 100 characters. The worker refuses to start with a name that the recipient
+// would refuse in every single message. (`u`: count and match whole characters, so an emoji
+// is one character and \p{L} works.)
+const senderName = z
+  .string()
+  .regex(/^[\p{L}\p{N} .,'&-]{1,100}$/u, "must be 1-100 letters, digits, spaces or . , ' & -")
+  .default("aws-starter");
+
 const workerSchema = z.object({
   TABLE_NAME: requiredString,
-  PARTNER_URL: requiredUrl,
+  PARTNER_URL: partnerUrl,
+  PARTNER_API_KEY_PARAM: requiredString,
+  SENDER_NAME: senderName,
   TOPIC_ARN: requiredString,
   AUDIT_BUCKET: requiredString,
   MAX_RECEIVE_COUNT: positiveInteger,
-  // Set by the Lambda runtime in every function, so it needs no Terraform. The worker needs
-  // it explicitly because it signs a request by hand (the SDK clients read it themselves).
-  AWS_REGION: requiredString,
   LOG_LEVEL: logLevel,
 });
 
@@ -101,23 +154,11 @@ export function loadWorkerConfig(env: Record<string, string | undefined>): Worke
   return {
     tableName: values.TABLE_NAME,
     partnerUrl: values.PARTNER_URL,
+    partnerApiKeyParam: values.PARTNER_API_KEY_PARAM,
+    senderName: values.SENDER_NAME,
     topicArn: values.TOPIC_ARN,
     auditBucket: values.AUDIT_BUCKET,
     maxReceiveCount: values.MAX_RECEIVE_COUNT,
-    region: values.AWS_REGION,
     logLevel: values.LOG_LEVEL,
   };
-}
-
-// ---- partner-mock ----
-
-export interface MockConfig {
-  logLevel: LogLevel;
-}
-
-const mockSchema = z.object({ LOG_LEVEL: logLevel });
-
-/** The mock needs nothing but the log level. */
-export function loadMockConfig(env: Record<string, string | undefined>): MockConfig {
-  return { logLevel: parseEnvironment(mockSchema, env).LOG_LEVEL };
 }

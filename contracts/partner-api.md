@@ -71,6 +71,18 @@ Every `Reply` body is `application/xml; charset=utf-8` and valid against `xsd/re
 A `200` whose body is not a valid `Reply`, or a `Reply` that breaks the rule about `Code`, is a
 protocol violation by the recipient and is treated as a temporary failure.
 
+The table has gaps, and the sender fills them with the cautious reading: try again, never a
+silent "delivered" or "refused". A retry is safe, because the recipient answers a repeated
+`MessageId` with the answer it stored. A real fault then ends as `failed` with an alarm.
+
+| Answer | Meaning for the sender |
+|---|---|
+| `200` + a valid `Rejected` reply, or `400`/`422` + a valid `Accepted` reply | the status and the body disagree: retry |
+| a `Reply` whose `RelatesTo` is present and is not our `MessageId` | not an answer to this message: retry |
+| `1xx`, `3xx` (a redirect is never followed: the key must not travel to another host), `2xx` other than `200` | not defined by this contract: retry |
+| `400`/`422` with no body or an invalid body | the status decides: refused |
+| a body of more than 64 KiB, or one that is not UTF-8 | not a `Reply`: the status decides (`200` = retry, as above) |
+
 ## `GET /healthz`
 
 `200` with `{"status":"ok"}`. No key needed. For load balancers and container health checks.

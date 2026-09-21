@@ -4,7 +4,7 @@ variable "name" {
 }
 
 variable "expiration_days" {
-  description = "Objects are deleted this many days after they were written."
+  description = "Exchange records are deleted this many days after they were written."
   type        = number
   default     = 30
 }

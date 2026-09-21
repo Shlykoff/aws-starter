@@ -74,6 +74,13 @@ export const getRequestEvent = (options: { sub?: string; id?: string } = {}): Ap
     pathParameters: options.id === undefined ? undefined : { id: options.id },
   });
 
+export const getExchangeEvent = (options: { sub?: string; id?: string } = {}): ApiEvent =>
+  buildEvent({
+    routeKey: "GET /requests/{id}/exchange",
+    sub: options.sub,
+    pathParameters: options.id === undefined ? undefined : { id: options.id },
+  });
+
 /** Same route, but the token has no `sub` claim (or no authorizer at all). */
 export const eventWithoutSub = (
   routeKey: string,

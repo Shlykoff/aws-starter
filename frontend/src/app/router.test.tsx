@@ -2,8 +2,9 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter } from "react-router";
 import { describe, expect, it } from "vitest";
-import { makeAuthClient, makeRequest, makeRequestsApi, makeUser } from "@test/factories";
+import { makeAuthClient, makeExchangeApi, makeRequest, makeRequestsApi, makeUser } from "@test/factories";
 import { AuthStore } from "@/features/auth";
+import { ExchangeStore } from "@/entities/exchange";
 import { RequestsStore, type PartnerRequest } from "@/entities/request";
 import { App } from "./App";
 import { routes } from "./router";
@@ -16,9 +17,10 @@ async function renderApp(route: string, signedIn: boolean, existing: PartnerRequ
   const api = makeRequestsApi();
   api.list.mockResolvedValue(existing);
   const requests = new RequestsStore(api);
+  const exchange = new ExchangeStore(makeExchangeApi());
   const router = createMemoryRouter(routes, { initialEntries: [route] });
 
-  render(<App stores={{ auth, requests }} router={router} />);
+  render(<App stores={{ auth, requests, exchange }} router={router} />);
   await act(() => auth.init());
   return { authClient };
 }

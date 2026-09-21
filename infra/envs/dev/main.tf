@@ -1,12 +1,41 @@
 locals {
   prefix = "${var.project}-${var.env}" # every resource name is <project>-<env>-<thing>
 
-  # One entry per Lambda. The routes are the ones in docs/api.md; each function gets
-  # exactly one DynamoDB action, the one its handler needs.
+  # One entry per API function; the routes are the ones in docs/api.md. Every function gets
+  # TABLE_NAME and exactly one DynamoDB action, the one its handler needs. An entry may add
+  # `environment` and `policy_statements` of its own (only get-exchange does); the module
+  # block below treats a missing one as "none". One loop, not a second module block, so that
+  # the routes, environments and permissions of all API functions stay in this one map.
   functions = {
     create-request = { route_key = "POST /requests", dynamodb_action = "dynamodb:PutItem" }
     list-requests  = { route_key = "GET /requests", dynamodb_action = "dynamodb:Query" }
     get-request    = { route_key = "GET /requests/{id}", dynamodb_action = "dynamodb:GetItem" }
+
+    # Returns the exchange record (the XML sent and the reply) of a request. The record is in
+    # S3; the table is read only to check that the request belongs to the caller.
+    get-exchange = {
+      route_key       = "GET /requests/{id}/exchange"
+      dynamodb_action = "dynamodb:GetItem"
+      environment     = { AUDIT_BUCKET = module.audit_bucket.name }
+      policy_statements = [
+        {
+          actions   = ["s3:GetObject"] # only the exchange records, nothing else in the bucket
+          resources = ["${module.audit_bucket.arn}/exchanges/*"]
+        },
+        {
+          # Without s3:ListBucket, S3 answers a missing key with 403 instead of 404, and the
+          # handler could not tell "no exchange yet" (404) from broken permissions (500).
+          # No `s3:prefix` condition on purpose: S3 decides 404 or 403 for a GetObject on a
+          # missing key by asking whether the caller may list the bucket, and a GetObject
+          # request carries no prefix, so a prefix condition could never match and the answer
+          # would stay 403. What listing adds is small: the bucket holds nothing but exchange
+          # records, this function can already read every one of them, and the ownership check
+          # is in the code, not in a key name.
+          actions   = ["s3:ListBucket"]
+          resources = [module.audit_bucket.arn] # this action takes the bucket, not its objects
+        },
+      ]
+    }
   }
 
   # Origins the browser app runs on: Vite's dev server always, CloudFront when it exists.
@@ -29,16 +58,19 @@ module "function" {
   name       = "${local.prefix}-${each.key}"
   source_dir = "${var.backend_dist_dir}/${each.key}"
 
-  environment = {
-    TABLE_NAME   = module.requests_table.name
-    LOG_LEVEL    = "info"
-    NODE_OPTIONS = "--enable-source-maps" # the build is minified: stack traces map back to the TypeScript source
-  }
+  environment = merge(
+    local.common_environment,
+    { TABLE_NAME = module.requests_table.name },
+    lookup(each.value, "environment", {}),
+  )
 
-  policy_statements = [{
-    actions   = [each.value.dynamodb_action]
-    resources = [module.requests_table.arn]
-  }]
+  policy_statements = concat(
+    [{
+      actions   = [each.value.dynamodb_action]
+      resources = [module.requests_table.arn]
+    }],
+    lookup(each.value, "policy_statements", []),
+  )
 }
 
 module "cognito" {
@@ -76,8 +108,10 @@ module "static_site" {
 
 # ---------------------------------------------------------------------------
 # Delivery pipeline (docs/api.md, "Delivery pipeline"):
-#   table stream -> enqueuer -> SQS FIFO -> delivery-worker -> partner-mock
-# with SNS notices, an S3 audit copy and two alarms.
+#   table stream -> enqueuer -> SQS FIFO -> delivery-worker -> HTTPS + API key -> the recipient
+# The recipient is another system, outside this stack: this file knows its base URL and its API
+# key only. Around the flow: an exchange record in S3 (the XML sent and the reply, read back by
+# get-exchange above), SNS notices and two alarms.
 # ---------------------------------------------------------------------------
 
 locals {
@@ -91,7 +125,7 @@ locals {
   # MAX_RECEIVE_COUNT, so it knows which attempt is the last one.
   delivery_max_receive_count = 5
 
-  # Set on every function of the pipeline (docs/api.md, "Lambda contract").
+  # Set on every function (docs/api.md, "Lambda contract").
   common_environment = {
     LOG_LEVEL    = "info"
     NODE_OPTIONS = "--enable-source-maps" # the build is minified: stack traces map back to the TypeScript source
@@ -126,26 +160,11 @@ module "alerts_topic" {
   allow_cloudwatch_alarms = true # the two alarms below publish here
 }
 
+# Holds the exchange records. The module keeps its first name (see the module).
 module "audit_bucket" {
   source = "../../modules/audit-bucket"
 
   name = "${local.prefix}-deliveries"
-}
-
-# The stand-in for the partner's system. Its Function URL is IAM-protected, so it is not a
-# public endpoint; only the delivery-worker is allowed to call it (statements below).
-module "partner_mock" {
-  source = "../../modules/lambda-function"
-
-  name       = "${local.prefix}-partner-mock"
-  source_dir = "${var.backend_dist_dir}/partner-mock"
-  timeout    = 10
-
-  enable_function_url = true
-
-  environment = local.common_environment
-
-  # No policy_statements: it needs no table, queue or bucket (the module adds logging).
 }
 
 module "enqueuer" {
@@ -238,6 +257,35 @@ resource "aws_lambda_event_source_mapping" "enqueuer" {
   }
 }
 
+# The API key the recipient checks (docs/api.md, "The recipient"); the worker reads it at run
+# time, so it is in no environment variable and no code.
+#
+# SecureString on the default AWS-managed key alias/aws/ssm (a customer-managed key would cost
+# a monthly fee); Standard tier, which is free (Advanced is billed per parameter, and when no
+# tier is given the account's default tier applies).
+#
+# value_wo is a WRITE-ONLY argument: Terraform sends it to AWS and never stores it, not in the
+# state and not in a plan file (var.partner_api_key is ephemeral for the same reason). The
+# price: Terraform cannot tell that the value changed, so it sends it again only when
+# value_wo_version changes.
+#
+# To rotate the key:
+#   1. agree the new key with the recipient;
+#   2. give Terraform the new value (TF_VAR_partner_api_key, in CI the GitHub secret);
+#   3. raise partner_api_key_version by one (terraform.tfvars, or the variable in CI);
+#   4. apply.
+# Changing only the value does nothing, silently: the plan shows no change. The worker uses the
+# new key once its 5-minute cache runs out or a new instance starts. A wrong key is answered
+# with 401, which the worker retries.
+resource "aws_ssm_parameter" "partner_api_key" {
+  name = "/${var.project}/${var.env}/partner-api-key" # the name docs/api.md gives; SSM names are paths, not <project>-<env>-<thing>
+
+  type             = "SecureString"
+  tier             = "Standard"
+  value_wo         = var.partner_api_key
+  value_wo_version = var.partner_api_key_version
+}
+
 module "delivery_worker" {
   source = "../../modules/lambda-function"
 
@@ -246,11 +294,13 @@ module "delivery_worker" {
   timeout    = local.worker_timeout_seconds
 
   environment = merge(local.common_environment, {
-    TABLE_NAME        = module.requests_table.name
-    PARTNER_URL       = module.partner_mock.function_url
-    TOPIC_ARN         = module.request_status_topic.arn
-    AUDIT_BUCKET      = module.audit_bucket.name
-    MAX_RECEIVE_COUNT = tostring(local.delivery_max_receive_count) # environment variables are strings
+    TABLE_NAME            = module.requests_table.name
+    PARTNER_URL           = var.partner_url
+    PARTNER_API_KEY_PARAM = aws_ssm_parameter.partner_api_key.name # the name only, never the key
+    SENDER_NAME           = var.sender_name
+    TOPIC_ARN             = module.request_status_topic.arn
+    AUDIT_BUCKET          = module.audit_bucket.name
+    MAX_RECEIVE_COUNT     = tostring(local.delivery_max_receive_count) # environment variables are strings
   })
 
   policy_statements = [
@@ -269,32 +319,18 @@ module "delivery_worker" {
       resources = [module.request_status_topic.arn]
     },
     {
-      actions   = ["s3:PutObject"] # only the audit copies, nothing else in the bucket
-      resources = ["${module.audit_bucket.arn}/deliveries/*"]
+      actions   = ["s3:PutObject"] # only the exchange records, nothing else in the bucket
+      resources = ["${module.audit_bucket.arn}/exchanges/*"]
     },
     {
-      # Calling a Function URL with auth type AWS_IAM takes two permissions on the target
-      # function (AWS docs, "Control access to Lambda function URLs"; both are required for
-      # URLs created since October 2025). Because the caller is in the same account, these
-      # identity-policy statements are enough: partner-mock needs no resource-based policy.
-      actions   = ["lambda:InvokeFunctionUrl"]
-      resources = [module.partner_mock.arn]
-      conditions = [{
-        test     = "StringEquals"
-        variable = "lambda:FunctionUrlAuthType"
-        values   = ["AWS_IAM"]
-      }]
-    },
-    {
-      # The second permission, limited to calls that come through the URL: the worker cannot
-      # invoke partner-mock with the plain Invoke API.
-      actions   = ["lambda:InvokeFunction"]
-      resources = [module.partner_mock.arn]
-      conditions = [{
-        test     = "Bool"
-        variable = "lambda:InvokedViaFunctionUrl"
-        values   = ["true"]
-      }]
+      # Reads the API key. It is a SecureString on the AWS-managed key alias/aws/ssm, and that
+      # key needs no kms:Decrypt statement here: its key policy lets every principal of the
+      # account use it through SSM (Sid "Allow access through SSM for all principals in the
+      # account that are authorized to use SSM", conditions kms:CallerAccount and
+      # kms:ViaService = ssm.<region>.amazonaws.com); the SSM docs add that access control
+      # policies cannot be set for the default aws/ssm key.
+      actions   = ["ssm:GetParameter"]
+      resources = [aws_ssm_parameter.partner_api_key.arn]
     },
   ]
 }

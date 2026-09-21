@@ -1,3 +1,8 @@
+# Holds the exchange records: for each request, the XML the delivery-worker sent and the
+# reply it got (docs/api.md, "The exchange record"). The module and the AUDIT_BUCKET variable
+# keep their first name: renaming the module would change the resource addresses and make
+# Terraform replace the bucket.
+
 data "aws_caller_identity" "current" {}
 
 # Bucket names are global; the account ID suffix avoids collisions (same trick as the state
@@ -6,13 +11,14 @@ data "aws_caller_identity" "current" {}
 resource "aws_s3_bucket" "this" {
   bucket = "${var.name}-${data.aws_caller_identity.current.account_id}"
 
-  # The objects are short-lived copies, and `terraform destroy` must work even when the
+  # The records are short-lived diagnostics, and `terraform destroy` must work even when the
   # bucket is not empty.
   force_destroy = true
 }
 
-# Private: nothing but the function that writes the copies has access (through its IAM
-# policy), so there is no bucket policy at all.
+# Private: only the function that writes the records (delivery-worker) and the one that
+# reads them (get-exchange) have access, each through its own IAM policy, so there is no
+# bucket policy at all.
 resource "aws_s3_bucket_public_access_block" "this" {
   bucket = aws_s3_bucket.this.id
 
@@ -32,13 +38,14 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   }
 }
 
-# Versioning stays off: a retried delivery overwrites the copy under the same key, and with
-# versions the lifecycle rule below would also need a rule for the old ones.
+# Versioning stays off: each delivery attempt overwrites the record under the same key (the
+# record describes the latest attempt), and with versions the lifecycle rule below would also
+# need a rule for the old ones.
 resource "aws_s3_bucket_lifecycle_configuration" "this" {
   bucket = aws_s3_bucket.this.id
 
   rule {
-    id     = "expire-audit-copies"
+    id     = "expire-exchange-records"
     status = "Enabled"
 
     filter {} # the whole bucket

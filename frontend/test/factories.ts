@@ -1,7 +1,9 @@
 import { User } from "oidc-client-ts";
 import { vi } from "vitest";
 import type { AuthClient } from "@/features/auth";
+import type { Exchange, ExchangeApi } from "@/entities/exchange";
 import type { PartnerRequest, RequestsApi } from "@/entities/request";
+import { ApiError } from "@/shared/api";
 
 // Fake data only. A User with a valid one-hour access token unless overridden.
 export function makeUser(
@@ -58,5 +60,43 @@ export function makeRequestsApi() {
     list: vi.fn<RequestsApi["list"]>(() => Promise.resolve([])),
     get: vi.fn<RequestsApi["get"]>(() => Promise.reject(new Error("get: no result set by the test"))),
     create: vi.fn<RequestsApi["create"]>(() => Promise.reject(new Error("create: no result set by the test"))),
+  };
+}
+
+// A delivered exchange with fake data: the message we sent and the partner's "Accepted".
+export function makeExchange(overrides: Partial<Exchange> = {}): Exchange {
+  return {
+    attempt: 1,
+    at: "2025-01-31T09:05:07.000Z",
+    outcome: "delivered",
+    request: {
+      xml: [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<Submission xmlns="urn:aws-starter:submission:v1" version="1">',
+        "  <Header>",
+        "    <MessageId>01J00000000000000000000001</MessageId>",
+        "  </Header>",
+        "</Submission>",
+      ].join("\n"),
+      valid: true,
+      problems: [],
+    },
+    reply: {
+      httpStatus: 200,
+      xml: '<Reply xmlns="urn:aws-starter:reply:v1" version="1"><Result><Status>Accepted</Status></Result></Reply>',
+      valid: true,
+      status: "Accepted",
+    },
+    ...overrides,
+  };
+}
+
+// By default the request has not been tried yet (the API answers 404), which is the calm
+// "nothing to show" case, so a test that does not care about the exchange sees no error.
+export function makeExchangeApi() {
+  return {
+    get: vi.fn<ExchangeApi["get"]>(() =>
+      Promise.reject(new ApiError(404, "not_found", "Request not found")),
+    ),
   };
 }

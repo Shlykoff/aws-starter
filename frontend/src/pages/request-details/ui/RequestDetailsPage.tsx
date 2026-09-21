@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { observer } from "mobx-react-lite";
 import { ArrowLeft, CircleAlert } from "lucide-react";
+import { ExchangePanel, useExchangeStore } from "@/entities/exchange";
 import {
   getStatusExplanation,
   isTerminalStatus,
@@ -20,18 +21,33 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
   // The route is /requests/:id, so `id` is always there; the fallback only satisfies the type.
   const { id = "" } = useParams();
   const requests = useRequestsStore();
+  const exchanges = useExchangeStore();
 
   useEffect(() => {
     void requests.loadDetail(id);
-  }, [requests, id]);
+    // The exchange is asked for at the same time, without waiting for the request: it is
+    // not shown before the request is, and this saves a round trip on a direct link.
+    void exchanges.load(id);
+  }, [requests, exchanges, id]);
 
   const request = requests.findById(id);
   const detail = requests.detail?.id === id ? requests.detail : null;
   useDocumentTitle(request?.subject ?? "Request");
 
   // Keep refreshing while the request is created or queued; terminal statuses never change.
+  // The exchange rides on the same tick, and not only on a status change: while the request
+  // stays `queued` the worker may try again and again, and every attempt replaces the
+  // record. The request is read first: for a final outcome the worker writes the record
+  // before the status, so a terminal status always comes with the final record.
   const polling = request !== undefined && !isTerminalStatus(request.status);
-  usePolling(() => requests.refreshDetail(id), STATUS_POLL_INTERVAL_MS, polling);
+  usePolling(
+    async () => {
+      await requests.refreshDetail(id);
+      await exchanges.refresh(id);
+    },
+    STATUS_POLL_INTERVAL_MS,
+    polling,
+  );
   const explanation = request ? getStatusExplanation(request.status) : undefined;
 
   let content: ReactNode;
@@ -100,6 +116,8 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
         </Link>
       </Button>
       {content}
+      {/* Only for a request that exists: the exchange belongs to it. */}
+      {request && <ExchangePanel state={exchanges.stateFor(id)} onRetry={() => void exchanges.load(id)} />}
     </div>
   );
 });

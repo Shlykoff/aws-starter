@@ -9,10 +9,10 @@ import { loadConfig } from "./lib/config";
 import type { Config } from "./lib/config";
 import { TOKENS } from "./tokens";
 
-// The dependency graph of the three API functions (create-request, list-requests,
-// get-request), wired in one place. The delivery pipeline has its own containers:
-// container-enqueuer.ts, container-worker.ts and container-mock.ts (see container-shared.ts
-// for why there is one per function).
+// The dependency graph of the three request functions (create-request, list-requests,
+// get-request), wired in one place. The other functions have their own containers:
+// container-exchange.ts, container-enqueuer.ts and container-worker.ts (see
+// container-shared.ts for why there is one per function kind).
 //
 // This module runs once per Lambda cold start (a Lambda execution environment imports it
 // during its init phase) and the container lives as long as that environment. Warm

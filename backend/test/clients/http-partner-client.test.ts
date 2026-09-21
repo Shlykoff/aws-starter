@@ -1,239 +1,270 @@
-import { describe, expect, it, vi } from "vitest";
-import { HttpPartnerClient, credentialsFromEnv } from "../../src/clients/http-partner-client";
-import type { PartnerPayload } from "../../src/domain/partner-payload";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpPartnerClient, MAX_REPLY_BYTES } from "../../src/clients/http-partner-client";
+import { captureLogs } from "../helpers/logs";
 
-// No network: `fetch` is replaced by a fake, and the clock and the credentials are fixed,
-// so the signature is the same on every run.
-const URL_OF_PARTNER = "https://abc123.lambda-url.eu-north-1.on.aws/";
-const CREDENTIALS = {
-  accessKeyId: "AKIDEXAMPLE",
-  secretAccessKey: "fake-secret-access-key-for-tests",
-  sessionToken: "fake-session-token",
-};
-const FIXED_NOW = new Date("2026-09-21T10:00:00.000Z");
+// The real client, with `fetch` replaced. The client does HTTP and nothing else: the tests
+// check what goes out (URL, headers, body, the options that protect the API key) and how
+// whatever comes back is turned into a PartnerAnswer. What an answer MEANS is tested with the
+// reply reader.
+const ID = "01J8Z3K5W0ABCDEFGHJKMNPQR1";
+const SUBMISSION = { xml: "<Submission>é</Submission>", idempotencyKey: ID, apiKey: "secret-key-1" };
 
-const payload: PartnerPayload = {
-  id: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
-  partner: "Acme",
-  subject: "Order 42",
-  body: "Please ship.",
-  createdAt: "2026-09-21T09:00:00.000Z",
+const fetchFake = vi.fn<typeof fetch>();
+beforeEach(() => {
+  fetchFake.mockReset();
+});
+const clientFor = (baseUrl = "https://partner.example.test") => new HttpPartnerClient({ baseUrl, fetch: fetchFake });
+const respond = (...responses: Response[]) => {
+  for (const response of responses) fetchFake.mockResolvedValueOnce(response);
 };
 
-type FetchFake = ReturnType<typeof vi.fn<typeof fetch>>;
-
-function setup(respond: () => Promise<Response> | Response = () => new Response('{"accepted":true}', { status: 200 })) {
-  const fetchFake: FetchFake = vi.fn<typeof fetch>(() => Promise.resolve(respond()));
-  const client = new HttpPartnerClient({
-    url: URL_OF_PARTNER,
-    region: "eu-north-1",
-    credentials: () => CREDENTIALS,
-    fetch: fetchFake,
-    now: () => FIXED_NOW,
-  });
-  return { client, fetchFake };
+// A body that arrives in the chunks given, as it does over a real connection.
+function chunked(...chunks: (string | Uint8Array)[]): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+        controller.close();
+      },
+    }),
+    { status: 200 },
+  );
 }
 
-// The one call the client made, in a form that is easy to assert on.
-function theRequest(fetchFake: FetchFake) {
-  expect(fetchFake).toHaveBeenCalledTimes(1);
-  const [url, init] = fetchFake.mock.calls[0] ?? [];
-  return { url, init, headers: (init?.headers ?? {}) as Record<string, string> };
-}
+describe("the request", () => {
+  it("POSTs the XML to /v1/submissions with the five headers of the contract", async () => {
+    respond(new Response("<Reply/>", { status: 200 }));
 
-describe("HttpPartnerClient: the request", () => {
-  it("POSTs the payload as JSON to the partner URL", async () => {
-    const { client, fetchFake } = setup();
+    await clientFor().send(SUBMISSION);
 
-    await client.send(payload);
-
-    const { url, init } = theRequest(fetchFake);
-    expect(url).toBe(URL_OF_PARTNER);
+    const [url, init] = fetchFake.mock.calls[0] ?? [];
+    expect(url).toBe("https://partner.example.test/v1/submissions");
     expect(init?.method).toBe("POST");
-    expect(JSON.parse(init?.body as string) as unknown).toEqual(payload);
+    expect(init?.headers).toEqual({
+      "X-API-Key": "secret-key-1",
+      "Content-Type": "application/xml",
+      "Idempotency-Key": ID,
+      "User-Agent": "aws-starter-worker/1",
+      Accept: "application/xml",
+    });
+    expect(init?.body).toBe("<Submission>é</Submission>");
   });
 
-  it("sends Content-Type and the request id as Idempotency-Key", async () => {
-    const { client, fetchFake } = setup();
+  it.each(["https://partner.example.test", "https://partner.example.test/", "http://127.0.0.1:8080"])(
+    "adds the path to the base address %s",
+    async (baseUrl) => {
+      respond(new Response(null, { status: 200 }));
 
-    await client.send(payload);
+      await clientFor(baseUrl).send(SUBMISSION);
 
-    const { headers } = theRequest(fetchFake);
-    expect(headers["content-type"]).toBe("application/json");
-    expect(headers["idempotency-key"]).toBe("01J8Z3K5W0ABCDEFGHJKMNPQR1");
+      expect(fetchFake.mock.calls[0]?.[0]).toBe(`${new URL(baseUrl).origin}/v1/submissions`);
+    },
+  );
+
+  it("does not follow redirects: the API key must not travel to another host", async () => {
+    respond(new Response(null, { status: 200 }));
+
+    await clientFor().send(SUBMISSION);
+
+    expect(fetchFake.mock.calls[0]?.[1]?.redirect).toBe("manual");
   });
 
-  it("sets an 8 second timeout on the call", async () => {
-    const timeout = vi.spyOn(AbortSignal, "timeout");
-    const { client, fetchFake } = setup();
+  it("gives the whole exchange 8 seconds", async () => {
+    respond(new Response(null, { status: 200 }));
+    const spy = vi.spyOn(AbortSignal, "timeout");
 
-    await client.send(payload);
+    await clientFor().send(SUBMISSION);
 
-    expect(timeout).toHaveBeenCalledWith(8000);
-    expect(theRequest(fetchFake).init?.signal).toBeInstanceOf(AbortSignal);
-  });
-
-  it("does not follow redirects", async () => {
-    const { client, fetchFake } = setup();
-
-    await client.send(payload);
-
-    expect(theRequest(fetchFake).init?.redirect).toBe("error");
+    expect(spy).toHaveBeenCalledWith(8000);
+    expect(fetchFake.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
   });
 });
 
-describe("HttpPartnerClient: SigV4 signature", () => {
-  it("signs for the service lambda in the given region, on the date of the clock", async () => {
-    const { client, fetchFake } = setup();
+describe("nobody answered", () => {
+  it("reports a timeout", async () => {
+    fetchFake.mockRejectedValueOnce(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
 
-    await client.send(payload);
-
-    const { headers } = theRequest(fetchFake);
-    expect(headers["x-amz-date"]).toBe("20260921T100000Z");
-    expect(headers.authorization).toMatch(
-      /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\/20260921\/eu-north-1\/lambda\/aws4_request, SignedHeaders=[a-z0-9;-]+, Signature=[0-9a-f]{64}$/,
-    );
-  });
-
-  it("signs the host, the content type, the idempotency key and the session token", async () => {
-    const { client, fetchFake } = setup();
-
-    await client.send(payload);
-
-    const { headers } = theRequest(fetchFake);
-    expect(headers["x-amz-security-token"]).toBe("fake-session-token");
-    const signedHeaders = /SignedHeaders=([^,]+)/.exec(headers.authorization ?? "")?.[1]?.split(";");
-    expect(signedHeaders).toEqual(
-      expect.arrayContaining(["host", "content-type", "idempotency-key", "x-amz-date", "x-amz-security-token"]),
-    );
-  });
-
-  it("leaves the host header to fetch", async () => {
-    const { client, fetchFake } = setup();
-
-    await client.send(payload);
-
-    expect(theRequest(fetchFake).headers).not.toHaveProperty("host");
-  });
-
-  it("gives the same signature for the same request and a different one for another body", async () => {
-    const first = setup();
-    const second = setup();
-    const third = setup();
-
-    await first.client.send(payload);
-    await second.client.send(payload);
-    await third.client.send({ ...payload, subject: "Order 43" });
-
-    const signature = (fake: FetchFake) => theRequest(fake).headers.authorization;
-    expect(signature(first.fetchFake)).toBe(signature(second.fetchFake));
-    expect(signature(third.fetchFake)).not.toBe(signature(first.fetchFake));
-  });
-
-  it("uses the credentials it is given, so another key gives another credential scope", async () => {
-    const fetchFake: FetchFake = vi.fn<typeof fetch>(() => Promise.resolve(new Response(null, { status: 200 })));
-    const client = new HttpPartnerClient({
-      url: URL_OF_PARTNER,
-      region: "eu-north-1",
-      credentials: () => ({ accessKeyId: "AKIDOTHER", secretAccessKey: "other-secret" }),
-      fetch: fetchFake,
-      now: () => FIXED_NOW,
-    });
-
-    await client.send(payload);
-
-    const { headers } = theRequest(fetchFake);
-    expect(headers.authorization).toContain("Credential=AKIDOTHER/20260921/eu-north-1/lambda/aws4_request");
-    // No session token was given, so none is sent.
-    expect(headers).not.toHaveProperty("x-amz-security-token");
-  });
-
-  it("throws (it is our setup problem, not a partner answer) when there are no credentials", async () => {
-    const client = new HttpPartnerClient({
-      url: URL_OF_PARTNER,
-      region: "eu-north-1",
-      credentials: () => credentialsFromEnv({}),
-      fetch: vi.fn<typeof fetch>(),
-    });
-
-    await expect(client.send(payload)).rejects.toThrow("AWS credentials are missing");
-  });
-});
-
-describe("HttpPartnerClient: the answer", () => {
-  it.each([200, 201, 202, 204])("%i is delivered", async (status) => {
-    const { client } = setup(() => new Response(null, { status }));
-
-    expect(await client.send(payload)).toEqual({ kind: "delivered", statusCode: status });
-  });
-
-  it.each([401, 403, 408, 429, 500, 502, 503, 504])("%i is retryable", async (status) => {
-    const { client } = setup(() => new Response(null, { status }));
-
-    expect(await client.send(payload)).toEqual({
-      kind: "retryable",
-      reason: `http_${status}`,
-      statusCode: status,
-    });
-  });
-
-  it.each([400, 404, 409, 410, 422])("%i is rejected for good", async (status) => {
-    const { client } = setup(() => new Response(null, { status }));
-
-    expect(await client.send(payload)).toEqual({ kind: "rejected", statusCode: status });
-  });
-
-  it("treats 401 and 403 as our own credential problem, not as a refusal by the partner", async () => {
-    for (const status of [401, 403]) {
-      const { client } = setup(() => new Response(null, { status }));
-
-      expect((await client.send(payload)).kind).toBe("retryable");
-    }
-  });
-
-  it("treats a timeout as retryable", async () => {
-    const { client } = setup(() => {
-      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
-    });
-
-    expect(await client.send(payload)).toEqual({ kind: "retryable", reason: "timeout" });
-  });
-
-  it("treats a network error as retryable", async () => {
-    const { client } = setup(() => {
-      throw new TypeError("fetch failed");
-    });
-
-    expect(await client.send(payload)).toEqual({ kind: "retryable", reason: "network_error" });
-  });
-
-  it("does not put the response body into the result", async () => {
-    const { client } = setup(() => new Response('{"error":"secret detail"}', { status: 422 }));
-
-    expect(JSON.stringify(await client.send(payload))).not.toContain("secret detail");
-  });
-});
-
-describe("credentialsFromEnv", () => {
-  it("reads the three variables Lambda sets", () => {
-    expect(
-      credentialsFromEnv({
-        AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
-        AWS_SECRET_ACCESS_KEY: "secret",
-        AWS_SESSION_TOKEN: "token",
-      }),
-    ).toEqual({ accessKeyId: "AKIDEXAMPLE", secretAccessKey: "secret", sessionToken: "token" });
-  });
-
-  it("works without a session token", () => {
-    expect(credentialsFromEnv({ AWS_ACCESS_KEY_ID: "a", AWS_SECRET_ACCESS_KEY: "b" }).sessionToken).toBeUndefined();
+    expect(await clientFor().send(SUBMISSION)).toEqual({ kind: "no-answer", reason: "timeout" });
   });
 
   it.each([
-    ["no key id", { AWS_SECRET_ACCESS_KEY: "b" }],
-    ["no secret", { AWS_ACCESS_KEY_ID: "a" }],
-    ["empty values", { AWS_ACCESS_KEY_ID: "", AWS_SECRET_ACCESS_KEY: "" }],
-  ])("throws with %s", (_label, env) => {
-    expect(() => credentialsFromEnv(env)).toThrow("AWS credentials are missing");
+    ["a connection problem", new TypeError("fetch failed")],
+    ["an abort that is not a timeout", new DOMException("aborted", "AbortError")],
+  ])("reports %s as a network error, without its text", async (_label, error) => {
+    fetchFake.mockRejectedValueOnce(error);
+
+    expect(await clientFor().send(SUBMISSION)).toEqual({ kind: "no-answer", reason: "network_error" });
+  });
+});
+
+describe("what came back", () => {
+  it("returns the status and the body as text, decoded as UTF-8", async () => {
+    respond(new Response("<Reply>é😀</Reply>", { status: 422 }));
+
+    expect(await clientFor().send(SUBMISSION)).toEqual({ kind: "answer", httpStatus: 422, body: "<Reply>é😀</Reply>" });
+  });
+
+  it("returns a redirect as an answer, without following it", async () => {
+    respond(new Response(null, { status: 302, headers: { Location: "https://elsewhere.example.test/" } }));
+
+    expect(await clientFor().send(SUBMISSION)).toEqual({ kind: "answer", httpStatus: 302, body: undefined });
+    expect(fetchFake).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["no body at all", () => new Response(null, { status: 401 })],
+    ["an empty body", () => new Response("", { status: 503, headers: { "Retry-After": "1" } })],
+  ])("returns %s as body undefined", async (_label, make) => {
+    respond(make());
+
+    const answer = await clientFor().send(SUBMISSION);
+
+    expect(answer).toMatchObject({ kind: "answer", body: undefined });
+    expect(answer).not.toHaveProperty("bodyProblem");
+  });
+
+  it("puts together a character that is split between two chunks", async () => {
+    const bytes = new TextEncoder().encode("é😀");
+    respond(chunked(bytes.slice(0, 1), bytes.slice(1, 4), bytes.slice(4)));
+
+    expect(await clientFor().send(SUBMISSION)).toMatchObject({ body: "é😀" });
+  });
+
+  it("drops a byte order mark", async () => {
+    respond(chunked(new Uint8Array([0xef, 0xbb, 0xbf]), "<Reply/>"));
+
+    expect(await clientFor().send(SUBMISSION)).toMatchObject({ body: "<Reply/>" });
+  });
+
+  it("reports a body that is not UTF-8 as unreadable, and does not repair it", async () => {
+    respond(chunked(new Uint8Array([0x3c, 0xff, 0xfe, 0x3e])));
+
+    expect(await clientFor().send(SUBMISSION)).toEqual({
+      kind: "answer",
+      httpStatus: 200,
+      body: undefined,
+      bodyProblem: "unreadable",
+    });
+  });
+
+  it("keeps the status when the connection breaks while the body arrives", async () => {
+    respond(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("<Rep"));
+            controller.error(new TypeError("terminated"));
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    expect(await clientFor().send(SUBMISSION)).toEqual({
+      kind: "answer",
+      httpStatus: 200,
+      body: undefined,
+      bodyProblem: "unreadable",
+    });
+  });
+});
+
+describe("the limit of 64 KiB for the body", () => {
+  it("is 65 536 bytes", () => {
+    expect(MAX_REPLY_BYTES).toBe(65_536);
+  });
+
+  it("accepts a body of exactly the limit", async () => {
+    respond(chunked("x".repeat(MAX_REPLY_BYTES)));
+
+    const answer = await clientFor().send(SUBMISSION);
+
+    expect(answer).toMatchObject({ httpStatus: 200 });
+    expect(answer.kind === "answer" && answer.body?.length).toBe(MAX_REPLY_BYTES);
+  });
+
+  it("refuses a body one byte over the limit, whatever the headers say", async () => {
+    respond(chunked("x".repeat(MAX_REPLY_BYTES), "y"));
+
+    expect(await clientFor().send(SUBMISSION)).toEqual({
+      kind: "answer",
+      httpStatus: 200,
+      body: undefined,
+      bodyProblem: "too_large",
+    });
+  });
+
+  it("counts bytes, not characters", async () => {
+    respond(chunked("😀".repeat(MAX_REPLY_BYTES / 4), "😀")); // 16 384 + 1 emoji = 65 540 bytes
+
+    expect(await clientFor().send(SUBMISSION)).toMatchObject({ bodyProblem: "too_large" });
+  });
+
+  it("does not read a body that announces too much: it cancels the stream at once", async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new Uint8Array(1024));
+        if (pulled >= 200) controller.close(); // "never ends", but a broken client must fail this test, not hang it
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    respond(new Response(body, { status: 200, headers: { "content-length": String(MAX_REPLY_BYTES + 1) } }));
+
+    const answer = await clientFor().send(SUBMISSION);
+
+    expect(answer).toMatchObject({ bodyProblem: "too_large" });
+    expect(cancelled).toBe(true);
+    expect(pulled).toBeLessThanOrEqual(1);
+  });
+
+  it("stops reading a body that never ends as soon as it is over the limit", async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new Uint8Array(16 * 1024));
+        if (pulled >= 200) controller.close(); // "never ends", but a broken client must fail this test, not hang it
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    respond(new Response(endless, { status: 200 }));
+
+    const answer = await clientFor().send(SUBMISSION);
+
+    expect(answer).toMatchObject({ bodyProblem: "too_large" });
+    expect(cancelled).toBe(true);
+    // 4 chunks of 16 KiB reach the limit, the 5th goes over it; a few more may be queued ahead.
+    expect(pulled).toBeLessThan(10);
+  });
+});
+
+describe("what the client keeps quiet about", () => {
+  it("writes nothing to the logs and does not return the key, whatever happens", async () => {
+    const logs = captureLogs();
+    const consoleSpy = vi.spyOn(console, "log");
+    fetchFake.mockRejectedValueOnce(new TypeError("fetch failed: https://partner.example.test/v1/submissions"));
+    respond(new Response("<Reply/>", { status: 200 }), new Response(null, { status: 302 }));
+
+    const answers = [
+      await clientFor().send(SUBMISSION),
+      await clientFor().send(SUBMISSION),
+      await clientFor().send(SUBMISSION),
+    ];
+
+    expect(logs.lines).toEqual([]);
+    expect(consoleSpy).not.toHaveBeenCalled();
+    const everything = JSON.stringify(answers);
+    for (const secret of ["secret-key-1", "partner.example.test", "fetch failed"]) {
+      expect(everything).not.toContain(secret);
+    }
   });
 });
