@@ -1,6 +1,7 @@
 """SQLite storage (standard library, no ORM).
 
-One table, `messages`. Every processed submission is a row, except the [fail] ones.
+Two tables. `messages`: every processed submission is a row, except the [fail] ones.
+`decision_events`: what the client decided about an accepted message and how sending it went.
 The schema itself is not in this file: it lives in the SQL files in app/migrations/, and
 initialize() applies them (see app/migrate.py).
 
@@ -17,7 +18,15 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.migrate import migrate
-from app.models import Finding, MessageDetail, MessageSummary, NewMessage
+from app.models import (
+    DecisionOverview,
+    Finding,
+    MessageDetail,
+    MessageSummary,
+    NewDecisionEvent,
+    NewMessage,
+    StoredEvent,
+)
 
 _SQLITE_MAX_ID = 2**63 - 1
 
@@ -40,6 +49,9 @@ class MessageStore:
         # timeout: wait up to 5 s for a writer instead of failing at once with "database is locked".
         conn = sqlite3.connect(self._db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        # SQLite ignores REFERENCES unless this is switched on, and it is per connection.
+        # With it, an event cannot be stored for a message that does not exist.
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             with conn:  # commits when the block ends, rolls back when it raises
                 yield conn
@@ -107,6 +119,96 @@ class MessageStore:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM messages WHERE id = ?", (row_id,)).fetchone()
         return None if row is None else _detail(row)
+
+    # --- Decision events (the client's side) -------------------------------------------------
+
+    def add_event(self, new: NewDecisionEvent) -> StoredEvent:
+        """Store a new event as `pending` (nobody has tried to send it yet) and return it."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO decision_events (message_id, event_id, decision, reason, occurred_at,"
+                " event_xml, state) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                (
+                    new.message_row_id,
+                    new.event_id,
+                    new.decision,
+                    new.reason,
+                    new.occurred_at,
+                    new.event_xml,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM decision_events WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return _event(row)
+
+    def record_attempt(
+        self, event_row_id: int, *, delivered: bool, http_status: int | None, at: str
+    ) -> StoredEvent:
+        """Write down the result of one attempt to send: the state is the result of the LAST one."""
+        with self._connect() as conn:
+            conn.execute(
+                # attempts + 1 is computed by the database, so two attempts at the same moment
+                # are both counted.
+                "UPDATE decision_events SET state = ?, attempts = attempts + 1, last_status = ?,"
+                " last_attempt_at = ? WHERE id = ?",
+                ("delivered" if delivered else "failed", http_status, at, event_row_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM decision_events WHERE id = ?", (event_row_id,)
+            ).fetchone()
+        return _event(row)
+
+    def events_of(self, message_row_id: int) -> list[StoredEvent]:
+        """The events of one message, the newest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM decision_events WHERE message_id = ? ORDER BY id DESC",
+                (message_row_id,),
+            ).fetchall()
+        return [_event(row) for row in rows]
+
+    def get_event(self, message_row_id: int, event_id: str) -> StoredEvent | None:
+        """One event of one message. The message is part of the question on purpose: an event
+        id from the address of another message finds nothing."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM decision_events WHERE message_id = ? AND event_id = ?",
+                (message_row_id, event_id),
+            ).fetchone()
+        return None if row is None else _event(row)
+
+    def decision_overview(self, from_message_row_id: int) -> dict[int, DecisionOverview]:
+        """For the inbox: per message (row id >= the given one) the number of events and the
+        decision and state of the newest event. Messages without events are not in the result."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT e.message_id, c.count, e.decision, e.state FROM decision_events e"
+                " JOIN (SELECT message_id, COUNT(*) AS count, MAX(id) AS newest_id"
+                "       FROM decision_events WHERE message_id >= ? GROUP BY message_id) c"
+                "   ON e.id = c.newest_id",
+                (from_message_row_id,),
+            ).fetchall()
+        return {
+            row["message_id"]: DecisionOverview(row["count"], row["decision"], row["state"])
+            for row in rows
+        }
+
+
+def _event(row: sqlite3.Row) -> StoredEvent:
+    return StoredEvent(
+        message_row_id=row["message_id"],  # the column is called message_id; it is messages.id
+        event_id=row["event_id"],
+        decision=row["decision"],
+        reason=row["reason"],
+        occurred_at=row["occurred_at"],
+        event_xml=row["event_xml"],
+        id=row["id"],
+        state=row["state"],
+        attempts=row["attempts"],
+        last_status=row["last_status"],
+        last_attempt_at=row["last_attempt_at"],
+    )
 
 
 def _summary(row: sqlite3.Row) -> MessageSummary:

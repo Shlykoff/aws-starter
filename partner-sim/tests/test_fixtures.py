@@ -1,4 +1,4 @@
-"""Walk every entry of contracts/fixtures/expected.json, for submissions and for replies."""
+"""Walk every entry of contracts/fixtures/expected.json: submissions, replies, decision events."""
 
 import json
 import re
@@ -8,10 +8,12 @@ from helpers import FIXTURES_DIR, all_rows, reply_fields
 from lxml import etree
 
 from app.replies import rule_violations
+from app.xml_input import MalformedXml, parse_xml
 
 EXPECTED = json.loads((FIXTURES_DIR / "expected.json").read_text())
 SUBMISSIONS = sorted(EXPECTED["submission"].items())
 REPLIES = sorted(EXPECTED["reply"].items())
+EVENTS = sorted(EXPECTED["event"].items())
 
 # What expected.json says, as an HTTP status (contracts/README.md).
 STATUS_FOR = {"valid": 200, "SCHEMA_INVALID": 422, "MALFORMED_XML": 400}
@@ -20,7 +22,7 @@ ULID = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 
 
 def test_expected_json_and_the_files_on_disk_list_the_same_fixtures():
-    for kind in ("submission", "reply"):
+    for kind in ("submission", "reply", "event"):
         on_disk = {
             f"{folder}/{path.name}"
             for folder in ("valid", "invalid")
@@ -74,6 +76,25 @@ def test_reply_fixture(name, expected, reply_schema):
     if expected == "valid":
         assert findings == []
         assert rule_violations(root) == []
+    else:
+        assert expected == "SCHEMA_INVALID"
+        assert findings != []
+
+
+@pytest.mark.parametrize(("name", "expected"), EVENTS, ids=[n for n, _ in EVENTS])
+def test_event_fixture(name, expected, event_schema):
+    """What the sender's webhook must decide about the file (contracts/README.md): the same
+    parser and validator that build_event() checks our own events with."""
+    body = (FIXTURES_DIR / "event" / name).read_bytes()
+
+    if expected == "MALFORMED_XML":  # not well-formed, or a DOCTYPE
+        with pytest.raises(MalformedXml):
+            parse_xml(body)
+        return
+
+    findings = event_schema.validate(parse_xml(body))
+    if expected == "valid":
+        assert findings == []
     else:
         assert expected == "SCHEMA_INVALID"
         assert findings != []

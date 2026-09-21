@@ -26,6 +26,14 @@ services:
       UI_USER: ${UI_USER:-demo}
       UI_PASSWORD: ${UI_PASSWORD:-demo-password-change-me}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # OPTIONAL, both or neither: the client's side (README, "Client action"). No demo values:
+      # the token is a real secret, so it belongs in .env (git-ignored), never in this file.
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
+    # Lets WEBHOOK_URL point at a sender running on this computer (http://host.docker.internal:...).
+    # Docker Desktop knows this name already; on Linux this line makes it work.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - partner-data:/data              # the SQLite file lives here and survives restarts
     restart: unless-stopped

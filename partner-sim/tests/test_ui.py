@@ -107,10 +107,12 @@ def test_the_pages_carry_the_security_headers(client, post, path):
 
     assert response.headers["content-type"] == "text/html; charset=utf-8"
     assert response.headers["content-security-policy"] == (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; frame-ancestors 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
     )
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    # same-origin, not no-referrer: see SECURITY_HEADERS in ui.py (no-referrer would make a
+    # browser send "Origin: null" from our own form).
+    assert response.headers["referrer-policy"] == "same-origin"
     assert response.headers["cache-control"] == "no-store"
 
 

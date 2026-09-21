@@ -1,0 +1,7 @@
+{
+  "_comment": "One worked example of the signature of webhook-api.md, for both sides' tests: HMAC-SHA256 with the token as key, over the ASCII timestamp, a dot and the body bytes exactly as sent. The token is a public test value.",
+  "token": "test-webhook-token-not-a-secret",
+  "timestamp": "1789985732",
+  "bodyFile": "valid/approved.xml",
+  "signatureHeader": "v1=a79ecbfba6ad706dec08e83ee7d4caf1f6b288e78d1c47478ece62808cf7ac05"
+}

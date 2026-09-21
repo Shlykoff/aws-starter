@@ -21,6 +21,7 @@ def test_defaults():
     assert settings.schema_dir == Path("/app/schemas")
     assert settings.max_body_bytes == 65536
     assert settings.log_level == "INFO"
+    assert settings.webhook_url is None and settings.webhook_token is None
 
 
 def test_every_value_can_be_set():
@@ -99,6 +100,114 @@ def test_the_secrets_are_not_in_the_printed_form_of_the_settings():
     assert "the-password" not in text
 
 
+# --- The client's side: WEBHOOK_URL and WEBHOOK_TOKEN ------------------------------------------
+
+WEBHOOK = {"WEBHOOK_URL": "https://abc123.execute-api.eu-north-1.amazonaws.com/webhooks/partner",
+           "WEBHOOK_TOKEN": "0123456789abcdef"}  # fmt: skip
+
+
+def test_the_webhook_can_be_configured():
+    settings = load_settings({**MINIMAL, **WEBHOOK})
+
+    assert settings.webhook_url == WEBHOOK["WEBHOOK_URL"]
+    assert settings.webhook_token == WEBHOOK["WEBHOOK_TOKEN"]
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_webhook_values_mean_not_configured(value):
+    # docker-compose.yml passes ${WEBHOOK_URL:-} and ${WEBHOOK_TOKEN:-}: empty when not set.
+    settings = load_settings({**MINIMAL, "WEBHOOK_URL": value, "WEBHOOK_TOKEN": value})
+
+    assert settings.webhook_url is None and settings.webhook_token is None
+
+
+@pytest.mark.parametrize(
+    ("given", "named"),
+    [("WEBHOOK_URL", "only WEBHOOK_URL"), ("WEBHOOK_TOKEN", "only WEBHOOK_TOKEN")],
+)
+def test_the_webhook_url_and_token_come_together_or_not_at_all(given, named):
+    with pytest.raises(ConfigError, match="must be set together") as caught:
+        load_settings({**MINIMAL, given: WEBHOOK[given]})
+
+    assert named in str(caught.value)
+
+
+def test_the_token_is_at_least_16_characters():
+    load_settings({**MINIMAL, **WEBHOOK, "WEBHOOK_TOKEN": "x" * 16})
+
+    with pytest.raises(ConfigError, match="WEBHOOK_TOKEN must be at least 16 characters"):
+        load_settings({**MINIMAL, **WEBHOOK, "WEBHOOK_TOKEN": "x" * 15})
+
+
+@pytest.mark.parametrize("token", [" " + "x" * 20, "x" * 20 + "\n"])
+def test_a_token_with_white_space_at_the_edge_is_refused_not_trimmed(token):
+    with pytest.raises(ConfigError, match="must not start or end with a space"):
+        load_settings({**MINIMAL, **WEBHOOK, "WEBHOOK_TOKEN": token})
+
+
+def test_the_token_is_neither_in_the_printed_settings_nor_in_an_error_message():
+    settings = load_settings({**MINIMAL, **WEBHOOK})
+    with pytest.raises(ConfigError) as caught:
+        load_settings({**MINIMAL, "WEBHOOK_TOKEN": WEBHOOK["WEBHOOK_TOKEN"]})
+
+    assert WEBHOOK["WEBHOOK_TOKEN"] not in repr(settings)
+    assert WEBHOOK["WEBHOOK_TOKEN"] not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/webhooks/partner",
+        "https://example.com",
+        "https://example.com:8443/hook?x=1",
+        "http://localhost/hook",
+        "http://localhost:3000/hook",
+        "http://127.0.0.1:8080/hook",
+        "http://[::1]:8080/hook",
+        "http://host.docker.internal:9000/hook",
+        "HTTP://LOCALHOST/hook",
+    ],
+)
+def test_a_good_webhook_url_is_accepted(url):
+    assert load_settings({**MINIMAL, **WEBHOOK, "WEBHOOK_URL": url}).webhook_url == url
+
+
+@pytest.mark.parametrize(
+    ("url", "why"),
+    [
+        ("http://example.com/hook", "must use https://"),
+        ("http://localhost.evil.example/hook", "must use https://"),
+        ("http://127.0.0.1.evil.example/hook", "must use https://"),
+        ("http://192.168.1.10/hook", "must use https://"),
+        ("ftp://example.com/hook", "must start with https://"),
+        ("example.com/hook", "must start with https://"),
+        ("//example.com/hook", "must start with https://"),
+        ("https://", "must contain a host name"),
+        ("https:///hook", "must contain a host name"),
+        ("https://user:pass@example.com/hook", "must not contain a user name or password"),
+        ("https://user@example.com/hook", "must not contain a user name or password"),
+        ("http://localhost@evil.example/hook", "must not contain a user name or password"),
+        ("https://example.com/hook#part", "must not contain a fragment"),
+        ("https://example.com/hook#", "must not contain a fragment"),
+        ("https://exa mple.com/hook", "must not contain spaces"),
+        ("https://example.com/ho\tok", "must not contain spaces"),
+        (
+            "https://example.com\\@evil.example/",
+            "must not contain spaces, control characters or backslashes",
+        ),
+        ("https://example.com:notaport/hook", "is not a valid URL"),
+        ("https://example.com:99999/hook", "is not a valid URL"),
+        ("http://[::1/hook", "is not a valid URL"),
+    ],
+)
+def test_a_bad_webhook_url_is_refused_and_the_message_does_not_repeat_it(url, why):
+    with pytest.raises(ConfigError) as caught:
+        load_settings({**MINIMAL, **WEBHOOK, "WEBHOOK_URL": url})
+
+    assert f"WEBHOOK_URL {why}" in str(caught.value)
+    assert "pass@" not in str(caught.value) and "evil" not in str(caught.value)
+
+
 # --- Start-up failures ------------------------------------------------------------------------
 
 
@@ -143,7 +252,7 @@ def test_the_application_exits_with_a_clear_message_when_the_schemas_are_missing
     assert "cannot load schema" in str(caught.value)
 
 
-@pytest.mark.parametrize("broken", ["submission.xsd", "reply.xsd", "common-types.xsd"])
+@pytest.mark.parametrize("broken", ["submission.xsd", "reply.xsd", "event.xsd", "common-types.xsd"])
 def test_a_missing_schema_file_stops_the_start_up(settings, tmp_path, broken):
     import dataclasses
     import shutil
@@ -156,7 +265,7 @@ def test_a_missing_schema_file_stops_the_start_up(settings, tmp_path, broken):
         create_app(dataclasses.replace(settings, schema_dir=schema_dir))
 
 
-@pytest.mark.parametrize("broken", ["submission.xsd", "reply.xsd", "common-types.xsd"])
+@pytest.mark.parametrize("broken", ["submission.xsd", "reply.xsd", "event.xsd", "common-types.xsd"])
 def test_a_schema_file_that_is_not_a_schema_stops_the_start_up(settings, tmp_path, broken):
     import dataclasses
     import shutil

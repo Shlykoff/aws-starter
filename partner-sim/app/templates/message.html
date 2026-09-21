@@ -21,6 +21,72 @@
     <dt>HTTP status sent</dt><dd>{{ m.http_status }}</dd>
   </dl>
 
+  {# Only an accepted message can get a client action: the client acts on what it received. #}
+  {% if m.outcome == "accepted" %}
+    <section class="box">
+      <h2>Client action <span class="muted">plays the client: a signed event goes to the sender's webhook</span></h2>
+      {% if result %}
+        <p class="notice {{ 'ok' if result[0] else 'bad' }}">{{ result[1] }}</p>
+      {% endif %}
+      {% if error %}
+        <p class="notice bad">{{ error }}</p>
+      {% endif %}
+      {% if webhook_configured %}
+        <form class="decision" method="post" action="/messages/{{ m.id }}/decision">
+          <input type="text" name="reason" maxlength="500" value="{{ reason_text }}"
+                 placeholder="Reason (optional, up to 500 characters)" aria-label="Reason">
+          <button class="approve" type="submit" name="decision" value="Approved">Approve</button>
+          <button class="decline" type="submit" name="decision" value="Declined">Decline</button>
+        </form>
+        <p class="muted">Every press is a NEW event, sent once, whenever you press it: there are no
+           timers and no automatic retries. "Send again" repeats an event as it is (same EventId).</p>
+      {% else %}
+        <p class="muted">The webhook is not configured (WEBHOOK_URL and WEBHOOK_TOKEN), so there is
+           no action to offer.</p>
+      {% endif %}
+      {% if events %}
+        <table>
+          <thead>
+            <tr>
+              <th>Time (UTC)</th><th>EventId</th><th>Decision</th><th>Reason</th><th>State</th>
+              <th>Attempts</th><th>Last HTTP</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in events %}
+              <tr>
+                <td class="nowrap">{{ e.occurred_at|utc_text }}</td>
+                <td><code>{{ e.event_id }}</code></td>
+                <td><span class="badge {{ 'ok' if e.decision == 'Approved' else 'bad' }}">{{ e.decision }}</span></td>
+                <td class="wrap">{{ e.reason if e.reason is not none else "-" }}</td>
+                <td>
+                  {% if e.state == "delivered" %}
+                    <span class="badge ok">delivered</span>
+                  {% elif e.state == "failed" %}
+                    <span class="badge bad">failed</span>
+                  {% else %}
+                    <span class="badge warn">{{ e.state }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ e.attempts }}</td>
+                <td>{{ e.last_status if e.last_status is not none else "-" }}</td>
+                <td>
+                  {% if webhook_configured %}
+                    <form class="inline" method="post" action="/messages/{{ m.id }}/decision/{{ e.event_id }}/resend">
+                      <button type="submit">Send again</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </section>
+  {% elif error %}
+    <p class="notice bad">{{ error }}</p>
+  {% endif %}
+
   <h2>Validation findings</h2>
   {% if m.problems %}
     <table>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DecisionEvent xmlns="urn:aws-starter:event:v1" version="1">
+  <EventId>3f0c6b1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c</EventId>
+  <OccurredAt>2026-10-21T14:15:32+04:00</OccurredAt>
+  <RelatesTo>01M30JDSMHY8CRX59V35WV731S</RelatesTo>
+  <Decision>Approved</Decision>
+  <Reason>Paid by card &amp; confirmed &lt;today&gt;</Reason>
+</DecisionEvent>
