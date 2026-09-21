@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from helpers import API_KEY, SCHEMA_DIR
+from helpers import API_KEY, SCHEMA_DIR, all_rows, event_rows
 
 from app.main import create_app_from_env
 from app.migrate import MIGRATIONS_DIR, MigrationError, find_migrations, main, migrate
-from app.models import NewMessage
+from app.models import NewDecisionEvent, NewMessage
 from app.storage import MessageStore
 
 NEWEST = len(find_migrations(MIGRATIONS_DIR))  # the schema version a fresh database ends at
@@ -144,6 +144,121 @@ def test_the_shipped_migrations_are_numbered_without_gaps():
     assert migrations[0].path.name == "0001_initial.sql"
 
 
+# --- 0002: the decision events -------------------------------------------------------------------
+
+
+def test_a_database_at_version_1_with_rows_is_upgraded_to_2_and_keeps_its_rows(
+    db_path, only_the_first_file
+):
+    # A real version-1 database: made by the first migration alone, filled through the application.
+    migrate(db_path, only_the_first_file)
+    conn = sqlite3.connect(db_path)
+    for message_id in ("ROW-1", "ROW-2"):
+        conn.execute(
+            "INSERT INTO messages (received_at, message_id, outcome, http_status, request_xml,"
+            " reply_xml, problems) VALUES ('t', ?, 'accepted', 200, '<a/>', '<b/>', '[]')",
+            (message_id,),
+        )
+    conn.commit()
+    conn.close()
+    assert version_of(db_path) == 1
+    assert "decision_events" not in tables_of(db_path)
+    rows_before = all_rows(db_path)
+
+    MessageStore(db_path).initialize()  # what the start of the new version does
+
+    assert version_of(db_path) == 2
+    assert message_ids_of(db_path) == ["ROW-1", "ROW-2"]
+    assert [tuple(row) for row in all_rows(db_path)] == [tuple(row) for row in rows_before]
+    assert event_rows(db_path) == []  # the new table is there and empty
+    # ...and it works: an event for one of the old messages.
+    store = MessageStore(db_path)
+    store.add_event(
+        NewDecisionEvent(1, "3f0c6b1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c", "Approved", None,
+                         "2026-09-21T10:11:12.000Z", "<x/>")
+    )  # fmt: skip
+    assert [e.state for e in store.events_of(1)] == ["pending"]
+
+
+def test_the_shape_of_the_decision_events_table(db_path):
+    MessageStore(db_path).initialize()
+    conn = sqlite3.connect(db_path)
+    try:
+        columns = {row[1]: row for row in conn.execute("PRAGMA table_info(decision_events)")}
+        index_columns = [
+            row[2]
+            for index in conn.execute("PRAGMA index_list(decision_events)")
+            for row in conn.execute(f'PRAGMA index_info("{index[1]}")')
+        ]
+        foreign = conn.execute("PRAGMA foreign_key_list(decision_events)").fetchall()
+    finally:
+        conn.close()
+
+    assert list(columns) == [
+        "id", "message_id", "event_id", "decision", "reason", "occurred_at", "event_xml",
+        "state", "attempts", "last_status", "last_attempt_at",
+    ]  # fmt: skip
+    not_null = {name for name, row in columns.items() if row[3]}
+    assert not_null == {
+        "message_id", "event_id", "decision", "occurred_at", "event_xml", "state", "attempts",
+    }  # fmt: skip
+    assert columns["attempts"][4] == "0"  # DEFAULT 0
+    assert "message_id" in index_columns  # the index the message page uses
+    assert "event_id" in index_columns  # the UNIQUE constraint on the EventId
+    assert [(row[2], row[3], row[4]) for row in foreign] == [("messages", "message_id", "id")]
+
+
+def _insert_event(conn: sqlite3.Connection, **changes) -> None:
+    values = {
+        "message_id": 1, "event_id": "e-1", "decision": "Approved", "occurred_at": "t",
+        "event_xml": "<x/>", "state": "pending",
+    }  # fmt: skip
+    values.update(changes)
+    names = ", ".join(values)
+    placeholders = ", ".join("?" * len(values))
+    conn.execute(
+        f"INSERT INTO decision_events ({names}) VALUES ({placeholders})", tuple(values.values())
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"decision": "approved"},
+        {"decision": "Maybe"},
+        {"state": "sent"},
+        {"state": "PENDING"},
+        {"event_id": None},
+        {"event_xml": None},
+        {"message_id": None},
+    ],
+)
+def test_the_database_itself_refuses_values_the_schema_does_not_allow(db_path, bad):
+    store = MessageStore(db_path)
+    store.initialize()
+    store.add(new_message("A"))
+    conn = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_event(conn, **bad)
+    finally:
+        conn.close()
+
+
+def test_an_event_id_is_stored_only_once(db_path):
+    store = MessageStore(db_path)
+    store.initialize()
+    store.add(new_message("A"))
+    conn = sqlite3.connect(db_path)
+    try:
+        _insert_event(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_event(conn)  # the same event_id again
+        _insert_event(conn, event_id="e-2")  # another event of the same message is fine
+    finally:
+        conn.close()
+
+
 # --- A new database ------------------------------------------------------------------------------
 
 
@@ -191,6 +306,7 @@ def test_the_shipped_migrations_bring_an_old_database_to_the_newest_version(db_p
 
     assert version_of(db_path) == NEWEST
     assert message_ids_of(db_path) == ["OLD-ROW"]
+    assert "decision_events" in tables_of(db_path)
 
 
 # --- An up-to-date database ----------------------------------------------------------------------
@@ -377,7 +493,8 @@ def test_the_inspection_command_never_changes_the_database(db_path, capsys):
     out = capsys.readouterr().out
     assert "schema version: 0" in out
     assert "table messages: 1 rows" in out
-    assert "pending migrations: 0001_initial.sql" in out
+    every_file = ", ".join(m.path.name for m in find_migrations(MIGRATIONS_DIR))
+    assert f"pending migrations: {every_file}" in out
     assert db_path.read_bytes() == before  # not a byte changed
     assert version_of(db_path) == 0
 

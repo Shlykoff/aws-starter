@@ -10,12 +10,14 @@
       color-scheme: light dark;
       --bg: #f6f7f9; --panel: #ffffff; --text: #1c2430; --muted: #667085; --line: #dfe3e8;
       --ok-bg: #dcfce7; --ok-text: #14532d; --bad-bg: #fee2e2; --bad-text: #7f1d1d;
+      --warn-bg: #fef3c7; --warn-text: #78350f;
       --code-bg: #f0f2f5; --link: #1d4ed8;
     }
     @media (prefers-color-scheme: dark) {
       :root {
         --bg: #12161c; --panel: #1a2029; --text: #e6e9ee; --muted: #9aa4b2; --line: #2b3441;
         --ok-bg: #14532d; --ok-text: #dcfce7; --bad-bg: #7f1d1d; --bad-text: #fee2e2;
+        --warn-bg: #78350f; --warn-text: #fef3c7;
         --code-bg: #10141a; --link: #8ab4ff;
       }
     }
@@ -45,6 +47,19 @@
              font-weight: 600; white-space: nowrap; }
     .badge.ok { background: var(--ok-bg); color: var(--ok-text); }
     .badge.bad { background: var(--bad-bg); color: var(--bad-text); }
+    .badge.warn { background: var(--warn-bg); color: var(--warn-text); }
+    .notice { padding: 9px 14px; border-radius: 6px; margin: 12px 0; font-weight: 500; }
+    .notice.ok { background: var(--ok-bg); color: var(--ok-text); }
+    .notice.bad { background: var(--bad-bg); color: var(--bad-text); }
+    td.wrap { overflow-wrap: anywhere; }
+    form.decision { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+    form.decision input[type=text] { flex: 1 1 260px; padding: 7px 10px; font: inherit;
+        border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+    form.inline { margin: 0; }
+    button { padding: 7px 16px; font: inherit; font-weight: 600; cursor: pointer; color: var(--text);
+             background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+    button.approve { background: var(--ok-bg); color: var(--ok-text); border-color: transparent; }
+    button.decline { background: var(--bad-bg); color: var(--bad-text); border-color: transparent; }
     dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0;
                background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 18px; }
     dl.facts dt { color: var(--muted); }

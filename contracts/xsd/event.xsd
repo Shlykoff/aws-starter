@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  What the recipient tells the sender about an ACTION OF THE CLIENT, after the message was
+  delivered: the client approved it (for example paid) or declined it (for example the goods are
+  out of stock). It travels the other way round than the submission: the recipient calls the
+  sender's webhook (webhook-api.md). It says nothing about delivery: that is what the reply to
+  the submission is for. The client may act minutes or months after the delivery, so there is no
+  deadline anywhere in this contract.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="urn:aws-starter:event:v1"
+           xmlns:c="urn:aws-starter:common:v1"
+           targetNamespace="urn:aws-starter:event:v1"
+           elementFormDefault="qualified">
+
+  <xs:import namespace="urn:aws-starter:common:v1" schemaLocation="common-types.xsd"/>
+
+  <xs:element name="DecisionEvent">
+    <xs:complexType>
+      <xs:sequence>
+        <!-- The recipient's id of this event. A repeated delivery of the same event carries the
+             same id: the sender must treat it as one event. -->
+        <xs:element name="EventId" type="c:Uuid"/>
+        <!-- When the client acted. Events may arrive out of order: the sender keeps the latest
+             OccurredAt, not the last one received. -->
+        <xs:element name="OccurredAt" type="OffsetDateTime"/>
+        <!-- The MessageId of the submission this is about (the sender's request id). -->
+        <xs:element name="RelatesTo" type="c:Ulid"/>
+        <xs:element name="Decision" type="Decision"/>
+        <!-- Free text from the client's side (for example "out of stock"). Never markup. -->
+        <xs:element name="Reason" type="c:Text500" minOccurs="0"/>
+      </xs:sequence>
+      <xs:attribute name="version" type="c:Version" use="required"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:simpleType name="Decision">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Approved"/>
+      <xs:enumeration value="Declined"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- A date and time WITH its time zone (Z or +hh:mm). Plain xs:dateTime also accepts a time
+       without a zone, which cannot be put in order with others. -->
+  <xs:simpleType name="OffsetDateTime">
+    <xs:restriction base="xs:dateTime">
+      <xs:pattern value=".+(Z|[+\-][0-9]{2}:[0-9]{2})"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:schema>

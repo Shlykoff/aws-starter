@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DecisionEvent xmlns="urn:aws-starter:event:v1" version="1">
+  <OccurredAt>2026-09-21T10:15:32Z</OccurredAt>
+  <RelatesTo>01M30JDSMHY8CRX59V35WV731S</RelatesTo>
+  <Decision>Approved</Decision>
+</DecisionEvent>

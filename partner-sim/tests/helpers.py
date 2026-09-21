@@ -1,10 +1,14 @@
 """Shared test helpers: paths, sample documents, small readers for replies and the database."""
 
+import hashlib
+import hmac
 import os
+import socket
 import sqlite3
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from fake_webhook import Received
 from lxml import etree
 
 from app.replies import REPLY_NS
@@ -21,6 +25,10 @@ UI_PASSWORD = "inbox-password-not-a-secret"
 UI_AUTH = (UI_USER, UI_PASSWORD)
 
 SAMPLE_ID = "01M30JDSMHY8CRX59V35WV731S"  # the MessageId used by every fixture
+
+WEBHOOK_TOKEN = "unit-test-webhook-token-not-a-secret"
+# What a browser adds to a form POST from a page of this application (the test client's host).
+SAME_ORIGIN = {"Origin": "http://testserver"}
 
 
 def ulid(n: int) -> str:
@@ -84,5 +92,32 @@ def all_rows(db_path: Path) -> list[sqlite3.Row]:
     conn.row_factory = sqlite3.Row
     try:
         return conn.execute("SELECT * FROM messages ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+
+def signature_is_right(request: Received, token: str) -> bool:
+    """Check a received webhook call the way contracts/webhook-api.md says the sender does:
+    HMAC-SHA256 with the token over the timestamp text, a dot and the body as received."""
+    timestamp = request.headers["x-webhook-timestamp"]
+    signed = timestamp.encode("ascii") + b"." + request.body
+    expected = "v1=" + hmac.new(token.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    return request.headers["x-webhook-signature"] == expected
+
+
+def closed_port_url() -> str:
+    """The address of a port on this computer where nobody listens (connection refused)."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    return f"http://127.0.0.1:{port}/hook"
+
+
+def event_rows(db_path: Path) -> list[sqlite3.Row]:
+    """Every row of `decision_events`, read straight from the file."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute("SELECT * FROM decision_events ORDER BY id").fetchall()
     finally:
         conn.close()

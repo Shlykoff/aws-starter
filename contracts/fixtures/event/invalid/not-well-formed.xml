@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DecisionEvent xmlns="urn:aws-starter:event:v1" version="1">
+  <EventId>3f0c6b1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c</EventId>
+  <Decision>Approved</DecisionEvent>

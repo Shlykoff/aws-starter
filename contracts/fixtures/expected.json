@@ -1,5 +1,5 @@
 {
-  "_comment": "What a recipient must answer for each fixture: valid, or the reply Code for a rejection. The Node and the Python side both check every file listed here.",
+  "_comment": "What a recipient must answer for each fixture: valid, or the reply Code for a rejection. For the event fixtures: what the receiver of a webhook must decide (valid = accept, SCHEMA_INVALID = 422, MALFORMED_XML = 400). The Node and the Python side both check every file listed here.",
   "submission": {
     "invalid/doctype-entity-expansion.xml": "MALFORMED_XML",
     "invalid/doctype-external-entity.xml": "MALFORMED_XML",
@@ -33,5 +33,29 @@
     "valid/accepted.xml": "valid",
     "valid/rejected-schema-invalid.xml": "valid",
     "valid/rejected-without-relates-to.xml": "valid"
+  },
+  "event": {
+    "invalid/decision-lowercase.xml": "SCHEMA_INVALID",
+    "invalid/decision-unknown.xml": "SCHEMA_INVALID",
+    "invalid/doctype-entity-expansion.xml": "MALFORMED_XML",
+    "invalid/doctype-external-entity.xml": "MALFORMED_XML",
+    "invalid/event-id-uppercase.xml": "SCHEMA_INVALID",
+    "invalid/missing-decision.xml": "SCHEMA_INVALID",
+    "invalid/missing-event-id.xml": "SCHEMA_INVALID",
+    "invalid/not-well-formed.xml": "MALFORMED_XML",
+    "invalid/not-xml.xml": "MALFORMED_XML",
+    "invalid/occurred-at-no-time-zone.xml": "SCHEMA_INVALID",
+    "invalid/occurred-at-not-a-date.xml": "SCHEMA_INVALID",
+    "invalid/reason-empty.xml": "SCHEMA_INVALID",
+    "invalid/reason-too-long.xml": "SCHEMA_INVALID",
+    "invalid/relates-to-not-a-ulid.xml": "SCHEMA_INVALID",
+    "invalid/unknown-element.xml": "SCHEMA_INVALID",
+    "invalid/wrong-element-order.xml": "SCHEMA_INVALID",
+    "invalid/wrong-namespace.xml": "SCHEMA_INVALID",
+    "invalid/wrong-version.xml": "SCHEMA_INVALID",
+    "valid/approved.xml": "valid",
+    "valid/cyrillic-reason.xml": "valid",
+    "valid/declined-with-reason.xml": "valid",
+    "valid/offset-time-zone.xml": "valid"
   }
 }

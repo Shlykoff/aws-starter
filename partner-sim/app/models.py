@@ -48,3 +48,35 @@ class MessageDetail(MessageSummary):
     request_xml: str
     reply_xml: str
     problems: list[Finding]
+
+
+@dataclass(frozen=True)
+class NewDecisionEvent:
+    """A decision event that was built and checked, ready to be stored (state pending)."""
+
+    message_row_id: int  # messages.id of the message it is about (NOT its MessageId text)
+    event_id: str
+    decision: str  # "Approved" or "Declined"
+    reason: str | None
+    occurred_at: str  # UTC, e.g. 2026-09-21T10:11:12.123Z
+    event_xml: str
+
+
+@dataclass(frozen=True)
+class StoredEvent(NewDecisionEvent):
+    """A stored event: what was built, plus how sending it went so far."""
+
+    id: int
+    state: str  # "pending", "delivered" or "failed": the result of the LAST attempt
+    attempts: int
+    last_status: int | None  # HTTP status of the last attempt; None when nobody answered
+    last_attempt_at: str | None
+
+
+@dataclass(frozen=True)
+class DecisionOverview:
+    """What the inbox shows for one message: how many events, and the newest one."""
+
+    count: int
+    last_decision: str
+    last_state: str

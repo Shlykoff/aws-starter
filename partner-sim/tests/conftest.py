@@ -2,8 +2,9 @@ import dataclasses
 from pathlib import Path
 
 import pytest
+from fake_webhook import FakeWebhook
 from fastapi.testclient import TestClient
-from helpers import API_KEY, SCHEMA_DIR, UI_PASSWORD, UI_USER, reply_fields
+from helpers import API_KEY, SCHEMA_DIR, UI_PASSWORD, UI_USER, WEBHOOK_TOKEN, reply_fields
 from lxml import etree
 
 from app.config import Settings
@@ -49,6 +50,25 @@ def client(make_client) -> TestClient:
 @pytest.fixture(scope="session")
 def reply_schema() -> SchemaValidator:
     return SchemaValidator(SCHEMA_DIR / "reply.xsd")
+
+
+@pytest.fixture(scope="session")
+def event_schema() -> SchemaValidator:
+    return SchemaValidator(SCHEMA_DIR / "event.xsd")
+
+
+@pytest.fixture
+def webhook():
+    """A fake sender's webhook on a local port; it records what it receives."""
+    fake = FakeWebhook()
+    yield fake
+    fake.close()
+
+
+@pytest.fixture
+def webhook_client(make_client, webhook: FakeWebhook) -> TestClient:
+    """An application with the client's side switched on, pointing at the fake webhook."""
+    return make_client(webhook_url=webhook.url, webhook_token=WEBHOOK_TOKEN)
 
 
 @pytest.fixture

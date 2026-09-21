@@ -3,7 +3,9 @@
 A small, independent application that plays the **recipient** of the messages the main system
 sends. It accepts them over HTTP exactly as `contracts/partner-api.md` describes, validates them
 against the XSD in `contracts/xsd/`, answers with a `Reply` document, and shows what arrived in a
-web inbox, so that a person can *see* the messages.
+web inbox, so that a person can *see* the messages. It also plays the **client**: after it accepted
+a message, a person can press "Approve" or "Decline" on the message page, and the simulator calls
+the sender's webhook with a signed `DecisionEvent` (see [Client action](#client-action-approve-and-decline)).
 
 It is **not** part of the AWS stack. It runs wherever Docker runs (a laptop, another cloud,
 behind a tunnel) and shares only `contracts/` with the rest of the repository: it never imports
@@ -40,7 +42,9 @@ To change any of them, copy `.env.example` to `.env` and edit it (see
 | `POST /v1/submissions` | deliver a message (the partner API) | `X-API-Key` header |
 | `GET /healthz` | `{"status":"ok"}` | none |
 | `GET /` | the inbox: the newest 100 messages, refreshed every 5 seconds | HTTP Basic |
-| `GET /messages/{id}` | one message: received XML, reply XML, validation findings, times | HTTP Basic |
+| `GET /messages/{id}` | one message: received XML, reply XML, validation findings, times; for an accepted one also the client action and its events | HTTP Basic |
+| `POST /messages/{id}/decision` | the "Approve" / "Decline" buttons (form fields `decision`, `reason`); only with the webhook configured | HTTP Basic, same-origin only |
+| `POST /messages/{id}/decision/{event}/resend` | the "Send again" button | HTTP Basic, same-origin only |
 | `GET /docs` | interactive API page (send a message by hand with *Try it out*) | none |
 | `GET /openapi.json` | the OpenAPI description | none |
 
@@ -82,6 +86,65 @@ Two things to know when you try the fixtures:
 - A `[reject]` or `[fail]` in the **Subject** triggers the rules of step 5 of the contract. In
   any other place, or in other letter case (`[REJECT]`), it does nothing.
 
+## Client action: Approve and Decline
+
+The simulator plays the **client** as well. After it has accepted a message, the demo operator can
+press **Approve** ("the client paid") or **Decline** ("out of stock", with an optional reason) on
+the message page. The simulator then calls the **sender's** webhook with a signed XML
+`DecisionEvent` ([`contracts/webhook-api.md`](../contracts/webhook-api.md),
+[`contracts/xsd/event.xsd`](../contracts/xsd/event.xsd)). This can happen minutes or months after
+the delivery, so there are **no timers, no delays and no deadlines**: it is a click, whenever.
+
+**Switch it on** with two environment variables, both or neither (there is no screen for them):
+
+| Variable | |
+|---|---|
+| `WEBHOOK_URL` | The sender's webhook: `<api_url>/webhooks/partner` of the AWS stack. `https://`, no `user:password@`, no `#fragment`. `http://` only for `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal` (a receiver on this computer). |
+| `WEBHOOK_TOKEN` | The shared secret that signs the events: at least 16 characters and **the same value the sender holds** (its SSM parameter `webhook-token`, see `docs/api.md`). Never logged, stored or shown. Make one with `openssl rand -hex 32`. |
+
+Put the values in the git-ignored `.env` (the token is a real secret), then `docker compose up -d`.
+One variable without the other, a token that is too short or a bad URL stops the start-up with a message that says which.
+Without them the message page says that the webhook is not configured and offers no action.
+
+**Use it**
+
+1. Deliver a message (see [Sending messages](#sending-messages)); it must be **accepted**. A
+   rejected message gets no action.
+2. Open it from the inbox. The section "Client action" has a reason field (optional, up to 500
+   characters) and the buttons **Approve** and **Decline**.
+3. Press one. The simulator builds the event, checks it against `event.xsd`, stores it, sends it
+   **once**, and the page comes back with the outcome: `Sent: the sender answered 200`,
+   `Not delivered: HTTP 401` or `Not delivered: no answer`.
+4. The table below lists the events of the message: time, EventId, decision, reason, state,
+   attempts, the HTTP status of the last attempt. **Send again** sends the *same* event again (same
+   `EventId`, the same stored bytes) with a fresh timestamp and signature: this is how a
+   redelivery, and the sender's idempotency, is shown. A new press of Approve or Decline is a
+   **new** event (new `EventId`, new `OccurredAt`); the sender keeps the one with the latest
+   `OccurredAt`, so a message can be approved and declined later.
+5. The inbox has a column "Client": the newest decision, how many events there are, and
+   "not delivered" when the newest one did not get through.
+
+The state is the result of the **last** attempt: `delivered` for any `2xx`, `failed` for anything
+else or no answer, `pending` for an event that is stored but was never sent (the process stopped
+in between). What a failure means (from the contract): `401` = the token or the clocks are wrong,
+fix that and press **Send again**; `429`, `5xx`, no answer = temporary, press **Send again**; any
+other `4xx` = the event itself was refused.
+
+**Against a sender on this computer** (for example a small script that verifies the signature):
+`WEBHOOK_URL=http://host.docker.internal:9000/hook WEBHOOK_TOKEN=... docker compose up -d`.
+
+**The request**: `POST` with `Content-Type: application/xml`, `User-Agent: partner-sim/1`,
+`X-Webhook-Timestamp` (whole seconds) and `X-Webhook-Signature: v1=` + hex HMAC-SHA256 of
+`<timestamp>.<body>` keyed with the token. Timeout 8 seconds, redirects are **not** followed (the
+signature must not travel to another address). The tests reproduce the worked example in
+`contracts/fixtures/event/signature-vector.json` byte for byte.
+
+**The two buttons are POSTs behind HTTP Basic auth**, which a browser attaches to any request to
+this address, also to one made by a form on another web site. So both refuse a request that does
+not come from a page of this address (`403`): the `Origin` (or, without it, the `Referer`) must
+name this host, and `Sec-Fetch-Site`, when present, must be `same-origin` or `none`. Behind a proxy
+that changes the `Host` header, the buttons are refused too.
+
 ## Where the data is and how to look at it
 
 **The data** is one SQLite file: `/data/partner.db` inside the container. `/data` is the Docker
@@ -93,7 +156,9 @@ Docker manages the volume's files itself (on Docker Desktop they are inside its 
 machine), so use the commands below instead of looking for the file on your disk.
 
 **The schema** is not hidden in Python: it is the numbered SQL files in `app/migrations/`
-(`0001_initial.sql` holds the `messages` table and its unique index, with comments on why).
+(`0001_initial.sql` holds the `messages` table and its unique index, `0002_decision_events.sql` the
+`decision_events` table of the [client action](#client-action-approve-and-decline), with comments
+on why).
 Read them in order and you have the schema. The database remembers how far it got in SQLite's
 own `PRAGMA user_version` (a number in the file's header, no extra table). At start-up the
 service applies every file that is newer than that number, each in one transaction together
@@ -119,7 +184,8 @@ docker compose exec partner-sim python -m app.migrate /data/partner.db
 
 ```
 database: /data/partner.db
-schema version: 1 (this application knows up to 1)
+schema version: 2 (this application knows up to 2)
+table decision_events: 2 rows
 table messages: 3 rows
 pending migrations: none
 ```
@@ -161,11 +227,13 @@ docker compose --profile tests run --rm --build tests
 ```
 
 It walks every entry of `contracts/fixtures/expected.json` (submissions through the API,
-replies against `reply.xsd`), checks the reply of every path against `reply.xsd` and against
+replies and decision events against their schemas), checks the reply of every path against `reply.xsd` and against
 the rule that `Code` and `Description` exist exactly when the status is `Rejected`, and covers
 the failure paths: keys, content types, both size checks, idempotency (also with parallel
 requests), `[reject]` and `[fail]`, hostile XML, the login, HTML escaping, restart and
-start-up failures, and the migrations (an old database is adopted, a failing migration is
+start-up failures, the client action (the signature against the worked example of the contract,
+every `event` fixture, sending to a fake webhook on a local port: answers, timeouts, redirects,
+"Send again", the cross-site refusals, secrets absent from the log), and the migrations (an old database is adopted, a failing migration is
 rolled back completely, a database newer than the code is refused). Lint: `docker compose --profile tests run --rm tests ruff check .`.
 
 Without Docker (for quick iteration; a virtual environment with `requirements-dev.txt`):
@@ -210,7 +278,9 @@ one message that lists every problem.
 | `UI_PASSWORD` | none, required unless `UI_ENABLED=false` | Password of the inbox. |
 | `UI_ENABLED` | `true` | `false` turns the two pages off: only the API, `/docs` and `/healthz` remain. |
 | `DB_PATH` | `/data/partner.db` | The SQLite file (the image keeps `/data` on a volume). |
-| `SCHEMA_DIR` | `/app/schemas` | Folder with `submission.xsd`, `reply.xsd`, `common-types.xsd`. The image holds its own copy, taken from `contracts/xsd/` at build time. |
+| `SCHEMA_DIR` | `/app/schemas` | Folder with `submission.xsd`, `reply.xsd`, `event.xsd`, `common-types.xsd`. The image holds its own copy, taken from `contracts/xsd/` at build time. |
+| `WEBHOOK_URL` | empty (not configured) | The sender's webhook, for the [client action](#client-action-approve-and-decline). Both or neither with the token. |
+| `WEBHOOK_TOKEN` | empty (not configured) | The shared token that signs the events, at least 16 characters. Never logged, stored or shown. |
 | `MAX_BODY_BYTES` | `65536` | Largest accepted request body. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
 
@@ -218,8 +288,9 @@ Only for Compose: `PARTNER_PORT` (host port, default `8080`), `PARTNER_BIND` (de
 `127.0.0.1`, this computer only; `0.0.0.0` serves other computers), `NGROK_AUTHTOKEN`,
 `NGROK_DOMAIN`.
 
-Nothing that comes from a message, and no key or password, is ever written to the log: only the
-outcome of each request ("submission answered: status 422, SCHEMA_INVALID").
+Nothing that comes from a message, and no key, password, token or signature, is ever written to
+the log: only the outcome of each request ("submission answered: status 422, SCHEMA_INVALID",
+"decision event delivered: attempt 1, HTTP 200"). The reason a person types is not logged either.
 
 ## How it is built
 
@@ -229,23 +300,26 @@ app/
   config.py      environment -> Settings, validated
   api.py         HTTP layer of POST /v1/submissions (key, content type, size) and /healthz
   service.py     what happens to a submission (parse, validate, duplicate, own rules, accept)
+  decisions.py   what happens on Approve / Decline / Send again (build, store, send once, record)
+  events.py      building the DecisionEvent and checking it against event.xsd; the reason's rules
+  webhook.py     the signature and the one POST to the sender's webhook (httpx)
   xml_input.py   the hardened parser, the DOCTYPE ban, reading fields, pretty printing
   validation.py  the XSD, loaded once, shared by threads behind a lock
   replies.py     building the Reply document; the Code/Description rule
-  storage.py     SQLite: reading and writing the `messages` table
+  storage.py     SQLite: reading and writing the `messages` and `decision_events` tables
   migrate.py     applies the numbered SQL files at start-up; `python -m app.migrate <db>` looks inside
-  migrations/    the database schema: 0001_initial.sql, 0002_..., applied in order
-  ui.py          the two pages, login, security headers
+  migrations/    the database schema: 0001_initial.sql, 0002_decision_events.sql, applied in order
+  ui.py          the pages and the two client-action POSTs, login, security headers, cross-site guard
   templates/     Jinja2 templates (autoescape on), inline CSS, no JavaScript
   security.py    constant-time comparison        timeutil.py  UTC timestamps
   models.py      plain data types shared by the layers
-tests/           pytest
+tests/           pytest; fake_webhook.py is a small local server that plays the sender's webhook
 Dockerfile       stages: base -> test, base -> runtime (the last one, so the default)
 ```
 
-Layers: `api.py` and `ui.py` speak HTTP and know nothing about XML; `service.py` knows the rules
-and nothing about HTTP; `storage.py`, `xml_input.py`, `validation.py`, `replies.py` are small
-tools it uses. The order of the steps is written at the top of `service.py`.
+Layers: `api.py` and `ui.py` speak HTTP and know nothing about XML; `service.py` and `decisions.py`
+know the rules and nothing about HTTP; `storage.py`, `xml_input.py`, `validation.py`, `replies.py`,
+`events.py`, `webhook.py` are small tools they use. The order of the steps is written at the top of `service.py`.
 
 ## Decisions
 
@@ -297,6 +371,46 @@ Each with the alternative that was rejected.
 - **The reply is checked before it is sent** (`reply.xsd` and the Code/Description rule). Only a
   bug can make it fail, and then the answer is a loud 500, not a reply the sender must treat as
   a protocol violation. It also gives `reply.xsd` a job at run time.
+- **The event is stored before it is sent, with its exact bytes** (`decisions.py`,
+  `decision_events.event_xml`). A crash between the two cannot lose the decision (the row stays
+  `pending`), and "Send again" sends the same bytes, so the sender sees the same `EventId`.
+  *Rejected:* building the event again on a resend (a new `EventId` and `OccurredAt` would hide
+  exactly what a redelivery is meant to show).
+- **One attempt per click, no retry, no scheduler.** The client acts when a person clicks, and
+  the contract has no deadline; the operator sees the outcome and can press "Send again".
+  *Rejected:* a background retry loop (threads, timers and state for something a click does).
+- **Our own event is validated against `event.xsd` before it is stored or sent**, and a failure
+  logs only line numbers (the validator's messages quote the value, and the reason is typed
+  text). Only a bug can make it fail; the same idea as the reply check. *Rejected:* trusting the
+  builder.
+- **The reason is checked before it reaches the XML**: at most 500 characters, and no character
+  XML 1.0 cannot carry (checked before stripping, since `str.strip()` would silently remove some).
+  *Rejected:* silently dropping such characters (the client's text would change unseen).
+- **Both `WEBHOOK_*` variables or neither; the token must be 16+ characters and is not trimmed;
+  `http://` only for loopback hosts** (`config.py`). A half configuration is a mistake, a space
+  at the end of the token would make every event a `401`, and an event must not cross a network
+  unencrypted. *Rejected:* a silent default, trimming, any `http://`.
+- **`httpx`, a client per call, `follow_redirects=False`, `trust_env=False`, status line only.**
+  Nothing is shared between threads, the signed request never goes to another address, proxy
+  settings and `~/.netrc` of the environment are not consulted, and the empty answer body is not
+  read. Moved from the test requirements to the runtime ones (same pin). *Rejected:* `urllib`
+  (redirects and proxies are followed unless taken apart by hand).
+- **The state of an event is the result of its last attempt.** *Rejected:* a state that stays
+  `delivered` once it was (it would hide that the last "Send again" failed).
+- **The cross-site guard checks `Origin`, then `Referer`, and `Sec-Fetch-Site`** (`ui.py`),
+  because Basic auth is sent by the browser on any request. `Referrer-Policy` became
+  `same-origin`: with `no-referrer` a browser sends `Origin: null` from our own form. *Rejected:*
+  CSRF tokens (Basic auth has no session to keep one in) and turning the login into a cookie
+  session (more parts than a demo needs).
+- **The form is read with the standard library** (`urllib.parse.parse_qs`, 16 KiB limit).
+  *Rejected:* `python-multipart`, which Starlette needs for any form: a new dependency for one
+  small form.
+- **After a POST the page is told which event to report, not what to say.** `303` to
+  `/messages/1?event=<EventId>`; the page finds that event and writes the outcome line itself.
+  *Rejected:* the sentence in the address (any link could then put words on the page) and a
+  cookie.
+- **SQLite foreign keys are switched on for every connection** (`storage.py`), so an event cannot
+  point at a message that does not exist. *Rejected:* leaving `REFERENCES` as a comment.
 - **Basic auth as a dependency of the whole UI router**, so a page added later is protected
   without anyone remembering to. *Rejected:* a login form and sessions (cookies, CSRF: more
   parts than a demo needs).
@@ -323,4 +437,11 @@ Each with the alternative that was rejected.
   put it on the internet without the tunnel's TLS in front, and never with the demo values.
 - Authentication is one shared API key and one shared inbox login.
 - The two rules (`[reject]`, `[fail]`) are the only "business logic".
+- The client action sends **one attempt per click**: no automatic retry, no background work. An
+  event is stored with its exact bytes; "Send again" repeats it. `OccurredAt` has millisecond
+  precision, so two presses in the same millisecond, or a clock that steps back between two
+  presses, could make the sender ignore the later one (it keeps the latest `OccurredAt`).
+- The 8-second timeout applies to each phase of the call (connect, send, wait for the answer), not
+  to the whole call, and a name lookup is not covered by it.
+- The buttons need a browser that sends `Origin` or `Referer` (all current ones do).
 - Only x86-64 was built and run here.

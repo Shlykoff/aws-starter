@@ -25,7 +25,7 @@
       <thead>
         <tr>
           <th>Received (UTC)</th><th>MessageId</th><th>Recipient</th><th>Subject</th>
-          <th>Outcome</th><th>HTTP</th>
+          <th>Outcome</th><th>HTTP</th><th>Client</th>
         </tr>
       </thead>
       <tbody>
@@ -43,6 +43,18 @@
               {% endif %}
             </td>
             <td>{{ m.http_status }}</td>
+            <td>
+              {# The newest decision of the client, how many events there are, and whether the
+                 newest one reached the sender. #}
+              {% set d = overview.get(m.id) %}
+              {% if d %}
+                <span class="badge {{ 'ok' if d.last_decision == 'Approved' else 'bad' }}">{{ d.last_decision }}</span>
+                {% if d.count > 1 %}<span class="muted">{{ d.count }} events</span>{% endif %}
+                {% if d.last_state != "delivered" %}<span class="badge warn">not delivered</span>{% endif %}
+              {% else %}
+                -
+              {% endif %}
+            </td>
           </tr>
         {% endfor %}
       </tbody>
