@@ -110,12 +110,17 @@ nothing waits for it and nothing expires.
   Send again changes nothing; a later Decline replaces it; the delivery status stays `sent`. The
   logs of those calls contain no reason text and no token. A second `terraform plan` after the
   deploy shows no changes.
-  Still to do: a full review of the logs for personal data.
 - [x] Stage 5: send a failed request again (a button on the request page). Checked on AWS: with the
   recipient stopped a request went through five attempts to `failed` and the DLQ stayed empty;
   with the recipient back, Send again delivered it (`sent`, the exchange counts from attempt 1);
   pressing again, or on a delivered request, gets `409`; another user's or a malformed id gets
   `404`. A second `terraform plan` after the deploy shows no changes.
+- [x] Stage 6: the logs are guarded by the logger (only listed fields, each with a shape; see
+  Decisions). Checked: every log group was searched for the text of about twenty live test requests
+  before the change (no hit); after the deploy, traffic through every function, error paths
+  included (a broken JSON body and invalid fields carrying a marker string), left no marker string
+  and no `[unlisted]` or `[rejected]` in 97 log lines, and the lines still carry ids, outcomes and
+  counts.
 
 ## Try it
 
