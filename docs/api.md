@@ -119,12 +119,15 @@ what it means for the request.
 | GET | `/requests` | | `200` `{ items: Request[] }`, newest first, at most 50 (pagination later) | `500` |
 | GET | `/requests/{id}` | | `200` `Request` | `404` (also for a malformed id), `500` |
 | POST | `/requests/{id}/retry` | | `200` `Request` (status `created`) | `404` (also for a malformed id), `409` `not_retryable` (the status is not `failed`), `500` |
-| GET | `/requests/{id}/exchange` | | `200` `Exchange` | `404` (no such request, or no delivery attempt yet), `500` |
+| GET | `/requests/{id}/exchange` | | `200` `Exchange`; `204`, empty body, when the request is the caller's own and no delivery attempt is recorded yet | `404` (no such request for the caller, also for a malformed id), `500` |
 | POST | `/webhooks/partner` | XML `DecisionEvent`, signed | `200`, empty body | `413`, `401`, `415`, `400`, `422`, `404`, `5xx` (see "Client decision"); **no Cognito token** |
 
 `Exchange` is what the worker recorded about the **latest** delivery attempt (see "The exchange
 record"). The XML in it is text for a person to read: clients must show it as text and never
-interpret it as markup.
+interpret it as markup. "No attempt yet" is a normal state of an existing request (it has not
+been picked up yet), so it is `204`, not an error; `404` here only ever means that there is no such
+request for the caller. Both answers carry `cache-control: no-store`, because the `204` changes
+into a `200` as soon as the first attempt is made.
 
 ```
 Exchange {

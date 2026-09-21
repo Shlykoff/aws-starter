@@ -43,6 +43,12 @@ describe("createApiClient", () => {
     expect(data).toEqual({ items: [] });
   });
 
+  it("returns undefined for a 204, which has no body, without throwing", async () => {
+    const { client } = setup({ response: new Response(null, { status: 204 }) });
+
+    await expect(client.get("/requests/1/exchange")).resolves.toBeUndefined();
+  });
+
   it("sends a JSON body with a content type on POST", async () => {
     const { client, fetchImpl } = setup();
 

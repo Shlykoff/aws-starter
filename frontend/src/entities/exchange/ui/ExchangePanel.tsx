@@ -174,7 +174,7 @@ export function ExchangePanel({
       </div>
     );
   } else if (state.status === "empty") {
-    // A 404 is normal while the request has not been tried yet, and for good once the record
+    // A 204 is normal while the request has not been tried yet, and for good once the record
     // has expired (S3 lifecycle, docs/api.md): calm, not an error.
     body = (
       <div className="space-y-1">

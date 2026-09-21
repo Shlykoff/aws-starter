@@ -5,8 +5,9 @@ import type { Exchange } from "./types";
 
 // What the exchange panel shows for one request.
 //   loading: asked, no answer yet.
-//   empty:   the API answered 404: there is no delivery attempt to show (yet). A normal
-//            situation while the request is created or queued, not an error.
+//   empty:   the API answered 204 (no body): the request exists but has no delivery attempt
+//            to show (yet). A normal situation while the request is created or queued, not an
+//            error. A 404 is mapped to the same state, see `fetch`.
 //   ready:   the record of the latest attempt.
 //   error:   anything else (network, 500, an answer that does not match the contract).
 export type ExchangeState =
@@ -16,7 +17,7 @@ export type ExchangeState =
   | { id: string; status: "error"; message: string };
 
 // Why an observable store and not component state: the same reason as RequestsStore, in
-// small. The rules below (what a 404 means, a failed refresh must not take the shown
+// small. The rules below (what a 204 means, a failed refresh must not take the shown
 // exchange away, a slow answer for a request the user has left is dropped) are plain
 // logic that can be tested without React, and the page and the panel share the state
 // through MobX instead of passing it around. Only one screen uses it, so there is no
@@ -54,8 +55,16 @@ export class ExchangeStore {
     try {
       const exchange = await this.api.get(id);
       runInAction(() => {
+        const current = this.state;
         // The user may have moved on to another request while this one was loading.
-        if (this.state?.id === id) this.state = { id, status: "ready", exchange };
+        if (current?.id !== id) return;
+        if (exchange) {
+          this.state = { id, status: "ready", exchange };
+        } else if (current.status !== "ready") {
+          // 204: no delivery attempt yet. Like a failed refresh, it must not take a record
+          // that is already on screen away (see the catch below).
+          this.state = { id, status: "empty" };
+        }
       });
     } catch (error) {
       runInAction(() => {
@@ -64,6 +73,8 @@ export class ExchangeStore {
         // A refresh that fails must not take a good record off the screen; the next poll
         // tries again. Everything else has nothing better to show than the failure.
         if (current.status === "ready") return;
+        // A 404 now means "no such request" (204 is "no attempt yet"). It still maps to empty:
+        // the page shows the not-found message from the request itself, so the panel stays calm.
         this.state =
           error instanceof ApiError && error.status === 404
             ? { id, status: "empty" }

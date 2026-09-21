@@ -165,7 +165,8 @@ nothing waits for it and nothing expires.
   was stored byte for byte; the basic API metrics (`Count`, `4XXError`, `5XXError` by `ApiName` and
   `Stage`) appear with detailed metrics off. From a browser (sign-in, list, create, exchange, all with
   the raw access token, no `Bearer `): the access log shows 200 on the reads, 201 on the create and one
-  expected 404 (the exchange of a request that has not been tried yet); one request made in the browser
+  404 (the exchange of a request that has not been tried yet: it answered 404 then, and answers 204
+  since the fix that followed); one request made in the browser
   gave **one trace of 40 spans** that starts at the gateway (`POST /requests`), goes through
   `create-request`, `enqueue request` and both delivery attempts (the first got a 503 from the recipient,
   which was restarting, the second was delivered), and the gateway span has the parent id that the

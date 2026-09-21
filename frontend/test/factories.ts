@@ -3,7 +3,6 @@ import { vi } from "vitest";
 import type { AuthClient } from "@/features/auth";
 import type { Exchange, ExchangeApi } from "@/entities/exchange";
 import type { ClientDecision, PartnerRequest, RequestsApi } from "@/entities/request";
-import { ApiError } from "@/shared/api";
 
 // Fake data only. A User with a valid one-hour access token unless overridden.
 export function makeUser(
@@ -116,8 +115,7 @@ export function makeDeferred<T>() {
 // "nothing to show" case, so a test that does not care about the exchange sees no error.
 export function makeExchangeApi() {
   return {
-    get: vi.fn<ExchangeApi["get"]>(() =>
-      Promise.reject(new ApiError(404, "not_found", "Request not found")),
-    ),
+    // The default answer is null (a 204): the request has no delivery attempt yet.
+    get: vi.fn<ExchangeApi["get"]>(() => Promise.resolve(null)),
   };
 }

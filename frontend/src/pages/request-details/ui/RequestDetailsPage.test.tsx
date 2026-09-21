@@ -17,7 +17,7 @@ import { RequestDetailsPage } from "./RequestDetailsPage";
 function setup() {
   const api = makeRequestsApi();
   const requests = new RequestsStore(api);
-  // Unless a test sets it, the exchange API answers 404: no delivery attempt yet.
+  // Unless a test sets it, the exchange API answers null (a 204): no delivery attempt yet.
   const exchangeApi = makeExchangeApi();
   const exchange = new ExchangeStore(exchangeApi);
   const open = (id: string) =>
@@ -225,7 +225,7 @@ describe("RequestDetailsPage exchange panel", () => {
 
     expect(await screen.findByText("No delivery attempt to show")).toBeInTheDocument();
     expect(exchangeApi.get).toHaveBeenCalledWith(request.id);
-    // A 404 is not an error, so nothing on the page is announced as one.
+    // No attempt yet is not an error, so nothing on the page is announced as one.
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -325,7 +325,7 @@ describe("RequestDetailsPage exchange polling", () => {
       .mockResolvedValueOnce(request)
       .mockResolvedValue({ ...request, status: "sent" });
     exchangeApi.get
-      .mockRejectedValueOnce(new ApiError(404, "not_found", "Request not found"))
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(makeExchange({ attempt: 1, outcome: "retry", reply: null }))
       .mockResolvedValueOnce(makeExchange({ attempt: 2, outcome: "retry", reply: null }))
       .mockResolvedValue(makeExchange({ attempt: 3, outcome: "delivered" }));
