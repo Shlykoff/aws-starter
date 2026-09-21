@@ -15,6 +15,11 @@ export const REQUEST_LIMITS = { partner: 100, subject: 200, body: 5000 } as cons
 export const CLIENT_DECISIONS = ["Approved", "Declined"] as const;
 export type ClientDecisionValue = (typeof CLIENT_DECISIONS)[number];
 
+// What the screens show as the client's status: the decision, or "Waiting" while a delivered
+// request has none. "Waiting" exists only here in the frontend, derived by `getClientStatus`
+// (status.ts): the API never stores or sends it, so `ClientDecisionValue` stays what the API says.
+export type ClientStatus = ClientDecisionValue | "Waiting";
+
 // Strict on purpose, like the rest of the request: an unknown `decision` is an error, and so is
 // `null` where the API omits the field. `reason` is text written by the recipient's side (third
 // party): it is only ever shown as text, never as markup (see ClientDecisionCard).

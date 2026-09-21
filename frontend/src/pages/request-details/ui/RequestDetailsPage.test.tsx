@@ -408,14 +408,16 @@ describe("RequestDetailsPage client decision", () => {
     expect(card.compareDocumentPosition(exchange) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("says that it waits for a delivered request without a decision", async () => {
+  it("says Waiting for a delivered request without a decision", async () => {
     const { api, open } = setup();
     const request = makeRequest({ status: "sent" });
     api.get.mockResolvedValue(request);
 
     open(request.id);
 
-    expect(await screen.findByText("Waiting for the client's decision. It can arrive at any time.")).toBeInTheDocument();
+    const card = await screen.findByRole("region", { name: "Client decision" });
+    expect(within(card).getByText("Waiting")).toHaveAttribute("data-client-status", "Waiting");
+    expect(within(card).getByText("The client has not answered yet. It can arrive at any time.")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -479,7 +481,7 @@ describe("RequestDetailsPage decision polling", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-  const WAITING = "Waiting for the client's decision. It can arrive at any time.";
+  const WAITING = "The client has not answered yet. It can arrive at any time.";
   const decided = (request: ReturnType<typeof makeRequest>) => ({
     ...request,
     clientDecision: makeClientDecision({ decision: "Approved", reason: "Paid by card." }),
@@ -493,6 +495,7 @@ describe("RequestDetailsPage decision polling", () => {
     open(request.id);
     await advance(0);
     expect(screen.getByText(WAITING)).toBeInTheDocument();
+    expect(screen.getByText("Waiting")).toHaveAttribute("data-client-status", "Waiting");
     expect(api.get).toHaveBeenCalledTimes(1);
 
     // Slow, not the 5 seconds of the status poll.
@@ -505,7 +508,9 @@ describe("RequestDetailsPage decision polling", () => {
     await advance(DECISION_POLL_INTERVAL_MS);
     expect(api.get).toHaveBeenCalledTimes(3);
     expect(screen.queryByText(WAITING)).not.toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
+    // The same card: Waiting has turned into the decision, without a reload.
+    expect(screen.queryByText("Waiting")).not.toBeInTheDocument();
+    expect(screen.getByText("Approved")).toHaveAttribute("data-client-status", "Approved");
     expect(screen.getByText("Paid by card.")).toBeInTheDocument();
 
     // The decision is here: no more asking, however long the page stays open.

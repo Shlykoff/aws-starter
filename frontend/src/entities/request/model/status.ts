@@ -1,4 +1,4 @@
-import type { PartnerRequest, RequestStatus } from "./types";
+import type { ClientStatus, PartnerRequest, RequestStatus } from "./types";
 
 // `sent`, `rejected` and `failed` never change again (docs/api.md, "Statuses"). Only
 // `created` and `queued` can still move, so only those are worth refreshing.
@@ -25,4 +25,14 @@ export const DECISION_POLL_INTERVAL_MS = 30_000;
 // poll covers them), and `failed` and `rejected` never were, so nothing is awaited there.
 export function isAwaitingDecision(request: Pick<PartnerRequest, "status" | "clientDecision">): boolean {
   return request.status === "sent" && request.clientDecision === undefined;
+}
+
+// What to show as the client's status, or undefined when nothing is to be shown. A decision is
+// shown whenever there is one, whatever the delivery status is (the webhook accepts it for any
+// request). Without one, only a delivered request is "Waiting": for the others (created, queued,
+// rejected, failed) nothing is expected from the client, so no client status is shown. Derived
+// here on every render, never stored: when the decision arrives, the result changes by itself.
+export function getClientStatus(request: Pick<PartnerRequest, "status" | "clientDecision">): ClientStatus | undefined {
+  if (request.clientDecision !== undefined) return request.clientDecision.decision;
+  return isAwaitingDecision(request) ? "Waiting" : undefined;
 }

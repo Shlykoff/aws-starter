@@ -5,6 +5,7 @@ export { RequestsStore } from "./model/RequestsStore";
 export { RequestsStoreProvider, useRequestsStore } from "./model/store-context";
 export {
   DECISION_POLL_INTERVAL_MS,
+  getClientStatus,
   isAwaitingDecision,
   isTerminalStatus,
   STATUS_POLL_INTERVAL_MS,
@@ -13,6 +14,7 @@ export { CLIENT_DECISIONS, REQUEST_LIMITS, REQUEST_STATUSES } from "./model/type
 export type {
   ClientDecision,
   ClientDecisionValue,
+  ClientStatus,
   NewPartnerRequest,
   PartnerRequest,
   RequestStatus,

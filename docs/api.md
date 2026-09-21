@@ -111,6 +111,11 @@ what it means for the request.
   because ISO strings with different offsets do not sort.
 - Nothing waits for the event and nothing expires: no timer, no alarm for a missing decision.
 
+There is no stored "waiting" state and the API never returns one. A request that is `sent` and has
+no `clientDecision` is waiting for the client, and the frontend shows it as "Waiting" (derived on
+every render, so it turns into Approved or Declined when the decision arrives). For any other
+status without a decision (`created`, `queued`, `rejected`, `failed`) no client status is shown.
+
 ## Endpoints
 
 | Method | Path | Body | Success | Errors |
