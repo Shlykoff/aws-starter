@@ -14,10 +14,10 @@ All data is fake. The domain is deliberately neutral.
 ## Status
 
 - [x] Stage 0: bootstrap (state bucket, budget alert, GitHub OIDC role)
-- [ ] Stage 1: REST API (API Gateway, Lambda, DynamoDB), Cognito, React login + list/form, CI/CD.
-  Deployed and smoke-tested: API, Lambdas, DynamoDB, Cognito, static hosting. Pending:
-  React app, CI/CD.
-- [ ] Stage 2: async delivery (SQS FIFO, worker, DLQ, SNS), S3 for files
+- [x] Stage 1: REST API (API Gateway, Lambda, DynamoDB), Cognito, React login + list/form, CI/CD
+- [x] Stage 2: async delivery (stream outbox, SQS FIFO, worker, DLQ, SNS), S3 audit copy of
+  what was sent. Checked on AWS with three requests: delivered, refused (`[reject]`) and
+  failing (`[fail]`: five attempts, then `failed`, the DLQ and the alarm).
 - [ ] Stage 3: XML + XSD validation, PII masking in logs, CloudWatch/X-Ray, secrets in SSM, tests
 
 ## Layout
