@@ -1,6 +1,8 @@
 """SQLite storage (standard library, no ORM).
 
 One table, `messages`. Every processed submission is a row, except the [fail] ones.
+The schema itself is not in this file: it lives in the SQL files in app/migrations/, and
+initialize() applies them (see app/migrate.py).
 
 Threads: FastAPI runs the request code in a pool of threads. Each method here opens its own
 short-lived connection, uses it and closes it, so no connection is ever shared between threads.
@@ -14,34 +16,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from app.migrate import migrate
 from app.models import Finding, MessageDetail, MessageSummary, NewMessage
-
-# outcome and code are tied together the same way as in the reply: a code exactly when rejected.
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS messages (
-    id           INTEGER PRIMARY KEY,
-    received_at  TEXT    NOT NULL,
-    message_id   TEXT,
-    recipient    TEXT,
-    subject      TEXT,
-    outcome      TEXT    NOT NULL CHECK (outcome IN ('accepted', 'rejected')),
-    code         TEXT,
-    http_status  INTEGER NOT NULL,
-    request_xml  TEXT    NOT NULL,
-    reply_xml    TEXT    NOT NULL,
-    problems     TEXT    NOT NULL,
-    CHECK ((outcome = 'accepted' AND code IS NULL) OR (outcome = 'rejected' AND code IS NOT NULL))
-);
-
--- This index is what makes "answer the same MessageId only once" atomic: when two requests
--- with the same id arrive at the same moment, the database lets exactly one INSERT through.
--- Schema-invalid submissions are left out on purpose: the contract validates BEFORE it looks
--- for duplicates (steps 3 and 4), and such a document may not even carry a real MessageId.
--- Their id is still stored, for the inbox, but it is not a key.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_messages_message_id
-    ON messages (message_id)
-    WHERE message_id IS NOT NULL AND code IS NOT 'SCHEMA_INVALID';
-"""
 
 _SQLITE_MAX_ID = 2**63 - 1
 
@@ -51,12 +27,13 @@ class MessageStore:
         self._db_path = db_path
 
     def initialize(self) -> None:
-        """Create the folder, the table and the index if they are not there yet."""
+        """Create the folder and the file, switch on WAL, bring the schema up to date."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            # WAL is a property of the file: set once, it stays.
+            # WAL is a property of the file: set once, it stays. It cannot be switched on inside
+            # a transaction, so it is not part of a migration.
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(_SCHEMA)
+        migrate(self._db_path)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

@@ -11,6 +11,7 @@ from fastapi import FastAPI
 
 from app.api import build_api_router
 from app.config import ConfigError, Settings, load_settings
+from app.migrate import MigrationError
 from app.service import SubmissionService
 from app.storage import MessageStore
 from app.ui import build_ui_router
@@ -27,7 +28,11 @@ key in `X-API-Key`. The inbox at `/` (login required) shows what arrived.
 
 
 def create_app(settings: Settings) -> FastAPI:
-    """Build the application. Raises SchemaLoadError if a schema cannot be loaded."""
+    """Build the application.
+
+    Raises SchemaLoadError if a schema cannot be loaded, and MigrationError if the database
+    cannot be brought up to date (or is newer than this code).
+    """
     # Loaded once, here. A missing or broken schema stops the start-up, not the first request.
     submission_schema = SchemaValidator(settings.schema_dir / "submission.xsd")
     reply_schema = SchemaValidator(settings.schema_dir / "reply.xsd")
@@ -60,7 +65,7 @@ def create_app_from_env() -> FastAPI:
     )
     try:
         app = create_app(settings)
-    except SchemaLoadError as exc:
+    except (SchemaLoadError, MigrationError) as exc:
         sys.exit(f"partner-sim cannot start: {exc}")
 
     log.info(
