@@ -249,6 +249,14 @@ resource "aws_api_gateway_gateway_response" "cors" {
   response_parameters = {
     "gatewayresponse.header.Access-Control-Allow-Origin" = local.cors_allow_origin
   }
+
+  # The body template API Gateway puts on these two responses by itself, written out. Left out, every
+  # plan saw a difference (the template is in AWS, not in the code), and because the deployment's
+  # redeployment hash (below) covers this resource, that difference made every plan replace the
+  # deployment, which the deploy workflow's guard against deletions then refused.
+  response_templates = {
+    "application/json" = "{\"message\":$context.error.messageString}"
+  }
 }
 
 # ---------------------------------------------------------------------------
