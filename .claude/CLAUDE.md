@@ -107,5 +107,5 @@ and come back to them.
 Topics to cover over the project: cold starts, DynamoDB keys / GSI / hot partitions,
 SQS visibility timeout and idempotency, FIFO message groups, DLQ and redrive, Lambda
 concurrency, the cost model, IAM least privilege, GitHub OIDC, Terraform state and
-locking, HTTP vs REST API Gateway, Cognito / JWT, sensitive data in logs, mTLS, XML/XSD,
+locking, HTTP vs REST API Gateway, Cognito / JWT, sensitive data in logs, XML/XSD,
 React 19 / MobX / FSD.
