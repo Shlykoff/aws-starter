@@ -1,16 +1,81 @@
 # aws-starter
 
-A small reference project for running serverless services on AWS: Terraform for
-infrastructure, Node.js + TypeScript on Lambda, a React frontend. It is built
-around a demo scenario, sending requests to a partner system, that has two paths:
+A small reference project that shows how two independent systems exchange validated XML
+messages, with the sending side built serverless on AWS: Terraform, Lambda, API Gateway,
+DynamoDB, SQS FIFO, SNS, Cognito, S3, SSM, and a React frontend. The receiving side is a
+separate application (`partner-sim/`, Python in Docker) that could live in any other cloud. The
+two sides share nothing but `contracts/`: the XSD schemas, the HTTP contract and sample messages.
 
-- **User path**: React -> API Gateway -> Lambda -> DynamoDB, authenticated with Cognito.
-- **Delivery path**: a request is queued in SQS FIFO; a worker Lambda builds an XML
-  message, validates it against an XSD and posts it over HTTPS to a separate system (the
-  recipient); it reads and validates the XML answer. Status changes are published to SNS,
-  messages that keep failing land in a DLQ.
+A user creates a request in the web app. It is stored, queued, turned into an XML message,
+checked against a schema, sent over HTTPS to the recipient, and the recipient's XML answer is
+checked and stored. The page then shows **the XML that was sent and the XML that came back**.
 
-All data is fake. The domain is deliberately neutral.
+All data is fake. The domain is deliberately neutral. It runs inside the AWS Free Tier.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+  subgraph AWS["AWS account: infra/, backend/, frontend/"]
+    B["Browser: React app,<br/>Cognito login"] -->|"HTTPS + JWT"| API["API Gateway<br/>HTTP API"]
+    API --> F["Lambda: create, list,<br/>get, get-exchange"]
+    F --> T[("DynamoDB<br/>requests")]
+    T -->|"stream"| E["Lambda: enqueuer"]
+    E --> Q[["SQS FIFO<br/>+ DLQ"]]
+    Q --> W["Lambda: delivery-worker"]
+    W --> T
+    W --> S[("S3: exchange<br/>records")]
+    W --> N["SNS: e-mail when a<br/>request fails"]
+    W -.->|"reads the key"| K[("SSM: API key")]
+    F -.->|"reads records"| S
+  end
+  subgraph REC["Recipient: partner-sim/, a separate system"]
+    P["FastAPI<br/>POST /v1/submissions"] --> D[("SQLite")]
+    P --- I["Inbox web page"]
+  end
+  W ==>|"XML over HTTPS + X-API-Key"| P
+  C["contracts/: XSD, HTTP contract, fixtures"]
+  C -.- W
+  C -.- P
+```
+
+What happens to one request:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User in the browser
+  participant A as API Gateway and Lambda
+  participant T as DynamoDB
+  participant E as enqueuer
+  participant Q as SQS FIFO
+  participant W as delivery-worker
+  participant R as Recipient
+  U->>A: POST /requests
+  A->>T: store, status created
+  T-->>E: stream record
+  E->>Q: queue the request, status queued
+  Q->>W: one message
+  W->>W: build the XML, check it against submission.xsd
+  W->>R: POST /v1/submissions with the XML and the API key
+  R->>R: check the XML against the same schema, store it
+  R-->>W: Reply XML, Accepted or Rejected
+  W->>W: check the Reply against reply.xsd
+  W->>T: status sent, rejected or failed
+  W->>W: exchange record to S3, notice to SNS
+  U->>A: GET /requests/id/exchange
+  A-->>U: the XML sent and the XML received
+```
+
+Where each outcome ends:
+
+| What happens | Status | Retried? |
+|---|---|---|
+| The recipient answers `200` and `Accepted` | `sent` | no |
+| The recipient answers `Rejected` (`400`/`422`) | `rejected` | no |
+| Our own message fails `submission.xsd`, or holds a character XML cannot carry | `rejected`, nobody is called | no |
+| Timeout, `5xx`, `429`, `401`/`403`, an unreadable or contradictory answer | stays `queued` | yes, up to 5 receives |
+| The 5th attempt fails | `failed`, the message goes to the DLQ, an alarm and an e-mail | no |
 
 ## Status
 
@@ -19,20 +84,98 @@ All data is fake. The domain is deliberately neutral.
 - [x] Stage 2: async delivery (stream outbox, SQS FIFO, worker, DLQ, SNS). Checked on AWS
   with three requests: delivered, refused and failing (five attempts, then `failed`, the
   DLQ and the alarm).
-- [ ] Stage 3: the recipient as a separate system (`partner-sim/`, `contracts/`), XML + XSD
-  validation on both sides, the exchange record and its panel in the UI, the API key in SSM;
-  still to do: PII masking review of the logs, mTLS, a README with diagrams and a quickstart
+- [x] Stage 3: the recipient as a separate system, XML + XSD validation on both sides, the
+  exchange record and its panel in the UI, the API key in SSM. Checked on AWS through an ngrok
+  tunnel to the recipient running in Docker on a laptop: a request delivered in about two
+  seconds, one refused by the recipient, one refused by our own schema check without calling
+  anybody, one retried five times until `failed` (8 minutes), and one that waited while the
+  recipient was down and was delivered on the second attempt after it came back. The logs of
+  those runs contain no message text.
+  Still to do: a full review of the logs for personal data, optional mTLS.
+
+## Try it
+
+### 1. The recipient, on your computer (two minutes, no AWS needed)
+
+Needs Docker. From the repository root:
+
+```sh
+cd partner-sim && docker compose up --build -d
+cd ..
+curl -s -X POST http://127.0.0.1:8080/v1/submissions \
+  -H 'X-API-Key: demo-key-change-me' -H 'Content-Type: application/xml' \
+  --data-binary @contracts/fixtures/submission/valid/minimal.xml
+```
+
+You get a `Reply` document with `Accepted`. Open <http://127.0.0.1:8080/> (login `demo`,
+password `demo-password-change-me`) to see it in the inbox. [`partner-sim/README.md`](partner-sim/README.md)
+has the other cases (schema violations, DOCTYPE attacks, wrong key, too large) and how to look
+at the database.
+
+### 2. The AWS side
+
+You need an AWS account with credentials in your shell, Terraform 1.16, Node 24 with Corepack,
+and a GitHub repository (a fork of this one) that the deploy role trusts. It is built to stay
+inside the AWS Free Tier, and a budget alert is created before anything else. The steps below
+were run on the author's account (through CI); a from-scratch run on a second account has not
+been done.
+
+```sh
+# 1. Once per account: the state bucket, a budget alert and the GitHub deploy role.
+#    Follow "Running bootstrap" at the end of this file.
+
+# 2. The application stack
+cd infra/envs/dev
+echo "bucket = \"aws-starter-tfstate-$(aws sts get-caller-identity --query Account --output text)\"" > backend.tfbackend
+cp terraform.tfvars.example terraform.tfvars   # edit: Cognito domain prefix, e-mail, partner_url
+export TF_VAR_partner_api_key='<a secret of 16+ characters: the same value as the recipient PARTNER_API_KEY>'
+(cd ../../.. && corepack enable && yarn install && yarn workspace @aws-starter/backend build)
+terraform init -backend-config=backend.tfbackend && terraform apply
+```
+
+`partner_url` is where the AWS side finds the recipient: `https://<host>` with no path. AWS
+cannot reach `127.0.0.1`, so for a recipient running on your computer use the ngrok tunnel
+(`partner-sim/README.md`, "Optional: a public address through ngrok"), with your own API key
+and password in `partner-sim/.env`. Confirm the two SNS e-mail subscriptions (request status,
+alerts) that AWS sends to the address you gave.
+
+Run the web app against the deployed API:
+
+```sh
+cd frontend
+cp .env.example .env.local     # fill it from `terraform output` in infra/envs/dev
+yarn dev                       # http://localhost:5173
+```
+
+Or let GitHub Actions do the whole thing after every merge to `main`: set the secrets
+`AWS_DEPLOY_ROLE_ARN`, `NOTIFICATION_EMAIL`, `PARTNER_API_KEY` and the variables
+`COGNITO_DOMAIN_PREFIX`, `PARTNER_URL` (`.github/workflows/deploy.yml` builds, plans, applies,
+and publishes the site to CloudFront). The deploy refuses to delete anything unless run by hand
+with `allow_destroy`.
+
+### 3. A demo script
+
+Sign up in the web app, then create requests (the partner name may hold letters, digits, space
+and `. , ' & -` only, because the recipient's schema says so):
+
+| Create | You see |
+|---|---|
+| any subject, partner `Acme Ltd` | `sent` within seconds; the Exchange panel shows the XML and the `Accepted` reply |
+| `[reject]` in the subject | `rejected`; the reply says `RECIPIENT_REJECTED` |
+| `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed`; the message goes to the DLQ, which raises an alarm and an e-mail |
+| partner `Acme #1` | `rejected` at once: our own schema check refuses it and nobody is called |
+| stop the recipient, create a request, start the recipient again within the retries (about 8 minutes) | the Exchange panel shows the failed attempt (`retry`, `502` from the tunnel), then the request is delivered on the next attempt, two minutes after the first |
 
 ## Layout
 
 ```
 bootstrap/   one-off Terraform: state bucket, budget, GitHub OIDC role
-infra/       main Terraform stack (remote state), modules per service   [stage 1]
-backend/     Node.js + TypeScript Lambda handlers                        [stage 1]
-frontend/    React app                                                   [stage 1]
-contracts/   what both sides share: XSD schemas, the HTTP contract, sample messages [stage 3]
-partner-sim/ the recipient: a separate Python app (FastAPI, lxml, SQLite, Docker)   [stage 3]
-docs/        API contract (docs/api.md)
+infra/       main Terraform stack (remote state), modules per service
+backend/     Node.js + TypeScript Lambda handlers (handlers -> services -> repositories)
+frontend/    React app (Feature-Sliced Design)
+contracts/   what both sides share: XSD schemas, the HTTP contract, sample messages
+partner-sim/ the recipient: a separate Python app (FastAPI, lxml, SQLite, Docker)
+docs/        API and delivery contract (docs/api.md)
 ```
 
 ## Decisions
@@ -98,15 +241,64 @@ Written down as they are made; each stage adds its own.
   queue publishes no metric, and encrypted topics can only receive CloudWatch alarms through a
   customer-managed key. The messages hold ids and alarm data, never request text.
 
+- **XSD validation with libxml2 on both sides**: `xmllint-wasm` in the Node.js sender, `lxml` in
+  the Python recipient. Both need full XSD 1.0 with `xs:import`, which the pure-JavaScript
+  validators do not offer, and a native binary is a build problem on Lambda; WebAssembly is
+  neither. The honest limit: both sides run the same engine, so the shared fixtures
+  (`contracts/fixtures/expected.json`, run by both test suites) prove that the two
+  implementations agree on the contract, not that two independent validators agree.
+- **`xmllint-wasm` is not bundled.** It starts a worker thread from a script file and reads its
+  `.wasm` next to itself, so inside one bundled `.mjs` it fails. The build leaves it out and copies
+  the package next to the function (`dist/delivery-worker/node_modules`), together with the three
+  schema files. Cost: about 70 ms per validation and a 6.9 MB unzipped package.
+- **What the validator reports never contains a value.** libxml2 messages quote the offending
+  value, and values are personal data. The sender turns each message into an element name and a
+  rule from closed lists, and the logs carry the same. Tests put a canary string into every field
+  and look for it in the findings and in every log line.
+- **The recipient's answer is untrusted input.** At most 64 KiB (counted while it streams),
+  UTF-8 only, any DOCTYPE refused before parsing (entity expansion, XXE), redirects never
+  followed (the API key must not travel to another host), checked against `reply.xsd` and against
+  the rule XSD 1.0 cannot express (`Code` and `Description` exactly when `Rejected`). Anything
+  the contract does not define, or a reply that contradicts its own status, is retried: never a
+  silent "sent" or "rejected".
+- **A reply is read by a real XML parser (`@xmldom/xmldom`), after libxml2 has judged it valid.**
+  A regular expression is wrong for valid documents (comments, CDATA, namespace prefixes).
+  Rejected: `fast-xml-parser` (six dependencies of its own).
+- **Idempotency across the two systems**: the `MessageId` of a message is the request id. A
+  repeated delivery gets the stored answer back, so a retry after a crash cannot deliver twice.
+- **mTLS is not part of this stack.** The tunnel ends TLS at ngrok, so a client certificate could
+  not reach the recipient; it would be an optional local Docker profile.
+
+## Limits
+
+- It shows an architecture; it is **not** a real e-prescription or NCPDP implementation. The
+  message and its schemas are neutral and illustrative.
+- Demo scale on purpose: DynamoDB 5/5 provisioned units, the account's Lambda concurrency of 10,
+  one delivery at a time per partner name, the worker at most two at once.
+- The recipient is a simulator with one shared API key and one inbox login. For AWS to reach it
+  from a laptop the demo uses an ngrok tunnel: it needs an ngrok account, the free plan has
+  monthly quotas, and while the tunnel or the container is down, deliveries are retried and
+  finally fail.
+- The exchange record holds the message text (S3, SSE-S3, deleted after 30 days) and can be read
+  only by the owner of the request. Logs are designed to carry no message text; a full review of
+  them is still to do.
+- Both validators are libxml2 (see Decisions).
+
 ## Running bootstrap
+
+Once per AWS account. It creates the Terraform state bucket, a monthly budget alert and the
+role GitHub Actions uses to deploy.
 
 ```sh
 cd bootstrap
-cp terraform.tfvars.example terraform.tfvars     # then edit
-cp backend.tfbackend.example backend.tfbackend   # then edit
-terraform init -backend-config=backend.tfbackend
-terraform apply
+cp terraform.tfvars.example terraform.tfvars      # edit: your e-mail and your GitHub repository
+# The state bucket does not exist yet, so the first run uses local state:
+mv backend.tf backend.tf.off
+terraform init && terraform apply
+mv backend.tf.off backend.tf
+# Then move the state into the new bucket:
+echo "bucket = \"aws-starter-tfstate-$(aws sts get-caller-identity --query Account --output text)\"" > backend.tfbackend
+terraform init -migrate-state -backend-config=backend.tfbackend
 ```
 
-On an empty account the state bucket doesn't exist yet; the first-run steps are in the
-comment at the top of `backend.tf`.
+`terraform output github_deploy_role_arn` is the value of the GitHub secret `AWS_DEPLOY_ROLE_ARN`.
