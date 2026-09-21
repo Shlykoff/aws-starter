@@ -13,7 +13,8 @@ locals {
   table_name    = "log_archive"
 
   # What both saved queries read from. The table has one row per CloudWatch batch (the
-  # envelope); a log line is an element of its `logevents` array, which the queries unnest.
+  # envelope); a log line is an element of its `logevents` array, which the queries unnest into one
+  # column (a row with id, timestamp and message: Athena does not spread it over three).
   table_ref = "${local.database_name}.${local.table_name}"
 }
 
@@ -170,11 +171,11 @@ resource "aws_athena_named_query" "request_timeline" {
     --   (year = '2026' AND month = '08' AND day >= '30') OR (year = '2026' AND month = '09' AND day <= '02')
     WITH log_lines AS (
       SELECT
-        event_ts,
+        log_event."timestamp" AS event_ts,
         loggroup,
-        regexp_extract(event_message, '(\{.*\})', 1) AS body
+        regexp_extract(log_event.message, '(\{.*\})', 1) AS body
       FROM ${local.table_ref}
-      CROSS JOIN UNNEST(logevents) AS t (event_id, event_ts, event_message)
+      CROSS JOIN UNNEST(logevents) AS t (log_event)
       WHERE year = '2026' AND month = '09' AND day BETWEEN '20' AND '22'
         AND messagetype = 'DATA_MESSAGE'
     ),
@@ -226,10 +227,10 @@ resource "aws_athena_named_query" "failed_requests_per_day" {
     -- small; narrow it to a month, or to days, as it grows.
     WITH log_lines AS (
       SELECT
-        event_ts,
-        regexp_extract(event_message, '(\{.*\})', 1) AS body
+        log_event."timestamp" AS event_ts,
+        regexp_extract(log_event.message, '(\{.*\})', 1) AS body
       FROM ${local.table_ref}
-      CROSS JOIN UNNEST(logevents) AS t (event_id, event_ts, event_message)
+      CROSS JOIN UNNEST(logevents) AS t (log_event)
       WHERE year = '2026'
         AND messagetype = 'DATA_MESSAGE'
     ),
