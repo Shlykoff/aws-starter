@@ -28,6 +28,12 @@ variable "policy_statements" {
   }
 }
 
+variable "tracing" {
+  description = "Turn on X-Ray active tracing: Lambda then records a trace (start-up time, run time, errors) for the invocations X-Ray samples. Off for the functions the browser polls: see README, Decisions."
+  type        = bool
+  default     = false
+}
+
 variable "timeout" {
   description = "Timeout in seconds."
   type        = number

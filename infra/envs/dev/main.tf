@@ -4,18 +4,20 @@ locals {
   # One entry per API function; the routes are the ones in docs/api.md. Every function gets
   # TABLE_NAME and exactly one DynamoDB action on the table, the one its handler needs. An entry
   # may add `environment` and `policy_statements` of its own (get-exchange and receive-webhook
-  # do); the module block below treats a missing one as "none". `public = true` takes the
+  # do); the module block below treats a missing one as "none". `traced = true` turns on X-Ray
+  # active tracing (the functions that write; the ones the browser polls stay off, see README,
+  # Decisions); a missing `traced` means off. `public = true` takes the
   # route off the Cognito authorizer; a missing `public` means protected. One loop, not a
   # second module block, so that the routes, environments and permissions of all API
   # functions stay in this one map.
   functions = {
-    create-request = { route_key = "POST /requests", dynamodb_action = "dynamodb:PutItem" }
+    create-request = { route_key = "POST /requests", dynamodb_action = "dynamodb:PutItem", traced = true }
     list-requests  = { route_key = "GET /requests", dynamodb_action = "dynamodb:Query" }
     get-request    = { route_key = "GET /requests/{id}", dynamodb_action = "dynamodb:GetItem" }
 
     # Sends a failed request again: one conditional update (failed -> created). It needs no queue
     # permission: the change reaches the enqueuer through the table's stream, like a new request.
-    retry-request = { route_key = "POST /requests/{id}/retry", dynamodb_action = "dynamodb:UpdateItem" }
+    retry-request = { route_key = "POST /requests/{id}/retry", dynamodb_action = "dynamodb:UpdateItem", traced = true }
 
     # Returns the exchange record (the XML sent and the reply) of a request. The record is in
     # S3; the table is read only to check that the request belongs to the caller.
@@ -53,6 +55,7 @@ locals {
     receive-webhook = {
       route_key       = "POST ${local.webhook_path}"
       public          = true
+      traced          = true
       dynamodb_action = "dynamodb:UpdateItem"                                          # sets clientDecision on the request
       environment     = { WEBHOOK_TOKEN_PARAM = aws_ssm_parameter.webhook_token.name } # the name only, never the token
       policy_statements = [
@@ -95,6 +98,7 @@ module "function" {
 
   name       = "${local.prefix}-${each.key}"
   source_dir = "${var.backend_dist_dir}/${each.key}"
+  tracing    = lookup(each.value, "traced", false)
 
   environment = merge(
     local.common_environment,
@@ -212,6 +216,7 @@ module "enqueuer" {
   name       = "${local.prefix}-enqueuer"
   source_dir = "${var.backend_dist_dir}/enqueuer"
   timeout    = 10
+  tracing    = true
 
   environment = merge(local.common_environment, {
     TABLE_NAME = module.requests_table.name
@@ -352,6 +357,7 @@ module "delivery_worker" {
   name       = "${local.prefix}-delivery-worker"
   source_dir = "${var.backend_dist_dir}/delivery-worker"
   timeout    = local.worker_timeout_seconds
+  tracing    = true
 
   environment = merge(local.common_environment, {
     TABLE_NAME            = module.requests_table.name
