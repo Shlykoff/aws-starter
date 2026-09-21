@@ -177,11 +177,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 ## Optional: a public address through ngrok
 
-> **Not verified end to end.** It needs an ngrok account, and I could not test it without one.
-> What *was* checked: the image name and tag exist, its `http` command takes `host:port` and a
-> `--url` flag, its entry script reads `NGROK_AUTHTOKEN`, and its web page listens on `0.0.0.0:4040`
-> (all read from the image itself). What was *not*: a real tunnel, the exact domain format for a
-> free account, and how ngrok's warning page for browsers looks.
+> **Checked by hand with a free ngrok account:** the tunnel comes up, a public `POST` reaches the
+> service (`200`), a wrong key gets `401`, and the inbox refuses the demo password. It ran with an
+> address that ngrok assigned at random: without `--url` a free account gets a new one on every
+> start. **Not checked yet:** the `tunnel` profile with the account's fixed dev domain in
+> `NGROK_DOMAIN` (the address of your account is shown in the dashboard under *Domains*).
 
 For a sender that cannot reach your computer (for example the main system on AWS), the `tunnel`
 profile starts an ngrok container next to the service:
