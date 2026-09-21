@@ -36,6 +36,19 @@ data "aws_iam_policy_document" "permissions" {
     resources = ["${aws_cloudwatch_log_group.this.arn}:*"]
   }
 
+  # With active tracing Lambda writes the trace with this function's role. These two actions
+  # cannot be scoped: X-Ray has no resource-level permissions for them, so "*" is the only form
+  # (the AWS managed policy AWSXRayDaemonWriteAccess grants the same, and more). That is why this
+  # statement lives here and not in policy_statements, which refuses "*".
+  dynamic "statement" {
+    for_each = var.tracing ? [1] : []
+
+    content {
+      actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+      resources = ["*"]
+    }
+  }
+
   # What the function needs besides logging, resource-scoped by the caller.
   dynamic "statement" {
     for_each = var.policy_statements
@@ -82,6 +95,13 @@ resource "aws_lambda_function" "this" {
   # No VPC (reaching the internet from one needs a NAT Gateway, billed by the hour) and no
   # reserved concurrency (the account limit is 10 in total; reserving some would starve
   # the other functions).
+
+  # Active: Lambda records a trace of the invocation in X-Ray. The sampling is X-Ray's default and
+  # cannot be set for Lambda: one invocation a second and 5 % of the rest. PassThrough (the
+  # default) records nothing on its own.
+  tracing_config {
+    mode = var.tracing ? "Active" : "PassThrough"
+  }
 
   environment {
     variables = var.environment

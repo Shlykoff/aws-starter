@@ -330,7 +330,8 @@ checks ownership in the table before it touches S3).
 | `log-archiver` | CloudWatch Logs subscription (asynchronous) | | `s3:PutObject` on `logs/*` of the log archive bucket |
 | `get-exchange` | `GET /requests/{id}/exchange` | `GetItem` | `s3:GetObject` on `exchanges/*`; `s3:ListBucket` on the bucket (without it S3 answers a missing key with 403 instead of 404; a prefix condition would not help, a GetObject request carries no prefix) |
 
-- Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. Timeouts:
+- Runtime `nodejs24.x`, `arm64`, no VPC, handler `index.handler`, memory 256 MB. X-Ray active tracing on the
+  functions that write (see "Traces"). Timeouts:
   API functions, `receive-webhook`, `enqueuer` and `log-archiver` 10 s, `delivery-worker` 15 s.
 - The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
   event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
@@ -448,4 +449,29 @@ queried with Athena. The logs hold no personal data (the log guard, "Logs"), so 
 - **Cost**: the function's runs are inside the always-free Lambda allowance; S3 PUT requests, S3
   storage and Athena are billed by use, and at a few MB of logs a month the archive costs cents.
   Standard-IA is not used: it bills at least 128 KB per object and the objects here are tiny.
+
+## Traces
+
+X-Ray **active tracing** is on for the functions that write: `create-request`, `retry-request`,
+`receive-webhook`, the `enqueuer` and the `delivery-worker`. Lambda records a trace for the
+invocations X-Ray samples: how long the start-up took (`Initialization`, the cold start), how long the
+run took, errors and throttles. Nothing is added to the code of the functions, and there is no new
+dependency.
+
+- **Sampling**: X-Ray's default, and for Lambda it cannot be set: one invocation a second, then 5 % of
+  the rest.
+- **Not traced**: `list-requests`, `get-request` and `get-exchange`, which the browser polls (every 5 s
+  while a request is in progress, every 30 s on a details page that waits for a decision, with no time
+  limit: one forgotten tab makes about 86,000 calls a month, most of the 100,000 free traces), and
+  the `log-archiver`, which runs once per batch of anybody's log lines and would only add traces that
+  say nothing about a request.
+- **What a trace does not show**: the calls a function makes (DynamoDB, SQS, S3, the recipient) would
+  have to be instrumented in the code, and one request is not one trace: the HTTP API has no X-Ray
+  integration and the DynamoDB stream does not carry a trace, so creating, enqueuing and delivering a
+  request are separate traces. To follow one request across all of them, use its id in the logs
+  ("Logs").
+- **IAM**: the two write actions (`xray:PutTraceSegments`, `xray:PutTelemetryRecords`) on `*`: X-Ray
+  has no resource-level permissions for them. Only the traced functions get them.
+- **Cost**: inside the always-free X-Ray tier (100,000 traces recorded and 1,000,000 retrieved or
+  scanned a month).
 
