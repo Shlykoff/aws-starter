@@ -99,10 +99,14 @@ module "function" {
   name       = "${local.prefix}-${each.key}"
   source_dir = "${var.backend_dist_dir}/${each.key}"
   tracing    = lookup(each.value, "traced", false)
+  layers     = lookup(each.value, "traced", false) ? local.otel_layers : []
+  # 256 MB is the module's default; a traced function gets more (tracing.tf says why).
+  memory_size = lookup(each.value, "traced", false) ? local.traced_memory_mb : 256
 
   environment = merge(
     local.common_environment,
     { TABLE_NAME = module.requests_table.name },
+    lookup(each.value, "traced", false) ? local.otel_environment : {},
     lookup(each.value, "environment", {}),
   )
 
@@ -217,8 +221,11 @@ module "enqueuer" {
   source_dir = "${var.backend_dist_dir}/enqueuer"
   timeout    = 10
   tracing    = true
+  layers     = local.otel_layers
 
-  environment = merge(local.common_environment, {
+  memory_size = local.traced_memory_mb
+
+  environment = merge(local.common_environment, local.otel_environment, {
     TABLE_NAME = module.requests_table.name
     QUEUE_URL  = module.deliveries_queue.url
   })
@@ -358,8 +365,11 @@ module "delivery_worker" {
   source_dir = "${var.backend_dist_dir}/delivery-worker"
   timeout    = local.worker_timeout_seconds
   tracing    = true
+  layers     = local.otel_layers
 
-  environment = merge(local.common_environment, {
+  memory_size = local.traced_memory_mb
+
+  environment = merge(local.common_environment, local.otel_environment, {
     TABLE_NAME            = module.requests_table.name
     PARTNER_URL           = var.partner_url
     PARTNER_API_KEY_PARAM = aws_ssm_parameter.partner_api_key.name # the name only, never the key

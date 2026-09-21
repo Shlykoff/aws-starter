@@ -83,6 +83,8 @@ resource "aws_lambda_function" "this" {
   architectures = ["arm64"] # Graviton: cheaper per GB-second than x86
   handler       = "index.handler"
 
+  layers = var.layers
+
   filename         = data.archive_file.this.output_path
   source_code_hash = data.archive_file.this.output_base64sha256
 

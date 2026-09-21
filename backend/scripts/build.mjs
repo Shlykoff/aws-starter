@@ -7,7 +7,7 @@
 //   dist/<function>/schemas/*.xsd                the sender's own copy of contracts/xsd/
 //   dist/<function>/node_modules/xmllint-wasm/   the XSD validator, NOT bundled
 import { build } from "esbuild";
-import { cp, rm, stat } from "node:fs/promises";
+import { cp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 
@@ -35,6 +35,16 @@ const validatesXml = ["delivery-worker", "receive-webhook"];
 // (`external`), and the package is copied to dist/<function>/node_modules/, where Node
 // finds it by the usual lookup, next to index.mjs.
 const EXTERNAL_PACKAGE = "xmllint-wasm";
+
+// xmllint-wasm starts a new worker thread for every check. A worker thread obeys the NODE_OPTIONS
+// of its process, and the OpenTelemetry layer puts `--import` there (infra/envs/dev/tracing.tf):
+// every check would then start the whole tracing SDK again, about 0.3 s on a laptop and about a
+// second and 100 MB on Lambda (measured). The copy of the package below is changed so that its
+// worker starts with empty NODE_OPTIONS: one line, and the build fails if the line is not there
+// any more (a new version of the package), so the change cannot be lost silently.
+const WORKER_START = "new Worker(require('path').resolve(__dirname, './xmllint-node.js'))";
+const WORKER_START_WITHOUT_LAYER =
+  "new Worker(require('path').resolve(__dirname, './xmllint-node.js'), { env: { ...process.env, NODE_OPTIONS: '' } })";
 
 await rm("dist", { recursive: true, force: true });
 
@@ -77,6 +87,13 @@ for (const name of validatesXml) {
   // The whole package: it is small (under 1 MB), and a copy of the folder cannot miss a file
   // that a new version of the package starts to need.
   await cp(xmllintDirectory, `dist/${name}/node_modules/${EXTERNAL_PACKAGE}`, { recursive: true });
+
+  const entry = `dist/${name}/node_modules/${EXTERNAL_PACKAGE}/index-node.js`;
+  const source = await readFile(entry, "utf8");
+  if (!source.includes(WORKER_START)) {
+    throw new Error(`${EXTERNAL_PACKAGE} no longer starts its worker with: ${WORKER_START}. Update WORKER_START in scripts/build.mjs.`);
+  }
+  await writeFile(entry, source.replace(WORKER_START, WORKER_START_WITHOUT_LAYER));
 }
 
 for (const name of functions) {
