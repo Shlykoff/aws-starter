@@ -347,3 +347,23 @@ checks ownership in the table before it touches S3).
   of the contract.
 - Build output: `backend/dist/<function>/index.mjs` (plus a source map). Terraform zips each
   directory with `archive_file`; the build does not produce zips.
+
+## Logs
+
+- **Where**: CloudWatch Logs, nowhere else. One log group per Lambda (`/aws/lambda/<function>`) and one
+  for the API's access log (`/aws/apigateway/<project>-<env>-api`), all kept 14 days. The access log
+  format has no client IP, user agent or token claims. Nothing is exported. (The recipient,
+  `partner-sim`, writes to the standard output of its container.)
+- **One JSON object per line**: `level`, `message` and fields. The `message` is a fixed sentence of
+  at most 120 characters, on one line; data goes in fields.
+- **Which fields**: only those on the list in `backend/src/lib/log-fields.ts`, each with a shape for
+  its value (an id, a word from a closed list, a number, a boolean, a list of validator findings,
+  a route template). Anything else is written as `"[unlisted]"` (an unknown field) or `"[rejected]"`
+  (a known field with a value of the wrong shape): the name stays, the value never reaches the
+  log. There are no free-text fields except the message and the stack of an error, and those have
+  every quoted piece replaced (`'...'`, `"..."`) and a length cap, because parsers quote the value
+  that made them fail. Nested objects are never written.
+- **In tests the guard throws** (`LOG_STRICT=1` in `vitest.config.ts`): a log call it would have to change
+  fails the test. In Lambda it never throws, because logging must not break a handler.
+- **Never in a log**: the text of a request, the partner's name, a reason, the XML, a token, a
+  signature, a header, an event. A new field is added to the list in a reviewed diff.

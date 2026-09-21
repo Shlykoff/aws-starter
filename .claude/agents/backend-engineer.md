@@ -30,9 +30,10 @@ it in your report instead of editing Terraform.
 - SQS consumers are idempotent (safe to receive the same message twice), return
   `batchItemFailures` for partial failures, and don't swallow errors that belong in
   the DLQ. For FIFO, pick `MessageGroupId` deliberately and say why in a comment.
-- Logging: structured JSON with a correlation id. Sensitive fields (names, dates of
-  birth, addresses, tokens, and any other personal data, even though the data here is fake) go
-  through one redaction helper that has tests. Never log a whole event body.
+- Logging: structured JSON with a correlation id, through `src/lib/logger.ts`. Only fields on
+  the list in `src/lib/log-fields.ts` are written, each with a shape for its value (see
+  docs/api.md, "Logs"); a new field is added there, with its shape and a test. Never a name, a
+  text, a reason, a token, an event body or an error object as a whole (`describeError` for errors).
 - Errors: typed domain errors, mapped to HTTP status codes in one place.
 - DynamoDB: access patterns first. Document every key and index in a comment above
   the repository that uses it.

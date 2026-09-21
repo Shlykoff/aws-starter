@@ -288,7 +288,7 @@ describe("enqueuer: records it must ignore", () => {
     await run(broken);
 
     const skipped = logs.entries().find((line) => line.message === "Skipping a malformed stream record");
-    expect(skipped).toMatchObject({ level: "error", sequenceNumber: "200", reason: "invalid NewImage fields: partner" });
+    expect(skipped).toMatchObject({ level: "error", sequenceNumber: "200", reason: "invalid_image_fields", invalidFields: ["partner"] });
     expect(logs.lines.join("\n")).not.toContain("Secret subject");
   });
 });
