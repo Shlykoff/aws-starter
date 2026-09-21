@@ -321,7 +321,6 @@ Each with the alternative that was rejected.
   a retention limit, until you remove the volume.
 - One process, no rate limiting, no TLS of its own, no request timeout for slow uploads. Do not
   put it on the internet without the tunnel's TLS in front, and never with the demo values.
-- Authentication is one shared API key and one shared inbox login. There are no client
-  certificates (the contract allows them later).
+- Authentication is one shared API key and one shared inbox login.
 - The two rules (`[reject]`, `[fail]`) are the only "business logic".
 - Only x86-64 was built and run here.

@@ -91,7 +91,7 @@ Where each outcome ends:
   anybody, one retried five times until `failed` (8 minutes), and one that waited while the
   recipient was down and was delivered on the second attempt after it came back. The logs of
   those runs contain no message text.
-  Still to do: a full review of the logs for personal data, optional mTLS.
+  Still to do: a full review of the logs for personal data.
 
 ## Try it
 
@@ -266,8 +266,6 @@ Written down as they are made; each stage adds its own.
   Rejected: `fast-xml-parser` (six dependencies of its own).
 - **Idempotency across the two systems**: the `MessageId` of a message is the request id. A
   repeated delivery gets the stored answer back, so a retry after a crash cannot deliver twice.
-- **mTLS is not part of this stack.** The tunnel ends TLS at ngrok, so a client certificate could
-  not reach the recipient; it would be an optional local Docker profile.
 
 ## Limits
 

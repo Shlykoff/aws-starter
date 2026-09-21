@@ -7,8 +7,7 @@ laptop. The sender knows two things about it: a base URL and an API key.
 ## Authentication
 
 Every request carries the header `X-API-Key: <key>`. The key is issued by the partner and kept
-by the sender as a secret. A missing or wrong key gets `401` and no body. (Client certificates
-may be added later as a second, optional mechanism; nothing here depends on them.)
+by the sender as a secret. A missing or wrong key gets `401` and no body.
 
 ## `POST /v1/submissions`
 
