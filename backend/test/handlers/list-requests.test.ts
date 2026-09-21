@@ -4,7 +4,7 @@ import { ulid } from "ulid";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { handler as createHandler } from "../../src/handlers/create-request";
 import { handler as listHandler } from "../../src/handlers/list-requests";
-import { createRequestEvent, eventWithoutSub, lambdaContext, listRequestsEvent } from "../helpers/events";
+import { CORS_HEADERS, createRequestEvent, eventWithoutSub, lambdaContext, listRequestsEvent } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -46,7 +46,7 @@ describe("GET /requests", () => {
     const response = await list();
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers).toEqual({ "content-type": "application/json" });
+    expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
     expect(json(response)).toEqual({ items: [] });
   });
 
@@ -109,6 +109,7 @@ describe("GET /requests", () => {
     const response = await listHandler(eventWithoutSub("GET /requests", "empty-claims"), lambdaContext());
 
     expect(response.statusCode).toBe(500);
+    expect(response.headers).toMatchObject(CORS_HEADERS);
     expect(json(response)).toEqual({ error: { code: "internal_error", message: "Internal server error" } });
     expect(ddb.calls()).toHaveLength(0);
   });

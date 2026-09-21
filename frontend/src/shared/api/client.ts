@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { ApiError } from "./errors";
+import { createTraceHeaderValue } from "./trace-header";
 
-// Lambda timeout is 10 s and API Gateway's is 30 s; if nothing came back after 15 s the
+// Lambda timeout is 10 s and API Gateway's is 29 s; if nothing came back after 15 s the
 // user is better served by an error message than by a spinner that never ends.
 const REQUEST_TIMEOUT_MS = 15_000;
 
@@ -17,7 +18,8 @@ const errorBodySchema = z.object({
 });
 
 export interface ApiClientOptions {
-  // Base URL without a trailing slash, e.g. https://xxxx.execute-api.eu-north-1.amazonaws.com
+  // Base URL without a trailing slash, including the stage, e.g.
+  // https://xxxx.execute-api.eu-north-1.amazonaws.com/v1 (paths are appended to it).
   baseUrl: string;
   // Returns the current ACCESS token (not the id token), or null when there is none.
   // A function, not a string, so a token renewed in the background is picked up.
@@ -36,6 +38,9 @@ export interface ApiClient {
   // `body` is left out for a POST that carries no data (POST /requests/{id}/retry).
   post(path: string, body?: unknown): Promise<unknown>;
 }
+
+// Methods that only read; every other method changes something (see send).
+const READ_ONLY_METHODS: readonly string[] = ["GET", "HEAD"];
 
 export function createApiClient(options: ApiClientOptions): ApiClient {
   const { baseUrl, getAccessToken, onUnauthorized } = options;
@@ -56,9 +61,14 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
 
     const headers: Record<string, string> = {
       Accept: "application/json",
-      Authorization: `Bearer ${token}`,
+      // The raw token, no "Bearer " prefix: the REST API Cognito authorizer reads the token
+      // straight from this header, and its documentation shows no prefix.
+      Authorization: token,
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
+    // A request that changes something is a user action: its X-Ray trace starts here, with an
+    // id made in the browser and a fresh one for every request. Reads do not get one.
+    if (!READ_ONLY_METHODS.includes(method)) headers["X-Amzn-Trace-Id"] = createTraceHeaderValue();
 
     let response: Response;
     try {

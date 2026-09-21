@@ -8,9 +8,9 @@ output "client_id" {
   value       = aws_cognito_user_pool_client.web.id
 }
 
-output "issuer" {
-  description = "Token issuer (iss claim); the API Gateway JWT authorizer checks it."
-  value       = "https://${aws_cognito_user_pool.this.endpoint}" # endpoint is cognito-idp.<region>.amazonaws.com/<pool id>
+output "user_pool_arn" {
+  description = "User pool ARN; the API Gateway Cognito authorizer takes the pool by ARN."
+  value       = aws_cognito_user_pool.this.arn
 }
 
 output "hosted_ui_url" {

@@ -2,6 +2,7 @@ import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApiEvent } from "../../src/lib/http";
 import type { ApiKeyProvider } from "../../src/repositories/api-key-provider";
 import { TOKENS } from "../../src/tokens";
 import { expected, fixture } from "../helpers/contracts";
@@ -14,9 +15,11 @@ import {
   NOW_SECONDS,
   REQUEST_ID,
   WEBHOOK_TOKEN,
+  answer,
   eventXml,
   sign,
   webhookEvent,
+  withHeader,
 } from "../helpers/webhook";
 
 // The real handler, service, adapters, XSD validator (libxml2 as WebAssembly, the real schema
@@ -90,7 +93,7 @@ describe("receive-webhook: an event that is applied", () => {
 
     const response = await send(webhookEvent({ body: eventXml({ decision: "Declined", reason: "Out of stock" }) }));
 
-    expect(response).toEqual({ statusCode: 200 }); // no body, no headers
+    expect(response).toEqual(answer(200)); // no body; only the CORS header
     expect(stored()).toMatchObject({
       id: REQUEST_ID,
       subject: "Order 42",
@@ -124,13 +127,43 @@ describe("receive-webhook: an event that is applied", () => {
     expect(stored()?.clientDecision).not.toHaveProperty("reason");
   });
 
-  it("reads the headers whatever their case", async () => {
+  // A REST API hands the header names over as the sender wrote them, so each of these is a
+  // sender that could exist (Title-Case, an HTTP/2 library that writes lower case, shouting, a mix).
+  it.each([
+    ["Title-Case", ["X-Webhook-Timestamp", "X-Webhook-Signature", "Content-Type"]],
+    ["lower case", ["x-webhook-timestamp", "x-webhook-signature", "content-type"]],
+    ["upper case", ["X-WEBHOOK-TIMESTAMP", "X-WEBHOOK-SIGNATURE", "CONTENT-TYPE"]],
+    ["mixed case", ["x-Webhook-TIMESTAMP", "X-webhook-Signature", "cOnTeNt-TyPe"]],
+  ])("reads the headers in %s", async (_label, [timestampName, signatureName, contentTypeName]) => {
     seedRequest();
     const event = webhookEvent({ body: eventXml() });
-    const upper = Object.fromEntries(Object.entries(event.headers).map(([name, value]) => [name.toUpperCase(), value]));
+    const renamed: ApiEvent = {
+      ...event,
+      headers: {
+        [timestampName ?? ""]: event.headers["X-Webhook-Timestamp"],
+        [signatureName ?? ""]: event.headers["X-Webhook-Signature"],
+        [contentTypeName ?? ""]: event.headers["Content-Type"],
+      },
+    };
 
-    expect(await send({ ...event, headers: upper })).toEqual({ statusCode: 200 });
+    expect(await send(renamed)).toEqual(answer(200));
     expect(stored()?.clientDecision).toBeDefined();
+  });
+
+  it("does not take a header of another name that only contains the right one", async () => {
+    seedRequest();
+    const event = webhookEvent({ body: eventXml(), signature: null, headers: { "Not-X-Webhook-Signature": "v1=" + "0".repeat(64) } });
+
+    expect(await send(event)).toEqual(answer(401));
+  });
+
+  it("answers 401, not a crash, when `headers` is null", async () => {
+    seedRequest();
+
+    expect(await send(webhookEvent({ body: eventXml(), headers: null }))).toEqual(answer(401));
+
+    expect(ssmReads()).toBe(0);
+    expect(tableCalls()).toBe(0);
   });
 
   it.each(["created", "queued", "sent", "failed", "rejected"])(
@@ -138,7 +171,7 @@ describe("receive-webhook: an event that is applied", () => {
     async (status) => {
       seedRequest({ status });
 
-      expect(await send()).toEqual({ statusCode: 200 });
+      expect(await send()).toEqual(answer(200));
 
       expect(stored()).toMatchObject({ status, clientDecision: { decision: "Approved" } });
     },
@@ -154,7 +187,7 @@ describe("receive-webhook: an event that is applied", () => {
   it("finds the request whoever owns it", async () => {
     seedRequest({}, "user-b");
 
-    expect(await send()).toEqual({ statusCode: 200 });
+    expect(await send()).toEqual(answer(200));
 
     expect(table.items().find((item) => item.pk === "USER#user-b")?.clientDecision).toBeDefined();
   });
@@ -175,7 +208,7 @@ describe("receive-webhook: several events for one request", () => {
 
     const second = await send(webhookEvent({ body: earlier, timestamp: String(NOW_SECONDS + 100) }));
 
-    expect(second).toEqual({ statusCode: 200 });
+    expect(second).toEqual(answer(200));
     expect(stored()).toEqual(first); // not even `receivedAt` moved
     expect(handledLines().map((entry) => entry.outcome)).toEqual(["applied", "duplicate"]);
   });
@@ -184,7 +217,7 @@ describe("receive-webhook: several events for one request", () => {
     seedRequest();
     await send(body(earlier));
 
-    expect(await send(body(later))).toEqual({ statusCode: 200 });
+    expect(await send(body(later))).toEqual(answer(200));
 
     expect(stored()).toMatchObject({
       clientDecision: { decision: "Declined", reason: "changed my mind", at: "2026-09-21T11:00:00.000Z", eventId: E2 },
@@ -196,7 +229,7 @@ describe("receive-webhook: several events for one request", () => {
     seedRequest();
     await send(body(later));
 
-    expect(await send(body(earlier))).toEqual({ statusCode: 200 });
+    expect(await send(body(earlier))).toEqual(answer(200));
 
     expect(decisionOf()).toMatchObject({ eventId: E2, decision: "Declined" });
     expect(handledLines().map((entry) => entry.outcome)).toEqual(["applied", "ignored"]);
@@ -209,7 +242,7 @@ describe("receive-webhook: several events for one request", () => {
 
     // A sender that breaks the contract and re-times an event it already sent.
     const retimed = eventXml({ eventId: E1, occurredAt: "2026-09-21T12:00:00Z", decision: "Declined" });
-    expect(await send(body(retimed))).toEqual({ statusCode: 200 });
+    expect(await send(body(retimed))).toEqual(answer(200));
 
     expect(stored()).toEqual(first);
     expect(handledLines().map((entry) => entry.outcome)).toEqual(["applied", "duplicate"]);
@@ -219,7 +252,7 @@ describe("receive-webhook: several events for one request", () => {
     seedRequest();
     await send(body(earlier));
 
-    expect(await send(body(eventXml({ eventId: E2, occurredAt: "2026-09-21T10:00:00Z", decision: "Declined" })))).toEqual({ statusCode: 200 });
+    expect(await send(body(eventXml({ eventId: E2, occurredAt: "2026-09-21T10:00:00Z", decision: "Declined" })))).toEqual(answer(200));
 
     expect(decisionOf()).toMatchObject({ eventId: E1, decision: "Approved" });
   });
@@ -240,7 +273,7 @@ describe("receive-webhook: several events for one request", () => {
 
     const answers = await Promise.all([send(body(later)), send(body(earlier))]);
 
-    expect(answers).toEqual([{ statusCode: 200 }, { statusCode: 200 }]);
+    expect(answers).toEqual([answer(200), answer(200)]);
     expect(decisionOf()).toMatchObject({ eventId: E2 });
   });
 
@@ -268,7 +301,7 @@ describe("receive-webhook: several events for one request", () => {
 
 describe("receive-webhook: a request that does not exist", () => {
   it("is answered 404, and nothing is created", async () => {
-    expect(await send()).toEqual({ statusCode: 404 });
+    expect(await send()).toEqual(answer(404));
 
     expect(table.items()).toEqual([]);
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
@@ -278,7 +311,7 @@ describe("receive-webhook: a request that does not exist", () => {
     // The index is eventually consistent: it can answer with a key whose item does not exist.
     ddb.on(QueryCommand, { IndexName: "by-request-id" }).resolves({ Items: [{ pk: "USER#gone", sk: `REQ#${REQUEST_ID}` }] });
 
-    expect(await send()).toEqual({ statusCode: 404 });
+    expect(await send()).toEqual(answer(404));
 
     // The update DID run, and its guard (attribute_exists) is what stopped it from creating the item.
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
@@ -289,7 +322,7 @@ describe("receive-webhook: a request that does not exist", () => {
     seedRequest({}, "user-a");
     const other = "01M30JDSMHY8CRX59V35WV731T";
 
-    expect(await send(body(eventXml({ relatesTo: other })))).toEqual({ statusCode: 404 });
+    expect(await send(body(eventXml({ relatesTo: other })))).toEqual(answer(404));
 
     expect(stored()?.clientDecision).toBeUndefined();
   });
@@ -303,7 +336,7 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
   it("413 for a body over 65 536 bytes, even when the signature and the media type are wrong too", async () => {
     const event = webhookEvent({ body: bytes(65_537), token: "wrong", contentType: "text/plain" });
 
-    expect(await send(event)).toEqual({ statusCode: 413 });
+    expect(await send(event)).toEqual(answer(413));
     expect(ssmReads()).toBe(0);
     expect(tableCalls()).toBe(0);
   });
@@ -311,17 +344,17 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
   it("413 counts the DECODED bytes of a base64 body, not the characters of its text", async () => {
     seedRequest();
     // 65 537 decoded bytes.
-    expect(await send(webhookEvent({ body: bytes(65_537), isBase64Encoded: true }))).toEqual({ statusCode: 413 });
+    expect(await send(webhookEvent({ body: bytes(65_537), isBase64Encoded: true }))).toEqual(answer(413));
     // 60 000 decoded bytes are about 80 000 characters of base64: over the limit as text, under it as bytes.
     const event = webhookEvent({ body: bytes(60_000), isBase64Encoded: true });
     expect((event.body ?? "").length).toBeGreaterThan(65_536);
-    expect(await send(event)).toEqual({ statusCode: 200 });
+    expect(await send(event)).toEqual(answer(200));
   });
 
   it("accepts a body of exactly 65 536 bytes", async () => {
     seedRequest();
 
-    expect(await send(webhookEvent({ body: bytes(65_536) }))).toEqual({ statusCode: 200 });
+    expect(await send(webhookEvent({ body: bytes(65_536) }))).toEqual(answer(200));
   });
 
   it.each([
@@ -335,7 +368,7 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
   ])("401 for %s, without asking SSM for the token (and before the media type)", async (_label, event) => {
     seedRequest();
 
-    expect(await send({ ...event, headers: { ...event.headers, "content-type": "text/plain" } })).toEqual({ statusCode: 401 });
+    expect(await send(withHeader(event, "Content-Type", "text/plain"))).toEqual(answer(401));
 
     expect(ssmReads()).toBe(0);
     expect(tableCalls()).toBe(0);
@@ -348,7 +381,7 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
   ])("401 for %s: the token is read, and nothing after it happens", async (_label, event) => {
     seedRequest();
 
-    expect(await send({ ...event, headers: { ...event.headers, "content-type": "text/plain" } })).toEqual({ statusCode: 401 });
+    expect(await send(withHeader(event, "Content-Type", "text/plain"))).toEqual(answer(401));
 
     expect(ssmReads()).toBe(1);
     expect(tableCalls()).toBe(0);
@@ -356,11 +389,11 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
   });
 
   it("401 for a request without a body, unless the signature covers the empty body", async () => {
-    const signedForSomethingElse = { ...webhookEvent({ body: eventXml() }) };
-    delete signedForSomethingElse.body;
+    // Signed over a document, then the body is gone (a REST API sends `body: null`).
+    const signedForSomethingElse: ApiEvent = { ...webhookEvent({ body: eventXml() }), body: null };
 
-    expect(await send(signedForSomethingElse)).toEqual({ statusCode: 401 });
-    expect(await send(webhookEvent())).toEqual({ statusCode: 400 }); // signed over nothing: it is the XML that is missing
+    expect(await send(signedForSomethingElse)).toEqual(answer(401));
+    expect(await send(webhookEvent())).toEqual(answer(400)); // signed over nothing: it is the XML that is missing
   });
 
   it("does not forget the token when a signature is wrong, so junk cannot force a read of SSM per call", async () => {
@@ -378,18 +411,18 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
     async (contentType) => {
       seedRequest();
 
-      expect(await send(webhookEvent({ body: eventXml(), contentType }))).toEqual({ statusCode: 415 });
+      expect(await send(webhookEvent({ body: eventXml(), contentType }))).toEqual(answer(415));
 
       expect(tableCalls()).toBe(0);
     },
   );
 
   it("415 when there is no Content-Type header at all", async () => {
-    expect(await send(webhookEvent({ body: eventXml(), contentType: null }))).toEqual({ statusCode: 415 });
+    expect(await send(webhookEvent({ body: eventXml(), contentType: null }))).toEqual(answer(415));
   });
 
   it("415 comes before 400: a wrong media type with a broken document", async () => {
-    expect(await send(webhookEvent({ body: "not xml", contentType: "text/plain" }))).toEqual({ statusCode: 415 });
+    expect(await send(webhookEvent({ body: "not xml", contentType: "text/plain" }))).toEqual(answer(415));
   });
 
   it.each(["application/xml", "application/xml; charset=utf-8", "Application/XML;charset=UTF-8", "application/xml ; charset=\"utf-8\""])(
@@ -397,16 +430,16 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
     async (contentType) => {
       seedRequest();
 
-      expect(await send(webhookEvent({ body: eventXml(), contentType }))).toEqual({ statusCode: 200 });
+      expect(await send(webhookEvent({ body: eventXml(), contentType }))).toEqual(answer(200));
     },
   );
 
   it("400 comes before 422: a document that is not well-formed is not looked at as a schema violation", async () => {
-    expect(await send(body("<DecisionEvent><Decision>Maybe</DecisionEvent>"))).toEqual({ statusCode: 400 });
+    expect(await send(body("<DecisionEvent><Decision>Maybe</DecisionEvent>"))).toEqual(answer(400));
   });
 
   it("422 comes before 404: an invalid event for a request that does not exist", async () => {
-    expect(await send(body(eventXml({ decision: "Maybe", relatesTo: "01M30JDSMHY8CRX59V35WV731T" })))).toEqual({ statusCode: 422 });
+    expect(await send(body(eventXml({ decision: "Maybe", relatesTo: "01M30JDSMHY8CRX59V35WV731T" })))).toEqual(answer(422));
     expect(tableCalls()).toBe(0);
   });
 
@@ -414,20 +447,20 @@ describe("receive-webhook: the answers, in the order of the contract", () => {
     const invalid = Buffer.concat([Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><DecisionEvent xmlns="urn:aws-starter:event:v1" version="1">`), Buffer.from([0xff, 0xfe, 0xfd]), Buffer.from("</DecisionEvent>")]);
 
     // Base64, because a plain string could not carry these bytes.
-    expect(await send(webhookEvent({ body: invalid, isBase64Encoded: true }))).toEqual({ statusCode: 400 });
+    expect(await send(webhookEvent({ body: invalid, isBase64Encoded: true }))).toEqual(answer(400));
   });
 
   it("200 for a document that starts with a BOM", async () => {
     seedRequest();
 
-    expect(await send(webhookEvent({ body: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(eventXml())]), isBase64Encoded: true }))).toEqual({ statusCode: 200 });
+    expect(await send(webhookEvent({ body: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(eventXml())]), isBase64Encoded: true }))).toEqual(answer(200));
     expect(stored()?.clientDecision).toBeDefined();
   });
 
   it("422 for an OccurredAt that the schema allows and JavaScript cannot read (a five-digit year)", async () => {
     seedRequest();
 
-    expect(await send(body(eventXml({ occurredAt: "12026-09-21T10:15:32Z" })))).toEqual({ statusCode: 422 });
+    expect(await send(body(eventXml({ occurredAt: "12026-09-21T10:15:32Z" })))).toEqual(answer(422));
 
     expect(stored()?.clientDecision).toBeUndefined();
   });
@@ -443,7 +476,7 @@ describe("receive-webhook: the fixtures of the contract", () => {
 
     const response = await send(webhookEvent({ body: fixture("event", name) }));
 
-    expect(response).toEqual({ statusCode: STATUS[want] });
+    expect(response).toEqual(answer(STATUS[want] ?? 0));
     // Only a valid event reaches the request.
     expect(Boolean(stored()?.clientDecision)).toBe(want === "valid");
   });
@@ -469,7 +502,7 @@ describe("receive-webhook: isBase64Encoded", () => {
   it("decodes a base64 body before it checks the signature", async () => {
     seedRequest();
 
-    expect(await send(webhookEvent({ body: eventXml({ reason: "Нет в наличии" }), isBase64Encoded: true }))).toEqual({ statusCode: 200 });
+    expect(await send(webhookEvent({ body: eventXml({ reason: "Нет в наличии" }), isBase64Encoded: true }))).toEqual(answer(200));
 
     expect(stored()?.clientDecision).toMatchObject({ reason: "Нет в наличии" });
   });
@@ -477,20 +510,20 @@ describe("receive-webhook: isBase64Encoded", () => {
   it("takes a body that is not base64 as UTF-8 text", async () => {
     seedRequest();
 
-    expect(await send(webhookEvent({ body: eventXml({ reason: "Нет в наличии" }), isBase64Encoded: false }))).toEqual({ statusCode: 200 });
+    expect(await send(webhookEvent({ body: eventXml({ reason: "Нет в наличии" }), isBase64Encoded: false }))).toEqual(answer(200));
   });
 
   it("honours the flag: base64 text that is NOT flagged is a different body, so the signature fails", async () => {
     const flagged = webhookEvent({ body: eventXml(), isBase64Encoded: true });
 
-    expect(await send({ ...flagged, isBase64Encoded: false })).toEqual({ statusCode: 401 });
+    expect(await send({ ...flagged, isBase64Encoded: false })).toEqual(answer(401));
   });
 
   it("does not try to decode a text body as base64", async () => {
     // The same bytes, sent as text with the flag set: base64 decoding would turn them into rubbish.
     const plain = webhookEvent({ body: eventXml() });
 
-    expect(await send({ ...plain, isBase64Encoded: true })).toEqual({ statusCode: 401 });
+    expect(await send({ ...plain, isBase64Encoded: true })).toEqual(answer(401));
   });
 });
 
@@ -519,7 +552,7 @@ describe("receive-webhook: failures on our side", () => {
 
     const response = await send();
 
-    expect(response).toEqual({ statusCode: 500 });
+    expect(response).toEqual(answer(500));
     expect(logs.entries().at(-1)).toMatchObject({ level: "error", message: "Webhook failed", outcome: "error", errorName: "Error" });
     expect(stored()?.clientDecision).toBeUndefined();
   });
@@ -528,8 +561,8 @@ describe("receive-webhook: failures on our side", () => {
     seedRequest();
     ssm.on(GetParameterCommand).rejectsOnce(new Error("SSM throttled")).resolves({ Parameter: { Value: WEBHOOK_TOKEN } });
 
-    expect(await send()).toEqual({ statusCode: 500 });
-    expect(await send()).toEqual({ statusCode: 200 });
+    expect(await send()).toEqual(answer(500));
+    expect(await send()).toEqual(answer(200));
 
     expect(ssmReads()).toBe(2);
   });
@@ -614,7 +647,7 @@ describe("receive-webhook: logging", () => {
     // A signed event; `change` may break one thing after signing.
     const signed = (xml: string | Buffer, extra: Parameters<typeof webhookEvent>[0] = {}) => {
       const event = webhookEvent({ body: xml, token: TOKEN, ...extra });
-      signatures.push(event.headers["x-webhook-signature"] ?? "");
+      signatures.push(event.headers["X-Webhook-Signature"] ?? "");
       return event;
     };
     const events = [
@@ -625,8 +658,8 @@ describe("receive-webhook: logging", () => {
       // 413
       signed(`${CANARY}`.repeat(10_000)),
       // 401: junk headers, a wrong signature, a stale timestamp
-      { ...signed(validCanary), headers: { ...signed(validCanary).headers, "x-webhook-timestamp": `${CANARY}-ts` } },
-      { ...signed(validCanary), headers: { ...signed(validCanary).headers, "x-webhook-signature": `v1=${CANARY}` } },
+      withHeader(signed(validCanary), "X-Webhook-Timestamp", `${CANARY}-ts`),
+      withHeader(signed(validCanary), "X-Webhook-Signature", `v1=${CANARY}`),
       signed(validCanary, { token: `other-${CANARY}` }),
       signed(validCanary, { timestamp: "1" }),
       signed(validCanary, { signature: null }),

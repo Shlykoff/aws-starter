@@ -49,7 +49,7 @@ locals {
     # caller is another system, not a signed-in user, so it has no Cognito token. Instead the
     # function checks an HMAC signature (made with the shared token in SSM) before it does
     # anything else, and the route is throttled: the stage's default limits apply as to every
-    # route, and the http-api module gives a public route a lower limit of its own.
+    # route, and the rest-api module gives a public route a lower limit of its own.
     # Memory 256 MB (it also covers the WASM schema check) and the 10 s timeout are the
     # lambda-function module's defaults.
     receive-webhook = {
@@ -80,8 +80,8 @@ locals {
   webhook_path = "/webhooks/partner"
 
   # Origins the browser app runs on: Vite's dev server always, CloudFront when it exists.
-  # They feed both CORS (API) and the login redirects (Cognito). The for-expression is
-  # empty when the static site is switched off.
+  # They feed the login redirects (Cognito); the API's CORS is `*` (see the rest-api module).
+  # The for-expression is empty when the static site is switched off.
   site_origins = [for site in module.static_site : "https://${site.domain_name}"]
   web_origins  = concat(["http://localhost:5173"], local.site_origins)
 }
@@ -128,12 +128,10 @@ module "cognito" {
 }
 
 module "api" {
-  source = "../../modules/http-api"
+  source = "../../modules/rest-api"
 
-  name            = "${local.prefix}-api"
-  allowed_origins = local.web_origins
-  jwt_issuer      = module.cognito.issuer
-  jwt_audience    = [module.cognito.client_id]
+  name                  = "${local.prefix}-api"
+  cognito_user_pool_arn = module.cognito.user_pool_arn
 
   routes = {
     for name, fn in local.functions : name => {

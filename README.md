@@ -17,7 +17,7 @@ All data is fake. The domain is deliberately neutral. It runs inside the AWS Fre
 ```mermaid
 flowchart LR
   subgraph AWS["AWS account: infra/, backend/, frontend/"]
-    B["Browser: React app,<br/>Cognito login"] -->|"HTTPS + JWT"| API["API Gateway<br/>HTTP API"]
+    B["Browser: React app,<br/>Cognito login"] -->|"HTTPS + Cognito token"| API["API Gateway<br/>REST API"]
     API --> F["Lambda: create, list, get,<br/>retry, get-exchange"]
     F --> T[("DynamoDB<br/>requests")]
     T -->|"stream"| E["Lambda: enqueuer"]
@@ -28,7 +28,7 @@ flowchart LR
     W --> N["SNS: e-mail when a<br/>request fails"]
     W -.->|"reads the key"| K[("SSM: API key")]
     F -.->|"reads records"| S
-    API -->|"public route, no JWT"| H["Lambda: receive-webhook"]
+    API -->|"public route, no token"| H["Lambda: receive-webhook"]
     H --> T
   end
   subgraph REC["Recipient: partner-sim/, a separate system"]
@@ -136,23 +136,6 @@ nothing waits for it and nothing expires.
   log lines, two durations written by the worker), 10 alarms, one dashboard and six saved Logs
   Insights queries, all inside the free tier. Checked on AWS: after a live delivery the two duration
   metrics held exactly the values of the log line (6837 ms until sent, 407 ms for the recipient's
-  answer) and the sent counter was 1; six calls with a wrong signature moved the
-  `webhook-unauthorized` alarm to ALARM within a minute (the metric was 6 against a threshold of 5);
-  all six saved queries run.
-- [x] Stage 10: a long-term log archive: every log group is copied to S3 by a small Lambda within
-  seconds, kept 13 months and queried with Athena. Checked on AWS: a live delivery loop produced 13
-  objects (78 log events, 10 KB) from the six function log groups and the API access log, each one JSON
-  line; the reason texts sent in that loop are nowhere in them; Athena returned the timeline of the
-  test request (the same six events as Logs Insights) and scanned 10 KB. Two things were found only
-  by running it: Firehose is refused by the free account plan (replaced by the Lambda), and the saved
-  queries did not run (Athena gives an unnested log event as one column, not three). Not seen yet: a
-  request that failed after the archive started, so the query "failed requests per day" has run but
-  returned no rows.
-
-- [x] Stage 9: metrics, alarms and a dashboard for the delivery: 8 custom metrics (six counted from the
-  log lines, two durations written by the worker), 10 alarms, one dashboard and six saved Logs
-  Insights queries, all inside the free tier. Checked on AWS: after a live delivery the two duration
-  metrics held exactly the values of the log line (6837 ms until sent, 407 ms for the recipient's
   answer); six calls with a wrong signature moved the `webhook-unauthorized` alarm to ALARM within a
   minute and the notification mail arrived; all six saved queries run.
 - [x] Stage 10: a long-term log archive: every log group is copied to S3 by a small Lambda within
@@ -166,13 +149,20 @@ nothing waits for it and nothing expires.
   decision events): a single trace of 30 spans holds `create request`, `enqueue request` (from the
   enqueuer), `deliver request` (from the worker) with each of its calls and their times (DynamoDB, the
   XML checks about 0.5 and 0.7 s, SSM, the recipient 0.3 s, S3, SNS) and the three `record decision`
-  spans (from the webhook); all six request events carry that trace's id. Not in it, on purpose: the
-  browser and API Gateway (the HTTP API has no X-Ray integration; the trace starts in create-request),
-  the start-up (`Init`) of enqueuer, worker and webhook (it stays in the trace of the invocation), and
-  the polled read functions. Three things were found only by running it and are in the history: the
+  spans (from the webhook); all six request events carry that trace's id. Not in it at that stage,
+  on purpose: the browser and API Gateway (the API was an HTTP API then, which has no X-Ray
+  integration, so the trace started in create-request; stage 12 changes that), the start-up (`Init`)
+  of enqueuer, worker and webhook (it stays in the trace of the invocation), and the polled read
+  functions. Three things were found only by running it and are in the history: the
   log group `aws/spans` cannot be created by us (AWS reserves the prefix), a worker thread of the XML
   validator started the tracing SDK again (fixed in the build), and Lambda links the consumer of a
   queue message to the trace instead of joining it (the worker takes the parent from the message).
+- [ ] Stage 12: the API is a REST API instead of an HTTP API, so that API Gateway is a node of the
+  trace and the trace of a user action starts with an id made in the browser (see Decisions). Built and
+  reviewed, **not deployed yet**. The recipient's `WEBHOOK_URL` changes with it (the URL now contains the
+  stage). To check after the deploy: that the Cognito authorizer accepts the raw access token (no `Bearer `
+  prefix), that API Gateway continues the trace id the browser sends, and that the basic API metrics
+  appear with detailed metrics switched off.
 
 ## Try it
 
@@ -222,6 +212,11 @@ on a container host with your own API key, password and webhook token
 a card is needed for verification and the 6 GB volume for `/data` costs $0.90 a month). Confirm the
 two SNS e-mail subscriptions (request status, alerts) that AWS sends to the address you gave.
 
+The other direction is the recipient's `WEBHOOK_URL`, the `webhook_url` output. It contains the API
+Gateway stage (`https://<id>.execute-api.<region>.amazonaws.com/v1/webhooks/partner`), and it is a new
+value whenever the API is created again (as when it became a REST API): set it in the recipient after
+such a deploy, or its calls go to an address that no longer exists.
+
 Run the web app against the deployed API:
 
 ```sh
@@ -247,7 +242,7 @@ and `. , ' & -` only, because the recipient's schema says so):
 | `[reject]` in the subject | `rejected`; the reply says `RECIPIENT_REJECTED` |
 | `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed` with an e-mail; press **Send again** and it goes through delivery again (and fails again, the subject says so) |
 | partner `Acme #1` | `rejected` at once: our own schema check refuses it and nobody is called |
-| in the recipient's inbox (`WEBHOOK_URL` = the `webhook_url` output, `WEBHOOK_TOKEN` = yours), open a delivered message and press **Approve** or **Decline** with a reason | the request page shows the Client decision card within about 30 seconds (a reload shows it at once) |
+| in the recipient's inbox (`WEBHOOK_URL` = the `webhook_url` output, stage included, `WEBHOOK_TOKEN` = yours), open a delivered message and press **Approve** or **Decline** with a reason | the request page shows the Client decision card within about 30 seconds (a reload shows it at once) |
 | stop the recipient, create a request, wait for `failed` (about 8 minutes), start the recipient, press **Send again** | the request goes through delivery again and becomes `sent` |
 | press Approve, then Decline | the later action wins: the card shows Declined |
 | press **Send again** on an event | the same event again: nothing changes |
@@ -289,9 +284,38 @@ Written down as they are made; each stage adds its own.
   -> `queued` (in SQS FIFO) -> `sent` (the recipient accepted it). `failed` means delivery
   retries are exhausted (the owner can send it again); `rejected` means the message was
   refused for good (the recipient said no, or our own XSD check failed) and is not retried.
-- **HTTP API instead of REST API.** Cheaper, lower latency and it has a built-in JWT
-  authorizer, so no authorizer Lambda is needed. The REST-only features (API keys,
-  usage plans, request validation) are not needed here.
+- **REST API, not HTTP API.** The API is an API Gateway REST API (`infra/modules/rest-api`). It was
+  an HTTP API first (cheaper, lower latency, a built-in JWT authorizer, no authorizer Lambda). It
+  moved for the traces: a REST API can trace at the gateway (X-Ray on the stage, so API Gateway is a
+  node of the trace) and continues a trace whose id the browser sends in `X-Amzn-Trace-Id`. The
+  frontend sends a fresh one on every request that changes something, so the trace of a user action
+  starts with an id made in the browser (the browser only makes the id, it is not a node). A REST API
+  also has a Cognito user-pool authorizer and per-method throttling. The higher price per request
+  ($3.50 per million, against $1 for an HTTP API) does not matter: far fewer than a million calls a
+  month. What it cost:
+  - CORS is built by hand: a REST API has no CORS switch, so every resource has a `MOCK` `OPTIONS`
+    method, and gateway responses add the header to the errors the gateway makes itself (401, 403, 429,
+    5xx). All of them say `Access-Control-Allow-Origin: *`, and the functions add the same header to
+    their own responses. `*` is acceptable because authorization is a token in a header and there are
+    no cookies. Rejected: a fixed origin (it protects nothing more here, and a REST API cannot pick
+    the header per request without a Lambda).
+  - The stage is in the URL (`https://<id>.execute-api.<region>.amazonaws.com/v1`), so the webhook URL
+    changed: the recipient's `WEBHOOK_URL` must be set to the new one.
+  - The events are Lambda proxy format 1.0 (`requestContext.authorizer.claims.sub`, `resource`,
+    `httpMethod`, header names as the caller wrote them, `body` may be `null`): every handler and its
+    tests changed.
+  - The Cognito authorizer checks the signature, the expiry and the pool, not the app client (the JWT
+    authorizer of the HTTP API checked the audience; there is one client). With scopes set on a method it
+    wants an access token whose scope contains `openid`, and the token goes into `Authorization`
+    **without** the `Bearer ` prefix.
+  - API Gateway waits at most 29 s for a function (the functions' own timeout is 10 s). An account-level
+    CloudWatch role for API Gateway is created (one per account and region). The API metrics have other
+    names (`Count`, `4XXError`, `5XXError`, `Latency`; dimensions `ApiName` and `Stage`).
+
+  Rejected: staying on the HTTP API and using only the header from the browser (there would be no
+  gateway node in the trace). Not verified yet, and checked after the deploy: that the authorizer
+  accepts the raw access token, that API Gateway continues the browser's trace id, and that the basic
+  metrics appear with detailed metrics off.
 - **Cognito: Essentials tier with the classic hosted UI** instead of managed login. The
   classic UI covers login, logout and password reset, and managed login needs an extra
   branding resource before it renders anything.
@@ -438,12 +462,11 @@ Written down as they are made; each stage adds its own.
   again (a warm webhook 1.7 s instead of 0.75 s), fixed in the build. Rejected: the X-Ray SDK (in
   maintenance mode since 25 February 2026, security fixes only); the older ADOT layer (it asks for the
   handler to be exported with `module.exports`); Lambda's active tracing alone (seen on AWS: six
-  unconnected traces); a collector layer or the CloudWatch agent (a second process in every function);
-  a REST API instead of the HTTP API, which would make the gateway a node of the trace (a rewrite of the
-  API module and of the event format of six handlers, $3.50 instead of $1 per million calls, and it does
-  not carry a trace over the stream or the queue, which is the part done in code). Left out, on
-  purpose: the browser and the gateway, and the functions the browser polls (every 5 s, and every 30 s
-  while a decision is awaited).
+  unconnected traces); a collector layer or the CloudWatch agent (a second process in every function).
+  The gateway was left out at first, because an HTTP API cannot trace; the REST API decision above put it
+  in. That decision does not replace the code here: a REST API carries no trace over the stream or the
+  queue, which is the part done in code. Left out, on purpose: the functions the browser polls (every
+  5 s, and every 30 s while a decision is awaited).
 - **The recipient runs on a free container host, not on a laptop.** A laptop that sleeps breaks
   deliveries and keeps the data on a personal machine. The image is built by a workflow, so what runs
   is what was tested, and the host only pulls it. Rejected: Render's free tier (no persistent disk,
@@ -475,6 +498,11 @@ Written down as they are made; each stage adds its own.
 - The webhook is authenticated by a shared token, and rotating it is a manual step on both sides.
   Once the signature is right the recipient is trusted: an `OccurredAt` far in the future would keep
   the decision from ever being replaced.
+- The API's Cognito authorizer does not check which app client a token was issued to: an app client
+  added to this user pool later would be accepted too (there is one). CORS answers `*`, which is fine
+  only while authorization stays a token in a header and never becomes a cookie. API Gateway's
+  CloudWatch role is one per AWS account and region and this stack sets it: another stack in the same
+  account and region that sets a different role would replace it.
 - The page looks for a decision every 30 seconds while the tab is visible and the request is `sent`
   without one, and stops at the first decision; a later, changed decision shows after a reload.
 

@@ -3,9 +3,17 @@
 The single source of truth for backend, infrastructure and frontend. Change it here
 first, then in the code.
 
-Base URL: the `api_url` Terraform output. All routes except the webhook need
-`Authorization: Bearer <Cognito access token>`; the API Gateway JWT authorizer rejects
-anything else with `401` before a Lambda runs. Bodies are JSON, except the webhook's (XML).
+The API is an API Gateway **REST API** (`infra/modules/rest-api`; why it is not an HTTP API is in the
+README, "Decisions").
+
+Base URL: the `api_url` Terraform output. It contains the **stage**, so it looks like
+`https://<id>.execute-api.<region>.amazonaws.com/v1`, and a path is appended to it
+(`<api_url>/requests`). All routes except the webhook need
+`Authorization: <Cognito access token>`: the token alone, **without** a `Bearer ` prefix. The gateway's
+Cognito user pool authorizer rejects a missing, expired or foreign token with `401` before a Lambda
+runs. The protected methods ask for the scope `openid`, so the token must be an **access** token (an ID
+token has no `scope` claim). That the authorizer accepts the raw access token is **not verified yet**
+(it is checked after the deploy). Bodies are JSON, except the webhook's (XML).
 
 ## Model
 
@@ -85,9 +93,12 @@ what it means for the request.
 
 - The route is **public** (no Cognito token): it is protected by the signature (HMAC-SHA256 with
   a shared token, in SSM Parameter Store as `/<env>/<project>/webhook-token`, SecureString) and
-  throttling: the stage's default limits, and a lower limit of its own for this route (2 requests
-  per second, burst 4; the caller reads `429` as "try again", so an event is delayed, never lost). It answers `413`, `401`, `415`, `400`, `422`, `404` and `200` as the
-  contract says, without a body.
+  throttling: the stage's default limits (5 requests per second, burst 10), and a lower limit of its
+  own for this route (2 requests per second, burst 4; the caller reads `429` as "try again", so an
+  event is delayed, never lost). It answers `413`, `401`, `415`, `400`, `422`, `404` and `200` as the
+  contract says, without a body. The URL the recipient calls contains the stage
+  (`<api_url>/webhooks/partner`, the `webhook_url` output), and it changes when the API is created
+  again: the recipient's `WEBHOOK_URL` must be set to the current value.
 - The event names the request only by id, and the table's key starts with the owner, so the
   function finds the item through the index `by-request-id` (see "Storage") and then updates it.
 - `clientDecision` is set with one conditional `UpdateItem`, whatever the delivery `status` is
@@ -143,11 +154,27 @@ Errors produced by the Lambdas use one shape:
 
 For `validation_error`, `details` is an array of `{ path: string, message: string }`
 (`path` is the dotted JSON path of the invalid field). Errors produced by API Gateway
-itself, such as a missing or invalid token, are `401` with `{ "message": "Unauthorized" }`:
-a different shape.
+itself never reach a Lambda and have a different shape, `{ "message": string }`: `401`
+(`{ "message": "Unauthorized" }`) for a missing, invalid or expired token on a protected route, `403`
+for a path the API does not have, `429` above the throttle, `5xx` if the gateway itself fails.
 
-CORS: allowed origins come from Terraform (`http://localhost:5173` and the site domain),
-headers `authorization` and `content-type`, methods `GET`, `POST`, `OPTIONS`.
+**Limits at the gateway.** Every method of the stage is throttled to 5 requests per second with a burst
+of 10, and the public webhook method to 2 and 4; above the limit the answer is `429`. API Gateway waits
+at most 29 s for a function (the functions' own timeout is 10 s, and the frontend gives up after 15 s).
+Execution logs and detailed metrics are off (they would write whole requests, tokens included, and be
+billed as custom metrics): the access log is the only log of the API ("Logs").
+
+**CORS**: `Access-Control-Allow-Origin: *`, and never `Access-Control-Allow-Credentials`. `*` is
+acceptable because authorization is a token that the page puts into a header, not a cookie. A REST API
+has no CORS switch, so it is built by hand:
+- The gateway answers the preflight `OPTIONS` of every path that has a route (a `MOCK` integration: `200`,
+  no Lambda runs) with `Access-Control-Allow-Headers: Content-Type,Authorization,X-Amzn-Trace-Id`
+  ("Traces") and `Access-Control-Allow-Methods` listing the methods of that path and `OPTIONS`. These
+  `OPTIONS` methods have no authorizer: a preflight never carries `Authorization`.
+- Every response of a function carries `Access-Control-Allow-Origin: *` (one place:
+  `backend/src/lib/http.ts`, error responses included), and the gateway adds it to its own 4xx and 5xx
+  answers (gateway responses), so the browser can read the status of a failure instead of a generic
+  network error.
 
 ## Storage
 
@@ -336,8 +363,14 @@ checks ownership in the table before it touches S3).
   API functions, `receive-webhook`, `enqueuer` and `log-archiver` 10 s, `delivery-worker` 15 s.
 - The account allows only 10 concurrent Lambda executions, so no reserved concurrency; the two
   event source mappings that need it are capped (`maximum_concurrency` 2 on the queue).
-- API events: HTTP API payload format 2.0 with JWT authorizer
-  (`event.requestContext.authorizer.jwt.claims.sub`).
+- API events: REST API, Lambda proxy integration, payload format 1.0: `event.httpMethod`,
+  `event.resource` (the path template, `/requests/{id}`), `event.pathParameters`, `event.headers` (the
+  names as the caller wrote them: look them up ignoring case), `event.body` (a string, or `null` when
+  the caller sent none). The owner is `event.requestContext.authorizer.claims.sub`, put there by the
+  Cognito authorizer (the public webhook route has no authorizer, so no claims).
+- API responses are `{ statusCode, headers, body }` and every one carries
+  `Access-Control-Allow-Origin: *`: with a proxy integration the gateway adds no header to what the
+  function returns, so `backend/src/lib/http.ts` adds it in the one place where a response is built.
 - Environment, all functions: `LOG_LEVEL` (default `info`), `NODE_OPTIONS=--enable-source-maps`
   (the build is minified; the source map keeps stack traces readable). Per function:
   API functions `TABLE_NAME`; `get-exchange` `TABLE_NAME`, `AUDIT_BUCKET`; `enqueuer`
@@ -355,7 +388,9 @@ checks ownership in the table before it touches S3).
 
 - **Where**: CloudWatch Logs. One log group per Lambda (`/aws/lambda/<function>`) and one for the
   API's access log (`/aws/apigateway/<project>-<env>-api`), all kept **30 days** (the hot tier: fast
-  to search with Logs Insights). The access log format has no client IP, user agent or token claims.
+  to search with Logs Insights). The access log is one JSON object per request with `requestId`,
+  `httpMethod`, `resourcePath`, `status`, `responseLatency`, `integrationLatency` and `integrationStatus`:
+  no client IP, user agent or token claims.
   (The recipient, `partner-sim`, is another organisation's system: its logs are not ours to read.)
 - **Metrics, alarms, dashboard** (module `infra/modules/observability`), all inside the free tier:
   - 8 custom metrics in the namespace `<project>/<env>`, without dimensions (a dimension multiplies
@@ -371,6 +406,10 @@ checks ownership in the table before it touches S3).
     webhook errors, worker duration p95 over 80 % of its timeout, API 5xx, oldest queue message older
     than 10 minutes, DynamoDB write throttling, five webhook signature failures in five minutes, a log
     guard hit.
+  - The API's own metrics come from API Gateway (namespace `AWS/ApiGateway`, dimensions `ApiName` and
+    `Stage`): `Count`, `4XXError`, `5XXError`, `Latency`. The two error metrics count requests, so the
+    alarm and the dashboard use `Sum`. Detailed metrics are off (they are billed as custom metrics); that
+    the basic metrics appear all the same is **not verified yet** (it is checked after the deploy).
   - One dashboard, `<project>-<env>-delivery`, and saved Logs Insights queries (the timeline of one
     request, failed requests, the slowest deliveries, attempts by outcome, webhook events, guard hits).
 - **One JSON object per line**: `level`, `message` and fields. The `message` is a fixed sentence of
@@ -454,9 +493,22 @@ queried with Athena. The logs hold no personal data (the log guard, "Logs"), so 
 
 ## Traces
 
-One request is one trace: from its creation, through the stream, the enqueuer and the queue, to the
-delivery, the call to the recipient and the decision webhook. It takes two halves that fit together.
+One request is one trace: from the user's action in the browser, through API Gateway and the creation
+of the request, the stream, the enqueuer and the queue, to the delivery, the call to the recipient and
+the decision webhook. It starts at the front door (the first bullet); the rest takes two halves that fit
+together.
 
+- **The start: the browser makes the id, API Gateway is a node.** X-Ray tracing is on for the stage of
+  the REST API, so API Gateway records a segment of its own (the time spent before the function starts).
+  It continues a trace whose id arrives in the request header `X-Amzn-Trace-Id` instead of making a new
+  one. The frontend (`frontend/src/shared/api/trace-header.ts`) puts a fresh id in that header,
+  `Root=1-<8 hex: epoch seconds>-<24 random hex>;Parent=<16 random hex>;Sampled=1`, on every request
+  that changes something (`POST /requests`, `POST /requests/{id}/retry`); a read sends none. So the trace
+  of a user action starts with an id made in the browser. The id is neither a secret nor personal data.
+  The browser only makes the id: it sends no segments to X-Ray and is not a node. The header is in the
+  CORS `Access-Control-Allow-Headers` ("Endpoints"), or the browser would not send it. **Not verified
+  yet** (checked after the deploy): that API Gateway continues the browser's id, and that the spans of
+  `create-request` then belong to that same trace.
 - **The SDK and the exporter are AWS's.** The Lambda layer `AWSOpenTelemetryDistroJs` (pinned, version
   14) is attached to the functions that write: `create-request`, `retry-request`, `receive-webhook`,
   the `enqueuer` and the `delivery-worker`. Its start script (`AWS_LAMBDA_EXEC_WRAPPER`) starts the
@@ -489,9 +541,8 @@ delivery, the call to the recipient and the decision webhook. It takes two halve
 - **Where the spans are**: CloudWatch Transaction Search. X-Ray keeps every span as a structured log in
   the group `aws/spans` (30 days) and indexes 1 % of the traces for the X-Ray console (1 % is free). The
   `Request event` lines carry the `traceId` of the trace they belong to: search `aws/spans` for it.
-- **Not in a trace**: the browser and API Gateway (the HTTP API has no X-Ray integration, so a trace
-  starts in `create-request`); the functions the browser polls (`list-requests`, `get-request`,
-  `get-exchange`); the `log-archiver`.
+- **Not in a trace**: the browser as a node (it only makes the id); the functions the browser polls
+  (`list-requests`, `get-request`, `get-exchange`); the `log-archiver`.
 - **Cost**: in money, span ingestion is log ingestion, inside the 5 GB free a month, and the layer is
   free. In time, measured (256 MB without the layer, 512 MB with it): the start-up of a cold function
   went from 0.31 to 0.43 s to 1.1 to 2.4 s, and the memory in use grew by 95 to 150 MB. The XML

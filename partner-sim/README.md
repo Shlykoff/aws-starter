@@ -99,7 +99,7 @@ the delivery, so there are **no timers, no delays and no deadlines**: it is a cl
 
 | Variable | |
 |---|---|
-| `WEBHOOK_URL` | The sender's webhook: `<api_url>/webhooks/partner` of the AWS stack. `https://`, no `user:password@`, no `#fragment`. `http://` only for `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal` (a receiver on this computer). |
+| `WEBHOOK_URL` | The sender's webhook: `<api_url>/webhooks/partner` of the AWS stack, the `webhook_url` output copied whole. `<api_url>` ends with the API Gateway stage, so the URL contains it (`https://<id>.execute-api.<region>.amazonaws.com/v1/webhooks/partner`), and it is new when the sender's API is created again (as when it became a REST API): set the current value. `https://`, no `user:password@`, no `#fragment`. `http://` only for `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal` (a receiver on this computer). |
 | `WEBHOOK_TOKEN` | The shared secret that signs the events: at least 16 characters and **the same value the sender holds** (its SSM parameter `webhook-token`, see `docs/api.md`). Never logged, stored or shown. Make one with `openssl rand -hex 32`. |
 
 Put the values in the git-ignored `.env` (the token is a real secret), then `docker compose up -d`.

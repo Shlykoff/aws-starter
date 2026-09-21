@@ -1,12 +1,12 @@
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { mockClient } from "aws-sdk-client-mock";
 import { createHmac } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiKeyProvider } from "../../src/repositories/api-key-provider";
 import { TOKENS } from "../../src/tokens";
-import { lambdaContext } from "../helpers/events";
+import { lambdaContext, restEvent } from "../helpers/events";
+import { answer } from "../helpers/webhook";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -86,28 +86,26 @@ interface Post {
   headers?: Record<string, string>; // replaces the whole header set
   contentType?: string;
   base64?: boolean;
-  noHeaders?: boolean; // the event has no `headers` property at all
+  noHeaders?: boolean; // the event has `headers: null`, which API Gateway can send
   bodyText?: string; // replaces the body field as it is (with `bytes` still used for the signature)
 }
 function post(p: Post = {}): Promise<{ statusCode: number; body?: string; headers?: unknown }> {
   const bytes = p.bytes ?? Buffer.from(xml(), "utf8");
   const ts = p.ts ?? String(NOW);
+  // A REST API passes the names on as the sender wrote them: Title-Case unless a test says else.
   const headers = p.headers ?? {
-    "content-type": p.contentType ?? "application/xml",
-    "x-webhook-timestamp": ts,
-    "x-webhook-signature": p.signature ?? sign(TOKEN, ts, bytes),
+    "Content-Type": p.contentType ?? "application/xml",
+    "X-Webhook-Timestamp": ts,
+    "X-Webhook-Signature": p.signature ?? sign(TOKEN, ts, bytes),
   };
-  const event = {
-    version: "2.0",
-    routeKey: "POST /webhooks/partner",
-    rawPath: "/webhooks/partner",
-    rawQueryString: "",
-    ...(p.noHeaders ? {} : { headers }),
-    requestContext: { http: { method: "POST", path: "/webhooks/partner", sourceIp: "192.0.2.1" }, requestId: "qa", stage: "$default", timeEpoch: 0 },
+  const event = restEvent({
+    httpMethod: "POST",
+    resource: "/webhooks/partner",
+    headers: p.noHeaders ? null : headers,
     body: p.bodyText ?? (p.base64 ? bytes.toString("base64") : bytes.toString("utf8")),
     isBase64Encoded: p.base64 ?? false,
-  } as unknown as APIGatewayProxyEventV2;
-  return handler(event, lambdaContext()) as Promise<{ statusCode: number }>;
+  });
+  return handler(event, lambdaContext());
 }
 
 /** A valid DecisionEvent of exactly `size` bytes: trailing white space after the root element. */
@@ -122,12 +120,12 @@ describe("size: the limit is on the decoded bytes", () => {
     expect(bytes.length).toBe(65_536);
     expect(bytes.toString("base64").length).toBeGreaterThan(65_536);
 
-    expect(await post({ bytes, base64: true })).toEqual({ statusCode: 200 });
+    expect(await post({ bytes, base64: true })).toEqual(answer(200));
     expect(decision()?.decision).toBe("Approved");
   });
 
   it("65 537 bytes carried as base64 is 413, and nothing is stored", async () => {
-    expect(await post({ bytes: padded(65_537), base64: true })).toEqual({ statusCode: 413 });
+    expect(await post({ bytes: padded(65_537), base64: true })).toEqual(answer(413));
     expect(decision()).toBeUndefined();
   });
 });
@@ -135,40 +133,40 @@ describe("size: the limit is on the decoded bytes", () => {
 describe("headers as API Gateway may deliver them", () => {
   const bytes = Buffer.from(xml(), "utf8");
   const good = sign(TOKEN, String(NOW), bytes);
-  const base = { "content-type": "application/xml", "x-webhook-timestamp": String(NOW), "x-webhook-signature": good };
+  const base = { "Content-Type": "application/xml", "X-Webhook-Timestamp": String(NOW), "X-Webhook-Signature": good };
 
   it.each([
-    ["the timestamp header sent twice (joined with a comma)", { ...base, "x-webhook-timestamp": `${NOW},${NOW}` }],
-    ["the timestamp header sent twice (comma and space)", { ...base, "x-webhook-timestamp": `${NOW}, ${NOW}` }],
-    ["the signature header sent twice, the same value", { ...base, "x-webhook-signature": `${good},${good}` }],
-    ["the signature header sent twice, the good one first", { ...base, "x-webhook-signature": `${good}, v1=${"0".repeat(64)}` }],
-    ["the signature header sent twice, the good one last", { ...base, "x-webhook-signature": `v1=${"0".repeat(64)}, ${good}` }],
+    ["the timestamp header sent twice (joined with a comma)", { ...base, "X-Webhook-Timestamp": `${NOW},${NOW}` }],
+    ["the timestamp header sent twice (comma and space)", { ...base, "X-Webhook-Timestamp": `${NOW}, ${NOW}` }],
+    ["the signature header sent twice, the same value", { ...base, "X-Webhook-Signature": `${good},${good}` }],
+    ["the signature header sent twice, the good one first", { ...base, "X-Webhook-Signature": `${good}, v1=${"0".repeat(64)}` }],
+    ["the signature header sent twice, the good one last", { ...base, "X-Webhook-Signature": `v1=${"0".repeat(64)}, ${good}` }],
   ])("401 for %s", async (_label, headers) => {
-    expect(await post({ bytes, headers })).toEqual({ statusCode: 401 });
+    expect(await post({ bytes, headers })).toEqual(answer(401));
     expect(decision()).toBeUndefined();
   });
 
-  it("names in Title-Case are read (the HTTP names are case-insensitive)", async () => {
-    const headers = { "Content-Type": "application/xml", "X-Webhook-Timestamp": String(NOW), "X-Webhook-Signature": good };
-    expect(await post({ bytes, headers })).toEqual({ statusCode: 200 });
+  it("names in lower case are read (the HTTP names are case-insensitive)", async () => {
+    const headers = { "content-type": "application/xml", "x-webhook-timestamp": String(NOW), "x-webhook-signature": good };
+    expect(await post({ bytes, headers })).toEqual(answer(200));
   });
 
-  it("401, not a crash, when the event has no headers at all", async () => {
-    expect(await post({ bytes, noHeaders: true }).catch((e: unknown) => e)).toEqual({ statusCode: 401 });
+  it("401, not a crash, when `headers` is null", async () => {
+    expect(await post({ bytes, noHeaders: true }).catch((e: unknown) => e)).toEqual(answer(401));
   });
 });
 
 describe("Content-Type", () => {
   it("Application/XML; charset=ISO-8859-1 is application/xml: the parameter is ignored, the reason survives", async () => {
     const bytes = Buffer.from(xml({ reason: "Нет в наличии" }), "utf8");
-    expect(await post({ bytes, contentType: "Application/XML; charset=ISO-8859-1" })).toEqual({ statusCode: 200 });
+    expect(await post({ bytes, contentType: "Application/XML; charset=ISO-8859-1" })).toEqual(answer(200));
     expect(decision()?.reason).toBe("Нет в наличии");
   });
 
   it.each(["application/soap+xml", "application/atom+xml", "text/plain; x=application/xml", "multipart/form-data; boundary=application/xml", "application/xml, application/xml", "application/"])(
     "415 for %j",
     async (contentType) => {
-      expect(await post({ contentType })).toEqual({ statusCode: 415 });
+      expect(await post({ contentType })).toEqual(answer(415));
       expect(decision()).toBeUndefined();
     },
   );
@@ -242,7 +240,7 @@ describe("the bytes of the document", () => {
 describe("isBase64Encoded with a body that is not base64", () => {
   it.each(["!!!not base64!!!", "%%%%", "====", "QUJD=RA", "\u0000\u0001"])("401 for %j (the decoded bytes cannot match the signature)", async (text) => {
     const response = await post({ bytes: Buffer.from(text, "utf8"), base64: true, bodyText: text });
-    expect(response).toEqual({ statusCode: 401 });
+    expect(response).toEqual(answer(401));
     expect(decision()).toBeUndefined();
   });
 });
@@ -253,7 +251,7 @@ describe("a request that belongs to another user", () => {
 
     const response = await post({ bytes: Buffer.from(xml({ reason: "hello" }), "utf8") });
 
-    expect(response).toEqual({ statusCode: 200 }); // no body, no headers
+    expect(response).toEqual(answer(200)); // no body; only the CORS header
     expect(table.items().find((i) => i.pk === "USER#user-owner-4d2f")?.clientDecision).toBeDefined();
     const everything = logs.lines.join("\n");
     expect(everything).not.toContain("user-owner-4d2f");
@@ -272,8 +270,8 @@ describe("OccurredAt", () => {
   const send = (at: string, eventId: string, reason?: string) => post({ bytes: Buffer.from(xml({ at, eventId, reason }), "utf8") });
 
   it("the same instant written with +04:00 and with Z is the same moment: the first stays (either order)", async () => {
-    expect(await send("2026-10-21T14:15:32+04:00", E1)).toEqual({ statusCode: 200 });
-    expect(await send("2026-10-21T10:15:32Z", E2)).toEqual({ statusCode: 200 });
+    expect(await send("2026-10-21T14:15:32+04:00", E1)).toEqual(answer(200));
+    expect(await send("2026-10-21T10:15:32Z", E2)).toEqual(answer(200));
     expect(decision()?.eventId).toBe(E1);
     expect(decisionAtMs()).toBe(Date.UTC(2026, 9, 21, 10, 15, 32));
 
@@ -291,20 +289,20 @@ describe("OccurredAt", () => {
   });
 
   it("the extreme offsets +14:00 and -14:00 are read; +15:00 is refused by the schema (422)", async () => {
-    expect(await send("2026-10-21T14:15:32+14:00", E1)).toEqual({ statusCode: 200 });
+    expect(await send("2026-10-21T14:15:32+14:00", E1)).toEqual(answer(200));
     expect(decisionAtMs()).toBe(Date.UTC(2026, 9, 21, 0, 15, 32));
-    expect(await send("2026-10-21T14:15:32+15:00", E2)).toEqual({ statusCode: 422 });
+    expect(await send("2026-10-21T14:15:32+15:00", E2)).toEqual(answer(422));
   });
 
   it("CHARACTERISATION (the known open question): the year 9999 is stored, and then no real event can replace it", async () => {
-    expect(await send("9999-12-31T23:59:59.999Z", E1)).toEqual({ statusCode: 200 });
+    expect(await send("9999-12-31T23:59:59.999Z", E1)).toEqual(answer(200));
     expect(decisionAtMs()).toBe(253_402_300_799_999);
-    expect(await send("2026-09-21T10:15:39Z", E2, "real decision")).toEqual({ statusCode: 200 }); // acknowledged...
+    expect(await send("2026-09-21T10:15:39Z", E2, "real decision")).toEqual(answer(200)); // acknowledged...
     expect(decision()?.eventId).toBe(E1); // ...and ignored
   });
 
   it("the year 0001 is read (a negative number of milliseconds), and any later event replaces it", async () => {
-    expect(await send("0001-01-01T00:00:00Z", E1)).toEqual({ statusCode: 200 });
+    expect(await send("0001-01-01T00:00:00Z", E1)).toEqual(answer(200));
     expect(decisionAtMs()).toBe(-62_135_596_800_000);
     await send("2026-09-21T10:15:39Z", E2);
     expect(decision()?.eventId).toBe(E2);
@@ -331,7 +329,7 @@ describe("the token", () => {
     const bytes = Buffer.from(xml(), "utf8");
     const ts = String(NOW);
 
-    expect(await post({ bytes, signature: sign(TOKEN, ts, bytes) })).toEqual({ statusCode: 401 });
-    expect(await post({ bytes, signature: sign(`${TOKEN}\n`, ts, bytes) })).toEqual({ statusCode: 200 });
+    expect(await post({ bytes, signature: sign(TOKEN, ts, bytes) })).toEqual(answer(401));
+    expect(await post({ bytes, signature: sign(`${TOKEN}\n`, ts, bytes) })).toEqual(answer(200));
   });
 });

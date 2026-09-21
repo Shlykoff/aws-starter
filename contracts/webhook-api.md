@@ -19,6 +19,12 @@ One URL, `POST <webhook url>`, on the public internet, and one shared secret, th
 recipient is given both once, out of band (in the simulator: the environment variables
 `WEBHOOK_URL` and `WEBHOOK_TOKEN`).
 
+The recipient treats the URL as opaque and posts to exactly that address. The sender runs behind an
+AWS API Gateway REST API, so its URL contains the **stage**:
+`https://<id>.execute-api.<region>.amazonaws.com/v1/webhooks/partner`. Copy the whole value the sender
+gives you. It changes when the sender's API is created again, and then the recipient must be given
+the new one.
+
 ## The request
 
 | Part | Value |

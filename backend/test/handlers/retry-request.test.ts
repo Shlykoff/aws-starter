@@ -3,7 +3,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { ulid } from "ulid";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { handler } from "../../src/handlers/retry-request";
-import { eventWithoutSub, lambdaContext, retryRequestEvent } from "../helpers/events";
+import { CORS_HEADERS, eventWithoutSub, lambdaContext, retryRequestEvent } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
@@ -49,7 +49,7 @@ describe("POST /requests/{id}/retry: a failed request", () => {
     const response = await retry();
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers).toEqual({ "content-type": "application/json" });
+    expect(response.headers).toEqual({ "content-type": "application/json", ...CORS_HEADERS });
     expect(json(response)).toEqual({ ...fields, status: "created" });
     expect(response.body).not.toContain("user-a");
     expect(response.body).not.toContain("retryCount");
@@ -190,6 +190,7 @@ describe("POST /requests/{id}/retry: failures", () => {
     const response = await handler(eventWithoutSub("POST /requests/{id}/retry", "no-authorizer"), lambdaContext());
 
     expect(response.statusCode).toBe(500);
+    expect(response.headers).toMatchObject(CORS_HEADERS);
     expect(json(response)).toEqual({ error: { code: "internal_error", message: "Internal server error" } });
     expect(ddb.calls()).toHaveLength(0);
   });
