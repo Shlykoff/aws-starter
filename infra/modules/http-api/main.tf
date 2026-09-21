@@ -47,8 +47,11 @@ resource "aws_apigatewayv2_route" "this" {
   route_key = each.value.route_key
   target    = "integrations/${aws_apigatewayv2_integration.this[each.key].id}"
 
-  authorization_type = "JWT"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
+  # Protected by default. A public route has no authorizer, so API Gateway lets every caller
+  # through to the function: only routes whose function authenticates the caller itself may
+  # say public = true.
+  authorization_type = each.value.public ? "NONE" : "JWT"
+  authorizer_id      = each.value.public ? null : aws_apigatewayv2_authorizer.jwt.id
 }
 
 # Lets this API, and no other, invoke the function.
@@ -74,11 +77,28 @@ resource "aws_apigatewayv2_stage" "default" {
   auto_deploy = true # route and integration changes go live without a separate deployment resource
 
   # Throttling protects the account's Lambda concurrency limit (10) from a runaway client.
-  # Even if every route used its full limit (4 routes x 5 requests/s), that is far below what 10
-  # concurrent executions of a ~100 ms handler can serve.
+  # Even if every route used its full limit (4 protected routes x 5 requests/s + the public
+  # route's 2 requests/s = 22 requests/s), that is far below what 10 concurrent executions of a
+  # ~100 ms handler can serve (about 100 requests/s).
   default_route_settings {
     throttling_burst_limit = 10
     throttling_rate_limit  = 5
+  }
+
+  # A public route is the one place where anonymous calls reach a Lambda (on the protected
+  # routes API Gateway turns them away before any function runs), so it gets a lower limit than
+  # the default above. Its legitimate traffic is a few events a day; the caller reads 429 as
+  # "try again later" (contracts/webhook-api.md), so a limit that is too low delays an event
+  # and never loses one. The burst is twice the rate, the same ratio as the default.
+  dynamic "route_settings" {
+    for_each = { for name, route in var.routes : name => route if route.public }
+    iterator = route
+
+    content {
+      route_key              = route.value.route_key
+      throttling_burst_limit = 4
+      throttling_rate_limit  = 2
+    }
   }
 
   access_log_settings {
@@ -96,4 +116,10 @@ resource "aws_apigatewayv2_stage" "default" {
       authorizerError         = "$context.authorizer.error"
     })
   }
+
+  # A route setting names a route by its key, and API Gateway can refuse a setting for a route
+  # that does not exist yet. Terraform sees no link between the two (the key is only a string),
+  # so this makes the routes come first: on a fresh stack, and when the first public route is
+  # added to a running one.
+  depends_on = [aws_apigatewayv2_route.this]
 }

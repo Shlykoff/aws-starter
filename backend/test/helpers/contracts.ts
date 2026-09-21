@@ -10,7 +10,7 @@ export const XSD_DIRECTORY = new URL("xsd/", CONTRACTS);
 /** The real validator: real libxml2 (WebAssembly), real schema files. */
 export const createRealValidator = (): XsdXmlValidator => new XsdXmlValidator(XSD_DIRECTORY);
 
-export type FixtureKind = "submission" | "reply";
+export type FixtureKind = "submission" | "reply" | "event";
 
 /** The text of a fixture, for example fixture("submission", "valid/minimal.xml"). */
 export const fixture = (kind: FixtureKind, name: string): string =>

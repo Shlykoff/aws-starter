@@ -22,6 +22,20 @@ describe("newRequestImageSchema", () => {
     });
   });
 
+  it("ignores the client's decision (clientDecision, decisionAtMs), like every other attribute it does not need", () => {
+    const withDecision = {
+      ...image,
+      decisionAtMs: 1789985732000,
+      clientDecision: { decision: "Approved", at: "2026-09-21T10:15:32.000Z", receivedAt: "2026-09-21T10:15:40.000Z", eventId: "x" },
+    };
+
+    expect(newRequestImageSchema.parse(withDecision)).toEqual({
+      requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
+      ownerId: "user-a",
+      partner: "Acme",
+    });
+  });
+
   it("reads an owner id that itself contains a # or a dash", () => {
     const parsed = newRequestImageSchema.parse({ ...image, pk: "USER#us#er-1" });
 

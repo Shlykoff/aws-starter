@@ -19,11 +19,12 @@ variable "jwt_audience" {
 }
 
 variable "routes" {
-  description = "One entry per Lambda-backed route. Every route requires a valid JWT."
+  description = "One entry per Lambda-backed route. A route requires a valid JWT unless it says public = true: then it has no authorizer at all (anybody on the internet can call it, so its function must check the caller itself) and it gets a lower throttle of its own than the stage default."
   type = map(object({
     route_key     = string # e.g. "GET /requests/{id}"
     function_name = string
     invoke_arn    = string
+    public        = optional(bool, false) # opt-in: a route is protected unless someone says otherwise
   }))
 }
 

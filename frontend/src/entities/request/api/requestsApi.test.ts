@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { makeRequest } from "@test/factories";
+import { makeClientDecision, makeRequest } from "@test/factories";
 import type { ApiClient } from "@/shared/api";
 import { createRequestsApi } from "./requestsApi";
 
@@ -42,6 +42,32 @@ describe("createRequestsApi", () => {
     const { client, api } = setup();
     client.get.mockResolvedValue({ items: [{ id: "1", status: "teleported" }] });
 
+    await expect(api.list()).rejects.toThrow();
+  });
+
+  it("keeps the client decision of a request from GET /requests/{id} and from the list", async () => {
+    const { client, api } = setup();
+    const decided = makeRequest({
+      status: "sent",
+      clientDecision: makeClientDecision({ decision: "Declined", reason: "Out of stock." }),
+    });
+    client.get.mockResolvedValue(decided);
+    await expect(api.get(decided.id)).resolves.toEqual(decided);
+
+    client.get.mockResolvedValue({ items: [decided, makeRequest()] });
+    const items = await api.list();
+    expect(items[0]?.clientDecision).toEqual(decided.clientDecision);
+    expect(items[1]).not.toHaveProperty("clientDecision");
+  });
+
+  it("rejects a response with an unknown decision or a null clientDecision", async () => {
+    const { client, api } = setup();
+    const request = makeRequest({ status: "sent" });
+
+    client.get.mockResolvedValue({ ...request, clientDecision: { ...makeClientDecision(), decision: "Maybe" } });
+    await expect(api.get(request.id)).rejects.toThrow();
+
+    client.get.mockResolvedValue({ items: [{ ...request, clientDecision: null }] });
     await expect(api.list()).rejects.toThrow();
   });
 });

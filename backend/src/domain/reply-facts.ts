@@ -1,4 +1,4 @@
-import { DOMParser } from "@xmldom/xmldom";
+import { parseXmlRoot } from "./xml-root";
 import type { Element } from "@xmldom/xmldom";
 
 // Reads the values out of a Reply document (contracts/xsd/reply.xsd).
@@ -35,7 +35,7 @@ function child(parent: Element, name: string): Element | undefined {
 export function readReplyFacts(xml: string): ReplyFacts | undefined {
   let root: Element | null;
   try {
-    root = new DOMParser().parseFromString(xml, "application/xml").documentElement;
+    root = parseXmlRoot(xml);
   } catch {
     // The parser refused it. (The error is not kept: its text may quote the document.)
     return undefined;

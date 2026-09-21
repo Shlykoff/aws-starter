@@ -45,8 +45,11 @@ The order matters: nothing expensive happens before the signature is right.
    age of a **signed request**, so that a captured request cannot be replayed later. It has
    nothing to do with when the client acted.
 3. Media type: `415`.
-4. Parses the document. Not well-formed, or **any** DOCTYPE at all: `400`.
-5. Validates it against `xsd/event.xsd`: `422`.
+4. Parses the document. Not well-formed, **any** DOCTYPE at all, or not UTF-8 (a UTF-16 document, or
+   a declaration of another encoding): `400`. The body is UTF-8, as the XML declaration says.
+5. Validates it against `xsd/event.xsd`: `422`. So is a document the schema accepts but whose
+   `OccurredAt` is not a point in time the sender can compare (a year with a sign or more than
+   four digits).
 6. Looks up the request `RelatesTo`. Unknown: `404`.
 7. Applies the event (below) and answers `200`, empty body.
 

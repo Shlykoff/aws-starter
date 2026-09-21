@@ -2,7 +2,8 @@ import type { PartnerClient } from "../clients/partner-client";
 import type { XmlValidator } from "../clients/xml-validator";
 import { decodeDeliveryMessage } from "../domain/delivery-message";
 import type { DeliveryMessage } from "../domain/delivery-message";
-import type { Exchange, Problem } from "../domain/exchange";
+import { describeProblem } from "../domain/exchange";
+import type { Exchange } from "../domain/exchange";
 import { readAnswer } from "../domain/reply-reader";
 import { isTerminal } from "../domain/request-status";
 import type { TerminalStatus } from "../domain/request-status";
@@ -51,10 +52,6 @@ export interface DeliverySettings {
   // to the DLQ. Terraform passes the same number to the queue and to this function.
   maxReceiveCount: number;
 }
-
-// A log line names problems as "element: rule". Both come from closed lists (see
-// src/clients/xsd-findings.ts), never from the document.
-const describeProblem = ({ element, rule }: Problem): string => `${element}: ${rule}`;
 
 // Step 2 of the pipeline (docs/api.md, "delivery-worker"): take a queued request, send it
 // to the partner as XML, record the exchange.

@@ -150,6 +150,48 @@ describe("delivery-worker container", () => {
   });
 });
 
+describe("receive-webhook container", () => {
+  it("builds one service and shares it", async () => {
+    const { container } = await import("../src/container-webhook");
+    const { TOKENS } = await import("../src/tokens");
+    const { WebhookService } = await import("../src/services/webhook-service");
+
+    const service = container.get(TOKENS.WebhookService);
+
+    expect(service).toBeInstanceOf(WebhookService);
+    expect(container.get(TOKENS.WebhookService)).toBe(service);
+  });
+
+  it("shares one token provider, so that its cache serves every call", async () => {
+    const { container } = await import("../src/container-webhook");
+    const { TOKENS } = await import("../src/tokens");
+
+    expect(container.get(TOKENS.WebhookToken)).toBe(container.get(TOKENS.WebhookToken));
+  });
+
+  it.each(["TABLE_NAME", "WEBHOOK_TOKEN_PARAM"])("fails fast when %s is missing", async (name) => {
+    unset(name);
+
+    await expect(import("../src/container-webhook")).rejects.toThrow(`Invalid configuration: ${name} is required`);
+  });
+
+  it("does not need the variables of the other functions", async () => {
+    unset("QUEUE_URL", "PARTNER_URL", "PARTNER_API_KEY_PARAM", "TOPIC_ARN", "AUDIT_BUCKET", "MAX_RECEIVE_COUNT");
+
+    await expect(import("../src/container-webhook")).resolves.toBeDefined();
+  });
+
+  it("fails while it starts when the schema files are not there (a package without its schemas)", async () => {
+    schemas.directory = new URL("file:///no/such/folder/");
+    vi.resetModules();
+
+    const { container } = await import("../src/container-webhook");
+    const { TOKENS } = await import("../src/tokens");
+
+    expect(() => container.get(TOKENS.WebhookService)).toThrow(/ENOENT/);
+  });
+});
+
 describe("get-exchange container", () => {
   it("builds one service and shares it", async () => {
     const { container } = await import("../src/container-exchange");
@@ -177,7 +219,7 @@ describe("get-exchange container", () => {
 
 describe("API container", () => {
   it("does not need the variables of the delivery pipeline", async () => {
-    unset("QUEUE_URL", "PARTNER_URL", "PARTNER_API_KEY_PARAM", "TOPIC_ARN", "AUDIT_BUCKET", "MAX_RECEIVE_COUNT");
+    unset("QUEUE_URL", "PARTNER_URL", "PARTNER_API_KEY_PARAM", "WEBHOOK_TOKEN_PARAM", "TOPIC_ARN", "AUDIT_BUCKET", "MAX_RECEIVE_COUNT");
 
     await expect(import("../src/container")).resolves.toBeDefined();
   });

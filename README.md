@@ -28,12 +28,15 @@ flowchart LR
     W --> N["SNS: e-mail when a<br/>request fails"]
     W -.->|"reads the key"| K[("SSM: API key")]
     F -.->|"reads records"| S
+    API -->|"public route, no JWT"| H["Lambda: receive-webhook"]
+    H --> T
   end
   subgraph REC["Recipient: partner-sim/, a separate system"]
     P["FastAPI<br/>POST /v1/submissions"] --> D[("SQLite")]
     P --- I["Inbox web page"]
   end
   W ==>|"XML over HTTPS + X-API-Key"| P
+  P ==>|"client's decision: signed XML"| API
   C["contracts/: XSD, HTTP contract, fixtures"]
   C -.- W
   C -.- P
@@ -65,6 +68,10 @@ sequenceDiagram
   W->>W: exchange record to S3, notice to SNS
   U->>A: GET /requests/id/exchange
   A-->>U: the XML sent and the XML received
+  Note over R,A: minutes or months later, the client acts
+  R->>A: POST /webhooks/partner, signed XML event
+  A->>T: check the signature, store the decision
+  A-->>R: 200
 ```
 
 Where each outcome ends:
@@ -76,6 +83,11 @@ Where each outcome ends:
 | Our own message fails `submission.xsd`, or holds a character XML cannot carry | `rejected`, nobody is called | no |
 | Timeout, `5xx`, `429`, `401`/`403`, an unreadable or contradictory answer | stays `queued` | yes, up to 5 receives |
 | The 5th attempt fails | `failed`, the message goes to the DLQ, an alarm and an e-mail | no |
+
+The status only says whether the message was **delivered**. What the client then does with it
+(approves, for example pays; declines, for example out of stock) arrives later, by a webhook, as
+a separate `clientDecision` on the request. It can come minutes or months after `sent`, so
+nothing waits for it and nothing expires.
 
 ## Status
 
@@ -92,6 +104,9 @@ Where each outcome ends:
   recipient was down and was delivered on the second attempt after it came back. The logs of
   those runs contain no message text.
   Still to do: a full review of the logs for personal data.
+- [ ] Stage 4: the client's decision by webhook: the recipient calls a public, signed route
+  when the client approves or declines, whenever that happens. Written and tested (unit tests,
+  a Python signer against the Node receiver, the built bundle); **not yet run on AWS**.
 
 ## Try it
 
@@ -129,6 +144,7 @@ cd infra/envs/dev
 echo "bucket = \"aws-starter-tfstate-$(aws sts get-caller-identity --query Account --output text)\"" > backend.tfbackend
 cp terraform.tfvars.example terraform.tfvars   # edit: Cognito domain prefix, e-mail, partner_url
 export TF_VAR_partner_api_key='<a secret of 16+ characters: the same value as the recipient PARTNER_API_KEY>'
+export TF_VAR_webhook_token='<a secret of 16+ characters: the same value as the recipient WEBHOOK_TOKEN>'
 (cd ../../.. && corepack enable && yarn install && yarn workspace @aws-starter/backend build)
 terraform init -backend-config=backend.tfbackend && terraform apply
 ```
@@ -148,7 +164,7 @@ yarn dev                       # http://localhost:5173
 ```
 
 Or let GitHub Actions do the whole thing after every merge to `main`: set the secrets
-`AWS_DEPLOY_ROLE_ARN`, `NOTIFICATION_EMAIL`, `PARTNER_API_KEY` and the variables
+`AWS_DEPLOY_ROLE_ARN`, `NOTIFICATION_EMAIL`, `PARTNER_API_KEY`, `PARTNER_WEBHOOK_TOKEN` and the variables
 `COGNITO_DOMAIN_PREFIX`, `PARTNER_URL` (`.github/workflows/deploy.yml` builds, plans, applies,
 and publishes the site to CloudFront). The deploy refuses to delete anything unless run by hand
 with `allow_destroy`.
@@ -164,6 +180,9 @@ and `. , ' & -` only, because the recipient's schema says so):
 | `[reject]` in the subject | `rejected`; the reply says `RECIPIENT_REJECTED` |
 | `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed`; the message goes to the DLQ, which raises an alarm and an e-mail |
 | partner `Acme #1` | `rejected` at once: our own schema check refuses it and nobody is called |
+| in the recipient's inbox (`WEBHOOK_URL` = the `webhook_url` output, `WEBHOOK_TOKEN` = yours), open a delivered message and press **Approve** or **Decline** with a reason | the request page shows the Client decision card within about 30 seconds (a reload shows it at once) |
+| press Approve, then Decline | the later action wins: the card shows Declined |
+| press **Send again** on an event | the same event again: nothing changes |
 | stop the recipient, create a request, start the recipient again within the retries (about 8 minutes) | the Exchange panel shows the failed attempt (`retry`, `502` from the tunnel), then the request is delivered on the next attempt, two minutes after the first |
 
 ## Layout
@@ -266,6 +285,25 @@ Written down as they are made; each stage adds its own.
   Rejected: `fast-xml-parser` (six dependencies of its own).
 - **Idempotency across the two systems**: the `MessageId` of a message is the request id. A
   repeated delivery gets the stored answer back, so a retry after a crash cannot deliver twice.
+- **The client's decision is its own field, not a status.** A status says whether the message was
+  delivered; the decision is what a person then did, on their own time. Keeping them apart means
+  an event may arrive before the worker has written `sent` (it is accepted anyway), and no timer or
+  alarm waits for it: a payment can take days.
+- **The webhook is public, and the signature is the door.** No Cognito token (the caller is another
+  system), so the function checks an HMAC-SHA256 over the timestamp and the body with a shared token
+  from SSM, in constant time, and the check runs in two steps: the shape of the headers and the age
+  (300 seconds, against replay) first, the token only after that, so that junk from the internet
+  cannot cost an SSM call. Nothing else, no parsing and no database, happens before it is right. The
+  route has a lower throttle than the rest of the API. Rejected: a static token in a header (it
+  travels, and a captured request could be replayed).
+- **Events are found by id and applied by one conditional write.** The event names the request, not
+  its owner, so a small index on the sort key (`by-request-id`, keys only) finds it. One
+  `UpdateItem` with a condition keeps the latest `OccurredAt`, ignores the same event again and a
+  late old one, and never creates an item; `ALL_OLD` on a failed condition tells the cases apart
+  without a second read.
+- **The recipient's side of the action is a person, not a timer.** In `partner-sim` two buttons send
+  the event, one attempt per click, and "Send again" repeats the same event, which is how the
+  receiver's idempotency is seen.
 
 ## Limits
 
@@ -281,6 +319,11 @@ Written down as they are made; each stage adds its own.
   only by the owner of the request. Logs are designed to carry no message text; a full review of
   them is still to do.
 - Both validators are libxml2 (see Decisions).
+- The webhook is authenticated by a shared token, and rotating it is a manual step on both sides.
+  Once the signature is right the recipient is trusted: an `OccurredAt` far in the future would keep
+  the decision from ever being replaced.
+- The page looks for a decision every 30 seconds while the tab is visible and the request is `sent`
+  without one, and stops at the first decision; a later, changed decision shows after a reload.
 
 ## Running bootstrap
 

@@ -5,6 +5,11 @@ output "api_url" {
   value       = module.api.api_url
 }
 
+output "webhook_url" {
+  description = "Public address of the webhook (POST, signed): the recipient's WEBHOOK_URL. Give it to the recipient together with the webhook token."
+  value       = "${module.api.api_url}${local.webhook_path}"
+}
+
 output "cognito_user_pool_id" {
   description = "Cognito user pool ID."
   value       = module.cognito.user_pool_id

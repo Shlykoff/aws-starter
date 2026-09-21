@@ -2,7 +2,7 @@ import { User } from "oidc-client-ts";
 import { vi } from "vitest";
 import type { AuthClient } from "@/features/auth";
 import type { Exchange, ExchangeApi } from "@/entities/exchange";
-import type { PartnerRequest, RequestsApi } from "@/entities/request";
+import type { ClientDecision, PartnerRequest, RequestsApi } from "@/entities/request";
 import { ApiError } from "@/shared/api";
 
 // Fake data only. A User with a valid one-hour access token unless overridden.
@@ -51,6 +51,17 @@ export function makeRequest(overrides: Partial<PartnerRequest> = {}): PartnerReq
     body: "Please confirm the schedule for next week.",
     status: "created",
     createdAt: "2025-01-31T09:05:00.000Z",
+    ...overrides,
+  };
+}
+
+// An approval without a reason. Pass `clientDecision: makeClientDecision(...)` to makeRequest to
+// get a request the client has answered; a request without the field is still waiting.
+export function makeClientDecision(overrides: Partial<ClientDecision> = {}): ClientDecision {
+  return {
+    decision: "Approved",
+    at: "2025-02-03T14:30:00.000Z",
+    receivedAt: "2025-02-03T14:30:02.000Z",
     ...overrides,
   };
 }

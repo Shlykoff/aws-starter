@@ -27,8 +27,19 @@ partner_url = "https://partner.example.com"
 # cannot compare the key with what is stored, so it re-sends it only when the number changes.
 # partner_api_key_version = 1
 
+# webhook_token is deliberately NOT set here either. It is the secret the recipient signs its
+# webhook calls with (contracts/webhook-api.md), at least 16 characters. The recipient is given
+# the same value out of band, together with the webhook_url output. Ephemeral like the API key:
+# give it again on every plan and every apply, best as an environment variable:
+#   export TF_VAR_webhook_token='...'
+# In CI it is the GitHub secret PARTNER_WEBHOOK_TOKEN, passed as TF_VAR_webhook_token.
+
+# Rotating the webhook token: give the new value (see above) AND raise this number by one, as
+# for the API key.
+# webhook_token_version = 1
+
 # optional
-# project                 = "aws-starter"
+# project                = "aws-starter"
 # env                     = "dev"
 # region                  = "eu-north-1"
 # backend_dist_dir        = "../../../backend/dist"   # build output, relative to this directory

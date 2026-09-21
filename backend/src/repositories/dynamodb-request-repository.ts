@@ -1,5 +1,7 @@
 import { GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { toClientDecision } from "../domain/client-decision";
+import type { StoredClientDecision } from "../domain/client-decision";
 import type { PartnerRequest, RequestStatus } from "../domain/request";
 import { ownerKey, requestKey } from "../domain/request-keys";
 import type { RequestRepository } from "./request-repository";
@@ -18,7 +20,9 @@ import type { RequestRepository } from "./request-repository";
 //   sk (sort key, S)       "REQ#<ULID>"   a ULID sorts by creation time, so a descending
 //                                         Query on one pk returns the newest request first
 //
-// Other attributes: id, partner, subject, body, status, createdAt (see RequestItem).
+// Other attributes: id, partner, subject, body, status, createdAt (see RequestItem), and once
+// the client has acted clientDecision and decisionAtMs (written by the webhook, see
+// dynamodb-decision-repository.ts, which also explains the index `by-request-id`).
 //
 // Why this is safe: `ownerId` always comes from the verified token, never from the client,
 // and it is the whole partition key. A user therefore cannot even address another user's
@@ -37,10 +41,14 @@ interface RequestItem {
   body: string;
   status: RequestStatus;
   createdAt: string;
+  // Only there once the client has acted. `decisionAtMs` (the number the webhook compares) is
+  // stored too, but the API never needs it, so it is not part of this type.
+  clientDecision?: StoredClientDecision;
 }
 
 // The reverse mapping. It copies fields one by one instead of returning the item, so `pk`
-// and `sk` (which contain the owner) can never end up in an API response.
+// and `sk` (which contain the owner) and `decisionAtMs` can never end up in an API response.
+// `toClientDecision` does the same for the decision, and leaves out its `eventId`.
 function toPartnerRequest(item: RequestItem): PartnerRequest {
   return {
     id: item.id,
@@ -49,6 +57,7 @@ function toPartnerRequest(item: RequestItem): PartnerRequest {
     body: item.body,
     status: item.status,
     createdAt: item.createdAt,
+    ...(item.clientDecision !== undefined && { clientDecision: toClientDecision(item.clientDecision) }),
   };
 }
 

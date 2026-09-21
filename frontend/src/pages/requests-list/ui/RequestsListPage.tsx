@@ -2,7 +2,13 @@ import { useEffect, type ReactNode } from "react";
 import { Link } from "react-router";
 import { observer } from "mobx-react-lite";
 import { CircleAlert, Inbox, Plus } from "lucide-react";
-import { RequestStatusBadge, STATUS_POLL_INTERVAL_MS, useRequestsStore, type PartnerRequest } from "@/entities/request";
+import {
+  ClientDecisionBadge,
+  RequestStatusBadge,
+  STATUS_POLL_INTERVAL_MS,
+  useRequestsStore,
+  type PartnerRequest,
+} from "@/entities/request";
 import { formatDateTime, useDocumentTitle, usePolling } from "@/shared/lib";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Button } from "@/shared/ui/button";
@@ -30,7 +36,11 @@ function RequestsTable({ items }: { items: PartnerRequest[] }) {
             </TableCell>
             <TableCell className="max-w-40 truncate">{request.partner}</TableCell>
             <TableCell>
-              <RequestStatusBadge status={request.status} />
+              {/* The delivery status, and next to it what the client decided, when they did. */}
+              <div className="flex items-center gap-1.5">
+                <RequestStatusBadge status={request.status} />
+                {request.clientDecision && <ClientDecisionBadge decision={request.clientDecision.decision} />}
+              </div>
             </TableCell>
             <TableCell className="whitespace-nowrap text-muted-foreground">
               <time dateTime={request.createdAt}>{formatDateTime(request.createdAt)}</time>

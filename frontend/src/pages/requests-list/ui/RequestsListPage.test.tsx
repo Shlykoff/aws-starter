@@ -1,6 +1,6 @@
 import { act, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { makeRequest, makeRequestsApi } from "@test/factories";
+import { makeClientDecision, makeRequest, makeRequestsApi } from "@test/factories";
 import { renderWithProviders } from "@test/render";
 import { ApiError } from "@/shared/api";
 import { RequestsStore, STATUS_POLL_INTERVAL_MS } from "@/entities/request";
@@ -46,6 +46,40 @@ describe("RequestsListPage", () => {
     expect(within(row as HTMLElement).getByText("Sent")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "First subject" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /New request/ })).toHaveAttribute("href", "/requests/new");
+  });
+
+  it("shows what the client decided next to the status, only in the rows that have a decision", async () => {
+    const { api, requests } = setup();
+    const approved = makeRequest({
+      subject: "Approved one",
+      status: "sent",
+      clientDecision: makeClientDecision({ decision: "Approved" }),
+    });
+    const declined = makeRequest({
+      subject: "Declined one",
+      status: "failed",
+      clientDecision: makeClientDecision({ decision: "Declined", reason: "Out of stock." }),
+    });
+    const waiting = makeRequest({ subject: "Waiting one", status: "sent" });
+    api.list.mockResolvedValue([waiting, declined, approved]);
+
+    renderWithProviders(<RequestsListPage />, { requests });
+
+    const rowOf = async (subject: string) =>
+      within((await screen.findByRole("link", { name: subject })).closest("tr") as HTMLElement);
+    const approvedRow = await rowOf("Approved one");
+    expect(approvedRow.getByText("Sent")).toBeInTheDocument();
+    expect(approvedRow.getByText("Approved")).toHaveAttribute("data-decision", "Approved");
+    // The delivery status stays as it was: the decision is shown in addition, not instead.
+    const declinedRow = await rowOf("Declined one");
+    expect(declinedRow.getByText("Failed")).toBeInTheDocument();
+    expect(declinedRow.getByText("Declined")).toHaveAttribute("data-decision", "Declined");
+    // No decision, no badge: the row of a request that is still waiting looks as before.
+    const waitingRow = await rowOf("Waiting one");
+    expect(waitingRow.getByText("Sent")).toBeInTheDocument();
+    expect(waitingRow.queryByText(/Approved|Declined/)).not.toBeInTheDocument();
+    // The reason is for the details page; the list stays compact.
+    expect(screen.queryByText("Out of stock.")).not.toBeInTheDocument();
   });
 
   it("shows an error alert and retries when the button is pressed", async () => {

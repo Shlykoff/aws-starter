@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { validateXML } from "xmllint-wasm";
+import { UNREADABLE_DOCUMENT_RULES } from "../domain/validation-result";
 import type { ValidationResult } from "../domain/validation-result";
 import { WHOLE_DOCUMENT, toFindings } from "./xsd-findings";
 import type { XmlValidator } from "./xml-validator";
@@ -22,6 +23,7 @@ import type { XmlValidator } from "./xml-validator";
 // The largest document we look at, in bytes. It is the size limit of the recipient's contract
 // (contracts/partner-api.md), and a Reply is meant to be tiny. The client refuses to read more
 // than this from the network; the check here is the second wall, for whatever else calls us.
+// The webhook's contract (contracts/webhook-api.md) has the same limit for the events we receive.
 export const MAX_XML_BYTES = 64 * 1024;
 
 interface XsdFile {
@@ -33,9 +35,10 @@ export class XsdXmlValidator implements XmlValidator {
   private readonly commonTypes: XsdFile;
   private readonly submission: XsdFile;
   private readonly reply: XsdFile;
+  private readonly event: XsdFile;
 
   /**
-   * Reads the three schema files ONCE, when the function starts. `schemasDirectory` is a
+   * Reads the four schema files ONCE, when the function starts. `schemasDirectory` is a
    * URL that ends with "/": the `schemas/` folder next to the bundle in Lambda (the build
    * copies contracts/xsd/ there), and contracts/xsd/ itself in the tests.
    */
@@ -47,6 +50,7 @@ export class XsdXmlValidator implements XmlValidator {
     this.commonTypes = load("common-types.xsd");
     this.submission = load("submission.xsd");
     this.reply = load("reply.xsd");
+    this.event = load("event.xsd");
   }
 
   validateSubmission(xml: string): Promise<ValidationResult> {
@@ -55,6 +59,10 @@ export class XsdXmlValidator implements XmlValidator {
 
   validateReply(xml: string): Promise<ValidationResult> {
     return this.validate(xml, this.reply);
+  }
+
+  validateEvent(xml: string): Promise<ValidationResult> {
+    return this.validate(xml, this.event);
   }
 
   private async validate(xml: string, schema: XsdFile): Promise<ValidationResult> {
@@ -90,7 +98,7 @@ export class XsdXmlValidator implements XmlValidator {
 // The raw-text checks. Returns the rule that was broken, or `undefined` when the text may go
 // on to the parser.
 function refuseBeforeParsing(xml: string): string | undefined {
-  if (Buffer.byteLength(xml, "utf8") > MAX_XML_BYTES) return "document too large";
+  if (Buffer.byteLength(xml, "utf8") > MAX_XML_BYTES) return UNREADABLE_DOCUMENT_RULES.tooLarge;
 
   // Any DOCTYPE is refused, which is the policy of the recipient too (contracts/partner-api.md):
   // without a DOCTYPE a document cannot define entities, so "billion laughs" (entity
@@ -101,14 +109,14 @@ function refuseBeforeParsing(xml: string): string | undefined {
   // The trade-off: text that merely CONTAINS these words in a comment or a CDATA section is
   // refused as well. A Reply or a Submission never has a legitimate reason to contain them,
   // so a false alarm costs nothing, and the rule stays a plain text search anyone can read.
-  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) return "DOCTYPE not allowed";
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) return UNREADABLE_DOCUMENT_RULES.doctype;
 
   // The text search above works on the characters we hold. A document that declares another
   // encoding could make the parser read the same bytes as different characters, so the
   // search would prove nothing. Both sides speak UTF-8 (the Reply is served as
   // `charset=utf-8`), so any other declared encoding is refused.
   const declared = /^<\?xml[^>]*?\sencoding\s*=\s*["']([^"']*)["']/.exec(xml.replace(/^﻿/, ""));
-  if (declared !== null && declared[1]?.toLowerCase() !== "utf-8") return "encoding must be UTF-8";
+  if (declared !== null && declared[1]?.toLowerCase() !== "utf-8") return UNREADABLE_DOCUMENT_RULES.encoding;
 
   return undefined;
 }

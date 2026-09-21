@@ -10,6 +10,23 @@ export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 // rejects the same input the API would; the API stays the authority.
 export const REQUEST_LIMITS = { partner: 100, subject: 200, body: 5000 } as const;
 
+// What the CLIENT did with the delivered message. It is independent of the delivery status:
+// it arrives by webhook, minutes or months after `sent` (or even before), and never expires.
+export const CLIENT_DECISIONS = ["Approved", "Declined"] as const;
+export type ClientDecisionValue = (typeof CLIENT_DECISIONS)[number];
+
+// Strict on purpose, like the rest of the request: an unknown `decision` is an error, and so is
+// `null` where the API omits the field. `reason` is text written by the recipient's side (third
+// party): it is only ever shown as text, never as markup (see ClientDecisionCard).
+export const clientDecisionSchema = z.object({
+  decision: z.enum(CLIENT_DECISIONS),
+  reason: z.string().optional(),
+  // When the client acted (the event's own time), and when our system stored it. ISO 8601, UTC.
+  at: z.string(),
+  receivedAt: z.string(),
+});
+export type ClientDecision = z.infer<typeof clientDecisionSchema>;
+
 // The type is derived from the schema, so the shape is described once and the API
 // response is checked against it at runtime, not just trusted by the compiler.
 export const partnerRequestSchema = z.object({
@@ -19,6 +36,8 @@ export const partnerRequestSchema = z.object({
   body: z.string(),
   status: z.enum(REQUEST_STATUSES),
   createdAt: z.string(),
+  // Omitted (never null) until the client acts.
+  clientDecision: clientDecisionSchema.optional(),
 });
 export type PartnerRequest = z.infer<typeof partnerRequestSchema>;
 

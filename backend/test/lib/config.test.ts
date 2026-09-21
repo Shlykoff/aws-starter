@@ -3,6 +3,7 @@ import {
   loadConfig,
   loadEnqueuerConfig,
   loadExchangeConfig,
+  loadWebhookConfig,
   loadWorkerConfig,
 } from "../../src/lib/config";
 
@@ -182,5 +183,35 @@ describe("loadWorkerConfig", () => {
     ])("rejects %s", (_label, value) => {
       expect(() => loadWorkerConfig({ ...env, SENDER_NAME: value })).toThrow(/SENDER_NAME must be 1-100 letters/);
     });
+  });
+});
+
+describe("loadWebhookConfig", () => {
+  const env = { TABLE_NAME: "t", WEBHOOK_TOKEN_PARAM: "/dev/demo/webhook-token" };
+
+  it("reads the table and the name of the token parameter, and defaults the log level to info", () => {
+    expect(loadWebhookConfig(env)).toEqual({
+      tableName: "t",
+      webhookTokenParam: "/dev/demo/webhook-token",
+      logLevel: "info",
+    });
+  });
+
+  it("uses LOG_LEVEL when it is set", () => {
+    expect(loadWebhookConfig({ ...env, LOG_LEVEL: "debug" }).logLevel).toBe("debug");
+  });
+
+  it("names every missing variable", () => {
+    expect(() => loadWebhookConfig({})).toThrow(
+      "Invalid configuration: TABLE_NAME is required; WEBHOOK_TOKEN_PARAM is required",
+    );
+  });
+
+  it("does not accept an empty parameter name", () => {
+    expect(() => loadWebhookConfig({ ...env, WEBHOOK_TOKEN_PARAM: "" })).toThrow(/WEBHOOK_TOKEN_PARAM must not be empty/);
+  });
+
+  it("does not ask for the variables of the other functions", () => {
+    expect(() => loadWebhookConfig(env)).not.toThrow();
   });
 });

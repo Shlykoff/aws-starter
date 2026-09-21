@@ -160,3 +160,43 @@ describe("DynamoRequestRepository.findById", () => {
     await expect(repository.findById("user-a", ID)).rejects.toThrow("network down");
   });
 });
+
+describe("the client's decision in the API model", () => {
+  const stored = {
+    decision: "Declined",
+    reason: "Out of stock",
+    at: "2026-09-21T10:15:32.000Z",
+    receivedAt: "2026-09-21T10:15:40.000Z",
+    eventId: "3f0c6b1e-5a4d-4e7b-9c1a-2d6e8f0a1b3c",
+  };
+  const item = { pk: "USER#user-a", sk: `REQ#${ID}`, ...request, decisionAtMs: 1789985732000, clientDecision: stored };
+  const apiDecision = { decision: "Declined", reason: "Out of stock", at: stored.at, receivedAt: stored.receivedAt };
+
+  it("is returned by findById, without the event id and without decisionAtMs", async () => {
+    ddb.on(GetCommand).resolves({ Item: item });
+
+    const result = await repository.findById("user-a", ID);
+
+    expect(result).toStrictEqual({ ...request, clientDecision: apiDecision });
+  });
+
+  it("is returned by listByOwner, without the event id and without decisionAtMs", async () => {
+    ddb.on(QueryCommand).resolves({ Items: [item, { pk: "USER#user-a", sk: "REQ#other", ...request, id: "other" }] });
+
+    const result = await repository.listByOwner("user-a", 50);
+
+    expect(result[0]).toStrictEqual({ ...request, clientDecision: apiDecision });
+    expect(JSON.stringify(result)).not.toContain(stored.eventId);
+    expect(JSON.stringify(result)).not.toContain("decisionAtMs");
+    expect(result[1]).not.toHaveProperty("clientDecision"); // absent, not undefined
+  });
+
+  it("has no reason when the stored decision has none", async () => {
+    const withoutReason = { decision: stored.decision, at: stored.at, receivedAt: stored.receivedAt, eventId: stored.eventId };
+    ddb.on(GetCommand).resolves({ Item: { ...item, clientDecision: withoutReason } });
+
+    const result = await repository.findById("user-a", ID);
+
+    expect(result?.clientDecision).toStrictEqual({ decision: "Declined", at: stored.at, receivedAt: stored.receivedAt });
+  });
+});
