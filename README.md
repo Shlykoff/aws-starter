@@ -97,8 +97,8 @@ nothing waits for it and nothing expires.
   with three requests: delivered, refused and failing (five attempts, then `failed`; at that
   stage the message also went to the DLQ, which stage 5 changed).
 - [x] Stage 3: the recipient as a separate system, XML + XSD validation on both sides, the
-  exchange record and its panel in the UI, the API key in SSM. Checked on AWS through an ngrok
-  tunnel to the recipient running in Docker on a laptop: a request delivered in about two
+  exchange record and its panel in the UI, the API key in SSM. Checked on AWS with the recipient
+  running in Docker (first on a laptop behind a tunnel, now on a free container host): a request delivered in about two
   seconds, one refused by the recipient, one refused by our own schema check without calling
   anybody, one retried five times until `failed` (8 minutes), and one that waited while the
   recipient was down and was delivered on the second attempt after it came back. The logs of
@@ -121,6 +121,10 @@ nothing waits for it and nothing expires.
   included (a broken JSON body and invalid fields carrying a marker string), left no marker string
   and no `[unlisted]` or `[rejected]` in 97 log lines, and the lines still carry ids, outcomes and
   counts.
+- [x] Stage 7: the recipient off the laptop: its image is built and published by a workflow and runs on
+  a free container host (Northflank sandbox, London) with a volume for its database. Checked: the
+  image starts as published, its key and login work, a message survived a rollout restart, and the
+  whole loop from AWS (delivery, Approve, Send again, Decline) ran against it.
 
 ## Try it
 
@@ -164,10 +168,11 @@ terraform init -backend-config=backend.tfbackend && terraform apply
 ```
 
 `partner_url` is where the AWS side finds the recipient: `https://<host>` with no path. AWS
-cannot reach `127.0.0.1`, so for a recipient running on your computer use the ngrok tunnel
-(`partner-sim/README.md`, "Optional: a public address through ngrok"), with your own API key
-and password in `partner-sim/.env`. Confirm the two SNS e-mail subscriptions (request status,
-alerts) that AWS sends to the address you gave.
+cannot reach `127.0.0.1`, so run the published image (`ghcr.io/<owner>/aws-starter-partner-sim`)
+on a container host with your own API key, password and webhook token
+(`partner-sim/README.md`, "Running it on a hosting platform": the free Northflank sandbox worked,
+a card is needed for verification and the 6 GB volume for `/data` costs $0.90 a month). Confirm the
+two SNS e-mail subscriptions (request status, alerts) that AWS sends to the address you gave.
 
 Run the web app against the deployed API:
 
@@ -198,7 +203,7 @@ and `. , ' & -` only, because the recipient's schema says so):
 | stop the recipient, create a request, wait for `failed` (about 8 minutes), start the recipient, press **Send again** | the request goes through delivery again and becomes `sent` |
 | press Approve, then Decline | the later action wins: the card shows Declined |
 | press **Send again** on an event | the same event again: nothing changes |
-| stop the recipient, create a request, start the recipient again within the retries (about 8 minutes) | the Exchange panel shows the failed attempt (`retry`, `502` from the tunnel), then the request is delivered on the next attempt, two minutes after the first |
+| stop (pause) the recipient, create a request, start it again within the retries (about 8 minutes) | the Exchange panel shows the failed attempt (`retry`, a `502`/`503` from the host), then the request is delivered on the next attempt, two minutes after the first |
 
 ## Layout
 
@@ -341,6 +346,13 @@ Written down as they are made; each stage adds its own.
   name: `reason` is a fixed word in the worker and free text in an event from the recipient. Rejected:
   a list of forbidden names (it fails the day somebody picks another name), and CloudWatch's data
   protection policies (billed per GB scanned, so not free).
+- **The recipient runs on a free container host, not on a laptop.** A laptop that sleeps breaks
+  deliveries and keeps the data on a personal machine. The image is built by a workflow, so what runs
+  is what was tested, and the host only pulls it. Rejected: Render's free tier (no persistent disk,
+  so the database is wiped at every redeploy, and it sleeps after 15 minutes without traffic, which
+  needs a pinger); Fly.io, Railway and Koyeb (no longer a free tier that fits). Northflank's sandbox
+  asks for a card and charges for the volume ($0.15 per GB per month, 6 GB minimum); that is the price
+  of a database that survives a restart.
 
 ## Limits
 
@@ -348,19 +360,18 @@ Written down as they are made; each stage adds its own.
   message and its schemas are neutral and illustrative.
 - Demo scale on purpose: DynamoDB 5/5 provisioned units, the account's Lambda concurrency of 10,
   one delivery at a time per partner name, the worker at most two at once.
-- The recipient is a simulator with one shared API key and one inbox login. For AWS to reach it
-  from a laptop the demo uses an ngrok tunnel: it needs an ngrok account, the free plan has
-  monthly quotas, and while the tunnel or the container is down, deliveries are retried and
-  finally fail.
+- The recipient is a simulator with one shared API key and one inbox login, on the public internet
+  around the clock, with no rate limit on its login. It runs on a free container host (a card for
+  verification, $0.90 a month for the volume, an image that has to be redeployed by hand); while it
+  is down, deliveries are retried and finally fail.
 - The exchange record holds the message text (S3, SSE-S3, deleted after 30 days) and can be read
   only by the owner of the request. Logs are designed to carry no message text; a full review of
   them is still to do.
 - Both validators are libxml2 (see Decisions).
 - The log guard knows shapes, not meaning: a one-word value in a field that takes a word passes, and
   the text of an error is scrubbed of quotes and capped but not otherwise inspected. It covers the
-  Lambdas. The recipient writes to its container's output, and the ngrok tunnel ends TLS and shows
-  the full bodies in its inspector (`127.0.0.1:4040`) and to ngrok itself: fine for fake data, not for
-  real data.
+  Lambdas. The recipient writes to its container's output, and its host terminates TLS and can see the
+  traffic: fine for fake data, not for real data.
 - Sending again has no limit on how often it is used, and only a `failed` request can be sent
   again. There is no tool to redrive the DLQ: an operator moves those messages by hand.
 - The webhook is authenticated by a shared token, and rotating it is a manual step on both sides.
