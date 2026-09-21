@@ -157,12 +157,20 @@ nothing waits for it and nothing expires.
   log group `aws/spans` cannot be created by us (AWS reserves the prefix), a worker thread of the XML
   validator started the tracing SDK again (fixed in the build), and Lambda links the consumer of a
   queue message to the trace instead of joining it (the worker takes the parent from the message).
-- [ ] Stage 12: the API is a REST API instead of an HTTP API, so that API Gateway is a node of the
-  trace and the trace of a user action starts with an id made in the browser (see Decisions). Built and
-  reviewed, **not deployed yet**. The recipient's `WEBHOOK_URL` changes with it (the URL now contains the
-  stage). To check after the deploy: that the Cognito authorizer accepts the raw access token (no `Bearer `
-  prefix), that API Gateway continues the trace id the browser sends, and that the basic API metrics
-  appear with detailed metrics switched off.
+- [x] Stage 12: the API is a REST API instead of an HTTP API, so that API Gateway is a node of the
+  trace and the trace of a user action starts with an id made in the browser (see Decisions). Checked on
+  AWS after the deploy (55 added, 8 changed, 21 destroyed: the old HTTP API): without a token the
+  gateway answers 401 with the CORS header, and a preflight for `POST /requests` allows
+  `X-Amzn-Trace-Id`; a signed decision event with Cyrillic and Chinese text went through the gateway and
+  was stored byte for byte; the basic API metrics (`Count`, `4XXError`, `5XXError` by `ApiName` and
+  `Stage`) appear with detailed metrics off. From a browser (sign-in, list, create, exchange, all with
+  the raw access token, no `Bearer `): the access log shows 200 on the reads, 201 on the create and one
+  expected 404 (the exchange of a request that has not been tried yet); one request made in the browser
+  gave **one trace of 40 spans** that starts at the gateway (`POST /requests`), goes through
+  `create-request`, `enqueue request` and both delivery attempts (the first got a 503 from the recipient,
+  which was restarting, the second was delivered), and the gateway span has the parent id that the
+  browser made, so API Gateway continued the browser's trace. The recipient's `WEBHOOK_URL` changed with
+  the URL (it contains the stage).
 
 ## Try it
 
@@ -313,9 +321,8 @@ Written down as they are made; each stage adds its own.
     names (`Count`, `4XXError`, `5XXError`, `Latency`; dimensions `ApiName` and `Stage`).
 
   Rejected: staying on the HTTP API and using only the header from the browser (there would be no
-  gateway node in the trace). Not verified yet, and checked after the deploy: that the authorizer
-  accepts the raw access token, that API Gateway continues the browser's trace id, and that the basic
-  metrics appear with detailed metrics off.
+  gateway node in the trace). Checked on AWS (Stage 12): the authorizer accepts the raw access token,
+  API Gateway continues the browser's trace id, and the basic metrics appear with detailed metrics off.
 - **Cognito: Essentials tier with the classic hosted UI** instead of managed login. The
   classic UI covers login, logout and password reset, and managed login needs an extra
   branding resource before it renders anything.
