@@ -103,10 +103,14 @@ nothing waits for it and nothing expires.
   anybody, one retried five times until `failed` (8 minutes), and one that waited while the
   recipient was down and was delivered on the second attempt after it came back. The logs of
   those runs contain no message text.
+- [x] Stage 4: the client's decision by webhook: the recipient calls a public, signed route
+  when the client approves or declines, whenever that happens. Checked on AWS with the recipient
+  in Docker: a call without a signature and one with a wrong signature get `401`; Approve stores
+  the decision (a reason with `&`, `<` and Cyrillic arrives byte for byte through API Gateway);
+  Send again changes nothing; a later Decline replaces it; the delivery status stays `sent`. The
+  logs of those calls contain no reason text and no token. A second `terraform plan` after the
+  deploy shows no changes.
   Still to do: a full review of the logs for personal data.
-- [ ] Stage 4: the client's decision by webhook: the recipient calls a public, signed route
-  when the client approves or declines, whenever that happens. Written and tested (unit tests,
-  a Python signer against the Node receiver, the built bundle); **not yet run on AWS**.
 
 ## Try it
 
