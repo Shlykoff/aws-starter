@@ -243,48 +243,51 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest          # finds the schemas and fixtures in ../contracts
 ```
 
-## Optional: a public address through ngrok
+## Running it on a hosting platform
 
-> **Checked with a free ngrok account** (the `tunnel` profile with the account's fixed dev domain in
-> `NGROK_DOMAIN`): a public `POST` reaches the service (`200`), a wrong key gets `401`, and the
-> inbox refuses the demo password. The main system on AWS delivered messages through it, and a
-> stopped container showed up there as a `502` from ngrok (a temporary failure, retried). The
-> address of your account is shown in the ngrok dashboard under *Domains*.
+The recipient is a separate system: the main system on AWS has to reach it over the internet, so it
+should not depend on a laptop being awake. It runs anywhere that runs a container and can keep a
+volume, and the current setup is a free container host (below).
 
-For a sender that cannot reach your computer (for example the main system on AWS), the `tunnel`
-profile starts an ngrok container next to the service:
-
-1. In `.env` set `NGROK_AUTHTOKEN` (from the ngrok dashboard) and `NGROK_DOMAIN` (the domain
-   ngrok gave your account, e.g. `something.ngrok-free.app`, without `https://`).
-2. **Change `PARTNER_API_KEY` and `UI_PASSWORD` in `.env`.** Through the tunnel the whole service,
-   inbox login included, is on the internet, and the demo values are public.
-3. `docker compose --profile tunnel up --build`
-4. The sender's base URL is `https://<NGROK_DOMAIN>`. Traffic is also shown at
-   <http://127.0.0.1:4040>.
-
-The container runs `ngrok http partner-sim:8080 --url https://<NGROK_DOMAIN>`, with the token
-in the environment (as the ngrok Docker documentation describes). ngrok ends TLS; the simulator
-itself speaks plain HTTP.
-
-## The published image (for a hosting platform)
-
-`.github/workflows/partner-sim-image.yml` tests the recipient and, on every push to `main` that
-touches `partner-sim/` or `contracts/xsd/`, publishes it to the GitHub Container Registry as
-`ghcr.io/<owner>/aws-starter-partner-sim` (`linux/amd64`), tagged `latest` and `sha-<commit>` (pin
+**The image.** `.github/workflows/partner-sim-image.yml` tests the recipient and, on every push to
+`main` that touches `partner-sim/` or `contracts/xsd/`, publishes it to the GitHub Container Registry
+as `ghcr.io/<owner>/aws-starter-partner-sim` (`linux/amd64`), tagged `latest` and `sha-<commit>` (pin
 the second when a deploy must be repeatable). A pull request only runs the tests.
 
-To run it somewhere that is not your laptop:
+What a host has to provide:
 
-- **The package has to be public** for a platform to pull it without credentials (GitHub: your
-  profile, Packages, the package, Package settings, Change visibility). A new package starts private.
-- **The image has no defaults for secrets.** It refuses to start without `PARTNER_API_KEY`, `UI_USER`
-  and `UI_PASSWORD`; `WEBHOOK_URL` and `WEBHOOK_TOKEN` go together or not at all (see
-  [Configuration](#configuration)). Set them in the platform's secret store, never in the repository.
-- **It listens on port 8080** (HTTP; the platform terminates TLS) and answers `GET /healthz` for a
-  health check.
-- **The data is one SQLite file, `/data/partner.db`.** Mount a persistent volume at `/data`, and make
-  sure the user inside the image (`app`) can write to it. Without a volume the messages, the client
-  decisions and the memory of answered `MessageId`s disappear at every restart.
+- **A public package**, so that the host can pull the image without credentials (GitHub: your
+  profile, Packages, the package, Package settings, Change visibility). The package of this
+  repository was public from its first publish, because it is linked to a public repository.
+- **The secrets, in the host's own store, never in the repository.** The image has no defaults for
+  them: it refuses to start without `PARTNER_API_KEY`, `UI_USER` and `UI_PASSWORD`; `WEBHOOK_URL` and
+  `WEBHOOK_TOKEN` go together or not at all (see [Configuration](#configuration)).
+- **Port 8080**, HTTP (the host terminates TLS), and `GET /healthz` for a health check.
+- **A persistent volume at `/data`.** The data is one SQLite file, `/data/partner.db`. Without a
+  volume the messages, the client decisions and the memory of answered `MessageId`s disappear at
+  every redeploy. The user inside the image (`app`) has to be able to write there.
+
+### What was used: Northflank's free Developer Sandbox
+
+Checked on 2026-09-21. It runs one small service without sleeping (Render's free tier sleeps after
+15 minutes and has no persistent disk; Fly.io, Railway and Koyeb no longer have a free tier that
+fits). It **asks for a card** (verification only; nothing is charged for the sandbox itself) and the
+volume is not free.
+
+1. Project: Northflank Cloud, a region marked free (Europe - West, London), registry mode PaaS.
+2. Service: Deployment, External image, `ghcr.io/<owner>/aws-starter-partner-sim:latest`, plan
+   `nf-compute-10` (0.1 vCPU, 256 MB), one instance.
+3. Port `8080`, HTTP, public. The host gives the address the sender uses as its `PARTNER_URL`.
+4. Runtime variables: `PARTNER_API_KEY`, `UI_USER`, `UI_PASSWORD`, `WEBHOOK_URL` (the sender's
+   `webhook_url` output) and `WEBHOOK_TOKEN`, marked as secrets.
+5. Health check: readiness, HTTP, `/healthz`, port `8080`.
+6. Volume: NVMe, 6 GB (the smallest offered), mounted at `/data`. It costs **$0.15 per GB per
+   month, so $0.90 a month**: the one thing that is not free.
+
+What was seen: the image starts as it is (the volume was writable by the image's user, no change
+needed); a message written before a rollout restart was still there after it; the whole loop with
+AWS worked (delivery, Approve, Send again, Decline). To update, redeploy or restart the service: it
+pulls `latest` again (and starts with the data it left on the volume). Not checked: any other host.
 
 ## Configuration
 
@@ -304,9 +307,8 @@ one message that lists every problem.
 | `MAX_BODY_BYTES` | `65536` | Largest accepted request body. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
 
-Only for Compose: `PARTNER_PORT` (host port, default `8080`), `PARTNER_BIND` (default
-`127.0.0.1`, this computer only; `0.0.0.0` serves other computers), `NGROK_AUTHTOKEN`,
-`NGROK_DOMAIN`.
+Only for Compose: `PARTNER_PORT` (host port, default `8080`) and `PARTNER_BIND` (default
+`127.0.0.1`, this computer only; `0.0.0.0` serves other computers).
 
 Nothing that comes from a message, and no key, password, token or signature, is ever written to
 the log: only the outcome of each request ("submission answered: status 422, SCHEMA_INVALID",
@@ -454,7 +456,7 @@ Each with the alternative that was rejected.
 - It **simulates**, it does not deliver anything. Messages are stored in one SQLite file, without
   a retention limit, until you remove the volume.
 - One process, no rate limiting, no TLS of its own, no request timeout for slow uploads. Do not
-  put it on the internet without the tunnel's TLS in front, and never with the demo values.
+  put it on the internet without a TLS-terminating host in front, and never with the demo values.
 - Authentication is one shared API key and one shared inbox login.
 - The two rules (`[reject]`, `[fail]`) are the only "business logic".
 - The client action sends **one attempt per click**: no automatic retry, no background work. An
