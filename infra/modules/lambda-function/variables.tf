@@ -28,6 +28,12 @@ variable "policy_statements" {
   }
 }
 
+variable "layers" {
+  description = "ARNs of Lambda layers to attach (the OpenTelemetry layer of the traced functions)."
+  type        = list(string)
+  default     = []
+}
+
 variable "tracing" {
   description = "Turn on X-Ray active tracing: Lambda then records a trace (start-up time, run time, errors) for the invocations X-Ray samples. Off for the functions the browser polls: see README, Decisions."
   type        = bool
