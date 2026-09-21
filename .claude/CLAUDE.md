@@ -19,6 +19,7 @@ explained in two sentences, simplify it, or write down why in the README "Decisi
 - **Agents** (`.claude/agents/`):
   - `terraform-engineer`, `backend-engineer`, `frontend-engineer` implement.
   - `python-engineer` implements the partner simulator in `partner-sim/`.
+  - `qa-engineer` tests independently: from the contracts, not from the code (see its file).
   - `walkthrough-coach` turns the finished code into study notes (questions and
     honest answers).
 
@@ -37,6 +38,45 @@ explained in two sentences, simplify it, or write down why in the README "Decisi
    stage's questions to `NOTES.md` (personal, git-ignored; `walkthrough-coach` can
    draft them). Every answer there must say what is in the repo and what is not yet.
 5. **Apply.** Only after explicit owner confirmation (see hard rules).
+
+## Keeping agents cheap
+
+Agents are the biggest cost of this project (the XML exchange took about 890k tokens across
+three agents; half of it went to the backend agent, which made 139 tool calls, among them 12
+mutation checks and several container experiments). Every agent and the lead follow these rules.
+
+**The lead, when writing a brief**
+- The brief holds only what is specific to the task: the goal, the exact files or folders, the
+  contract files that are the source of truth (by path, not pasted), the acceptance criteria and
+  what not to do. Rules that are in this file or in the agent's own file are **not repeated**.
+- Say which model to use (`model` parameter): the default is `sonnet`; `haiku` only for
+  mechanical, easy-to-verify work (running suites and comparing, formatting, a text change);
+  never `haiku` for parsing, auth, IAM or anything that handles secrets.
+- At most **two agents at a time**. More of them do not finish sooner in tokens, they hit the
+  session limit sooner (a limit stopped three of four agents once and the work had to resume).
+- Give a **report size** (default: at most 60 lines).
+- Split the checking, so that nobody does the same expensive thing twice: the engineer runs the
+  unit tests and targeted checks while building, and one full run at the end; QA does the built
+  artefacts, the cross-side and hostile-input tests, the live run and the log scan; the lead reads
+  the security-critical diff (IAM, parsing, auth, secrets, anything public) and runs the standard
+  suites once. A live AWS run is done once, by one party.
+
+**Every agent**
+- Read what the brief names, and search (`grep`, an offset and a limit) instead of reading
+  whole large files. Do not re-read a file you just wrote or edited.
+- Run the narrowest check that answers the question (one test file, one package). Cut the
+  output (`tail`, `grep`): never let a log of hundreds of lines into the conversation. One full
+  run of the suites at the end, not after every edit.
+- Extras have caps unless the brief raises them: at most **3 mutation checks** (the ones that
+  guard the riskiest behaviour), at most 4 screenshots, one Docker experiment and only when
+  the brief asks for it. Exploring beyond the brief (a new tool, a comparison of libraries, a
+  performance study) is not part of the job: mention it in one line and stop.
+- If the brief and the contract disagree, or the contract is silent on something that matters:
+  choose the most cautious reading, write it down in one line in the report, and go on. If the
+  wrong guess would cost a redo of more than a few files, stop and ask the lead instead.
+- The report is short: files (one line each, only where the purpose is not obvious), decisions
+  (one line each, with the rejected alternative), evidence (a result, not a log), what was not
+  verified. No retelling of the work, no restating of the brief.
 
 ## Code review checklist
 
