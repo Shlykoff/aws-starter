@@ -4,6 +4,7 @@ import { observer } from "mobx-react-lite";
 import { CircleAlert, Inbox, Plus } from "lucide-react";
 import {
   ClientDecisionBadge,
+  getClientStatus,
   RequestStatusBadge,
   STATUS_POLL_INTERVAL_MS,
   useRequestsStore,
@@ -27,26 +28,30 @@ function RequestsTable({ items }: { items: PartnerRequest[] }) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {items.map((request) => (
-          <TableRow key={request.id}>
-            <TableCell className="max-w-64 truncate font-medium">
-              <Link to={`/requests/${request.id}`} className="underline-offset-4 hover:underline">
-                {request.subject}
-              </Link>
-            </TableCell>
-            <TableCell className="max-w-40 truncate">{request.partner}</TableCell>
-            <TableCell>
-              {/* The delivery status, and next to it what the client decided, when they did. */}
-              <div className="flex items-center gap-1.5">
-                <RequestStatusBadge status={request.status} />
-                {request.clientDecision && <ClientDecisionBadge decision={request.clientDecision.decision} />}
-              </div>
-            </TableCell>
-            <TableCell className="whitespace-nowrap text-muted-foreground">
-              <time dateTime={request.createdAt}>{formatDateTime(request.createdAt)}</time>
-            </TableCell>
-          </TableRow>
-        ))}
+        {items.map((request) => {
+          const clientStatus = getClientStatus(request);
+          return (
+            <TableRow key={request.id}>
+              <TableCell className="max-w-64 truncate font-medium">
+                <Link to={`/requests/${request.id}`} className="underline-offset-4 hover:underline">
+                  {request.subject}
+                </Link>
+              </TableCell>
+              <TableCell className="max-w-40 truncate">{request.partner}</TableCell>
+              <TableCell>
+                {/* The delivery status, and next to it the client's status: the decision, or
+                    "Waiting" for a delivered request without one. None for the others. */}
+                <div className="flex items-center gap-1.5">
+                  <RequestStatusBadge status={request.status} />
+                  {clientStatus && <ClientDecisionBadge clientStatus={clientStatus} />}
+                </div>
+              </TableCell>
+              <TableCell className="whitespace-nowrap text-muted-foreground">
+                <time dateTime={request.createdAt}>{formatDateTime(request.createdAt)}</time>
+              </TableCell>
+            </TableRow>
+          );
+        })}
       </TableBody>
     </Table>
   );

@@ -69,17 +69,32 @@ describe("RequestsListPage", () => {
       within((await screen.findByRole("link", { name: subject })).closest("tr") as HTMLElement);
     const approvedRow = await rowOf("Approved one");
     expect(approvedRow.getByText("Sent")).toBeInTheDocument();
-    expect(approvedRow.getByText("Approved")).toHaveAttribute("data-decision", "Approved");
+    expect(approvedRow.getByText("Approved")).toHaveAttribute("data-client-status", "Approved");
     // The delivery status stays as it was: the decision is shown in addition, not instead.
     const declinedRow = await rowOf("Declined one");
     expect(declinedRow.getByText("Failed")).toBeInTheDocument();
-    expect(declinedRow.getByText("Declined")).toHaveAttribute("data-decision", "Declined");
-    // No decision, no badge: the row of a request that is still waiting looks as before.
+    expect(declinedRow.getByText("Declined")).toHaveAttribute("data-client-status", "Declined");
+    // No decision yet on a delivered request: it says Waiting, and neither Approved nor Declined.
     const waitingRow = await rowOf("Waiting one");
     expect(waitingRow.getByText("Sent")).toBeInTheDocument();
+    expect(waitingRow.getByText("Waiting")).toHaveAttribute("data-client-status", "Waiting");
     expect(waitingRow.queryByText(/Approved|Declined/)).not.toBeInTheDocument();
     // The reason is for the details page; the list stays compact.
     expect(screen.queryByText("Out of stock.")).not.toBeInTheDocument();
+  });
+
+  it("shows no client status in the rows of requests that were not delivered", async () => {
+    const { api, requests } = setup();
+    const statuses = ["created", "queued", "failed", "rejected"] as const;
+    api.list.mockResolvedValue(statuses.map((status) => makeRequest({ subject: `Row ${status}`, status })));
+
+    renderWithProviders(<RequestsListPage />, { requests });
+
+    for (const status of statuses) {
+      const row = within((await screen.findByRole("link", { name: `Row ${status}` })).closest("tr") as HTMLElement);
+      expect(row.getByText(new RegExp(`^${status}$`, "i"))).toBeInTheDocument();
+      expect(row.queryByText(/Waiting|Approved|Declined/)).not.toBeInTheDocument();
+    }
   });
 
   it("shows an error alert and retries when the button is pressed", async () => {

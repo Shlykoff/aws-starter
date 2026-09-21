@@ -14,18 +14,19 @@ describe("ClientDecisionCard with a decision", () => {
     show({ status: "sent", clientDecision: makeClientDecision({ decision: "Approved", at, reason: "Paid by card." }) });
 
     expect(screen.getByRole("heading", { name: "Client decision" })).toBeInTheDocument();
-    expect(within(card()).getByText("Approved")).toHaveAttribute("data-decision", "Approved");
+    expect(within(card()).getByText("Approved")).toHaveAttribute("data-client-status", "Approved");
     const time = within(card()).getByText(formatDateTime(at));
     expect(time.tagName).toBe("TIME");
     expect(time).toHaveAttribute("datetime", at);
     expect(within(card()).getByText("Paid by card.")).toBeInTheDocument();
-    expect(screen.queryByText(/Waiting for the client/)).not.toBeInTheDocument();
+    expect(within(card()).queryByText("Waiting")).not.toBeInTheDocument();
+    expect(screen.queryByText(/has not answered yet/)).not.toBeInTheDocument();
   });
 
   it("shows a decline the same way, in its own words and look", () => {
     show({ status: "sent", clientDecision: makeClientDecision({ decision: "Declined", reason: "Out of stock." }) });
 
-    expect(within(card()).getByText("Declined")).toHaveAttribute("data-decision", "Declined");
+    expect(within(card()).getByText("Declined")).toHaveAttribute("data-client-status", "Declined");
     expect(within(card()).queryByText("Approved")).not.toBeInTheDocument();
     expect(within(card()).getByText("Out of stock.")).toBeInTheDocument();
   });
@@ -57,13 +58,29 @@ describe("ClientDecisionCard with a decision", () => {
 });
 
 describe("ClientDecisionCard without a decision", () => {
-  it("waits calmly for a delivered request: no error, no spinner, no deadline", () => {
+  it("says Waiting for a delivered request: a word, and a calm sentence with no error, spinner or deadline", () => {
     show({ status: "sent" });
 
-    expect(within(card()).getByText("Waiting for the client's decision. It can arrive at any time.")).toBeInTheDocument();
+    expect(within(card()).getByText("Waiting")).toHaveAttribute("data-client-status", "Waiting");
+    expect(within(card()).getByText("The client has not answered yet. It can arrive at any time.")).toBeInTheDocument();
+    expect(within(card()).queryByText(/Approved|Declined/)).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(card().textContent).not.toMatch(/overdue|late|expired|timeout|deadline/i);
+  });
+
+  it("turns Waiting into the decision when the decision arrives, in the same card", () => {
+    const request = makeRequest({ status: "sent" });
+    const { rerender } = render(<ClientDecisionCard request={request} />);
+    expect(within(card()).getByText("Waiting")).toBeInTheDocument();
+
+    rerender(
+      <ClientDecisionCard request={{ ...request, clientDecision: makeClientDecision({ decision: "Declined" }) }} />,
+    );
+
+    expect(within(card()).getByText("Declined")).toBeInTheDocument();
+    expect(within(card()).queryByText("Waiting")).not.toBeInTheDocument();
+    expect(screen.queryByText(/has not answered yet/)).not.toBeInTheDocument();
   });
 
   // Nothing is expected from the client before delivery, or after a delivery that did not happen.
