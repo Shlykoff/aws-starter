@@ -45,6 +45,12 @@ Agents are the biggest cost of this project (the XML exchange took about 890k to
 three agents; half of it went to the backend agent, which made 139 tool calls, among them 12
 mutation checks and several container experiments). Every agent and the lead follow these rules.
 
+**The lead leads.** The lead's work is to plan, brief, review, run the checks, make the PR and merge;
+the agents build. Split a stage into small slices (one agent, one folder, a brief a page long, minimal
+context) instead of writing the code yourself. **One task, one fresh agent:** a finished agent is never
+resumed (no SendMessage to it) and never reused for the next slice, so old context does not pile up;
+the agents keep no memory files, a new agent starts clean. The lead writes code only for a one-line fix.
+
 **The lead, when writing a brief**
 - The brief holds only what is specific to the task: the goal, the exact files or folders, the
   contract files that are the source of truth (by path, not pasted), the acceptance criteria and
