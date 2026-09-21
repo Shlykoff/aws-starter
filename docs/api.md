@@ -350,10 +350,26 @@ checks ownership in the table before it touches S3).
 
 ## Logs
 
-- **Where**: CloudWatch Logs, nowhere else. One log group per Lambda (`/aws/lambda/<function>`) and one
-  for the API's access log (`/aws/apigateway/<project>-<env>-api`), all kept 14 days. The access log
-  format has no client IP, user agent or token claims. Nothing is exported. (The recipient,
-  `partner-sim`, writes to the standard output of its container.)
+- **Where**: CloudWatch Logs. One log group per Lambda (`/aws/lambda/<function>`) and one for the
+  API's access log (`/aws/apigateway/<project>-<env>-api`), all kept **30 days** (the hot tier: fast
+  to search with Logs Insights). The access log format has no client IP, user agent or token claims.
+  (The recipient, `partner-sim`, is another organisation's system: its logs are not ours to read.)
+- **Metrics, alarms, dashboard** (module `infra/modules/observability`), all inside the free tier:
+  - 8 custom metrics in the namespace `<project>/<env>`, without dimensions (a dimension multiplies
+    the count, and 10 are free). Six are **counted from the log lines** by metric filters:
+    `DeliverySent`, `DeliveryRejected`, `DeliveryFailed`, `DeliveryRetried` (the worker), `WebhookUnauthorized`
+    (the webhook function) and `LogGuardHits` (every function: a line with `[unlisted]` or `[rejected]`
+    is a bug). The filters match on **terms**, not on JSON: a Lambda log line is
+    `timestamp<TAB>requestId<TAB>LEVEL<TAB>{json}`, which is not JSON as a whole. Two are **durations**,
+    which a filter cannot read out of such a line, so the worker writes them as embedded-metric-format
+    lines (`src/lib/metrics.ts`): `TimeToSentMs` (creation to `sent`) and `PartnerMs` (the call to the
+    recipient). They are written only when `METRICS_NAMESPACE` is set (Terraform sets it on the worker).
+  - 8 alarms, to the `alerts` topic, that with the two older ones use all 10 free: worker errors,
+    webhook errors, worker duration p95 over 80 % of its timeout, API 5xx, oldest queue message older
+    than 10 minutes, DynamoDB write throttling, five webhook signature failures in five minutes, a log
+    guard hit.
+  - One dashboard, `<project>-<env>-delivery`, and saved Logs Insights queries (the timeline of one
+    request, failed requests, the slowest deliveries, attempts by outcome, webhook events, guard hits).
 - **One JSON object per line**: `level`, `message` and fields. The `message` is a fixed sentence of
   at most 120 characters, on one line; data goes in fields.
 - **Which fields**: only those on the list in `backend/src/lib/log-fields.ts`, each with a shape for
