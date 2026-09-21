@@ -1,7 +1,7 @@
 # One dashboard for the whole delivery flow, read top to bottom:
-# alarms -> deliveries and their latency -> the worker and the queue -> the table -> the API.
+# alarms -> deliveries and their latency -> the worker and the queue -> the table -> the API -> the log archiver.
 #
-# 26 metric lines, inside the free tier (3 dashboards of up to 50 metrics each). Counted the
+# 28 metric lines, inside the free tier (3 dashboards of up to 50 metrics each). Counted the
 # strict way: every line, also the one that only feeds a metric-math expression and the second
 # percentile of the same metric. The grid is 24 columns wide, every row holds three widgets of 8
 # columns. A dashboard body is checked only when it is applied, so a typo in this JSON shows up
@@ -243,6 +243,23 @@ locals {
         metrics = [
           [var.namespace, "WebhookUnauthorized", { label = "Unauthorized webhook calls" }],
           [var.namespace, "LogGuardHits", { label = "Log guard hits" }],
+        ]
+      }
+    },
+    {
+      # No alarm for the archiver: the account is at the 10 free alarms already. A failed batch
+      # (Errors above 0) is seen here, and Lambda has retried it twice by then.
+      type = "metric", x = 0, y = 31, width = 8, height = 6
+      properties = {
+        title  = "Log archiver: runs and errors (per 5 min)"
+        region = local.region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        yAxis  = { left = { min = 0 } }
+        metrics = [
+          ["AWS/Lambda", "Invocations", "FunctionName", var.archiver_function_name, { label = "Runs" }],
+          ["AWS/Lambda", "Errors", "FunctionName", var.archiver_function_name, { label = "Errors" }],
         ]
       }
     },

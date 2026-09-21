@@ -217,6 +217,33 @@ describe("get-exchange container", () => {
   });
 });
 
+describe("log-archiver container", () => {
+  it("builds one service and shares it", async () => {
+    const { container } = await import("../src/container-archiver");
+    const { TOKENS } = await import("../src/tokens");
+    const { LogArchiveService } = await import("../src/services/log-archive-service");
+
+    const service = container.get(TOKENS.LogArchiveService);
+
+    expect(service).toBeInstanceOf(LogArchiveService);
+    expect(container.get(TOKENS.LogArchiveService)).toBe(service);
+  });
+
+  it("fails fast when ARCHIVE_BUCKET is missing", async () => {
+    unset("ARCHIVE_BUCKET");
+
+    await expect(import("../src/container-archiver")).rejects.toThrow(
+      "Invalid configuration: ARCHIVE_BUCKET is required",
+    );
+  });
+
+  it("does not need the variables of the other functions", async () => {
+    unset("TABLE_NAME", "QUEUE_URL", "PARTNER_URL", "PARTNER_API_KEY_PARAM", "WEBHOOK_TOKEN_PARAM", "TOPIC_ARN", "AUDIT_BUCKET", "MAX_RECEIVE_COUNT");
+
+    await expect(import("../src/container-archiver")).resolves.toBeDefined();
+  });
+});
+
 describe("API container", () => {
   it("does not need the variables of the delivery pipeline", async () => {
     unset("QUEUE_URL", "PARTNER_URL", "PARTNER_API_KEY_PARAM", "WEBHOOK_TOKEN_PARAM", "TOPIC_ARN", "AUDIT_BUCKET", "MAX_RECEIVE_COUNT");

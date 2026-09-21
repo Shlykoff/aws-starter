@@ -43,6 +43,11 @@ variable "webhook_log_group_name" {
   type        = string
 }
 
+variable "archiver_function_name" {
+  description = "Name of the log archiver function (dimension of its Lambda metrics, shown on the dashboard)."
+  type        = string
+}
+
 variable "api_id" {
   description = "ID of the HTTP API (dimension of its metrics)."
   type        = string

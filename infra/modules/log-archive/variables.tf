@@ -1,5 +1,5 @@
 variable "prefix" {
-  description = "<project>-<env>, e.g. aws-starter-dev. Every name in the module (bucket, stream, roles, workgroup) starts with it; the CI deploy role may create only roles that start with the project name."
+  description = "<project>-<env>, e.g. aws-starter-dev. Every name in the module (bucket, function, role, workgroup) starts with it; the CI deploy role may create only roles that start with the project name."
   type        = string
 }
 
@@ -9,7 +9,18 @@ variable "log_group_names" {
 }
 
 variable "expiration_days" {
-  description = "Archived lines (and Firehose's failed batches) are deleted this many days after they were written. 395 = 13 months: a full year plus a month to compare against."
+  description = "Archived lines are deleted this many days after they were written. 395 = 13 months: a full year plus a month to compare against."
   type        = number
   default     = 395
+}
+
+variable "archiver_source_dir" {
+  description = "Directory with the built log-archiver function (backend/dist/log-archiver)."
+  type        = string
+}
+
+variable "environment" {
+  description = "Environment variables every function of the project gets (LOG_LEVEL, NODE_OPTIONS); the module adds the bucket name."
+  type        = map(string)
+  default     = {}
 }

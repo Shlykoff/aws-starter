@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  loadArchiverConfig,
   loadConfig,
   loadEnqueuerConfig,
   loadExchangeConfig,
@@ -213,5 +214,30 @@ describe("loadWebhookConfig", () => {
 
   it("does not ask for the variables of the other functions", () => {
     expect(() => loadWebhookConfig(env)).not.toThrow();
+  });
+});
+
+describe("loadArchiverConfig", () => {
+  it("reads the bucket and defaults the log level to info", () => {
+    expect(loadArchiverConfig({ ARCHIVE_BUCKET: "demo-dev-log-archive" })).toEqual({
+      archiveBucket: "demo-dev-log-archive",
+      logLevel: "info",
+    });
+  });
+
+  it("uses LOG_LEVEL when it is set", () => {
+    expect(loadArchiverConfig({ ARCHIVE_BUCKET: "b", LOG_LEVEL: "warn" }).logLevel).toBe("warn");
+  });
+
+  it("fails with a clear message when ARCHIVE_BUCKET is missing", () => {
+    expect(() => loadArchiverConfig({})).toThrow("Invalid configuration: ARCHIVE_BUCKET is required");
+  });
+
+  it("fails when ARCHIVE_BUCKET is empty", () => {
+    expect(() => loadArchiverConfig({ ARCHIVE_BUCKET: "" })).toThrow(/ARCHIVE_BUCKET must not be empty/);
+  });
+
+  it("does not ask for the variables of the other functions", () => {
+    expect(() => loadArchiverConfig({ ARCHIVE_BUCKET: "b" })).not.toThrow();
   });
 });

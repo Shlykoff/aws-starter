@@ -6,6 +6,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { sent } from "../helpers/sqs";
 import type { Exchange } from "../../src/domain/exchange";
 import { S3ExchangeStore } from "../../src/repositories/s3-exchange-store";
+import { S3LogArchiveStore } from "../../src/repositories/s3-log-archive-store";
 import { SnsStatusNotifier } from "../../src/repositories/sns-status-notifier";
 import { SqsDeliveryQueue } from "../../src/repositories/sqs-delivery-queue";
 
@@ -201,5 +202,41 @@ describe("S3ExchangeStore", () => {
 
       await expect(store.find("r1")).rejects.toThrow("not valid JSON");
     });
+  });
+});
+
+describe("S3LogArchiveStore", () => {
+  const store = new S3LogArchiveStore(new S3Client({}), "demo-dev-log-archive-000000000000");
+  const key = "logs/year=2026/month=09/day=21/c834ea32c452075ffc64a1eb394b60dd.json.gz";
+
+  it("puts the bytes at the given key of its bucket", async () => {
+    s3.on(PutObjectCommand).resolves({});
+    const body = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+
+    await store.put(key, body);
+
+    const calls = s3.commandCalls(PutObjectCommand);
+    expect(calls).toHaveLength(1);
+    const input = calls[0]?.args[0].input;
+    expect(input?.Bucket).toBe("demo-dev-log-archive-000000000000");
+    expect(input?.Key).toBe(key);
+    expect(input?.Body).toBe(body);
+    expect(input?.ContentType).toBe("application/json");
+  });
+
+  it("sets no ContentEncoding (Athena reads the compression from the .gz name) and no encryption (the bucket's default applies)", async () => {
+    s3.on(PutObjectCommand).resolves({});
+
+    await store.put(key, new Uint8Array([1]));
+
+    const input = s3.commandCalls(PutObjectCommand)[0]?.args[0].input;
+    expect(input).not.toHaveProperty("ContentEncoding");
+    expect(input).not.toHaveProperty("ServerSideEncryption");
+  });
+
+  it("lets failures reach the caller", async () => {
+    s3.on(PutObjectCommand).rejects(new Error("SlowDown"));
+
+    await expect(store.put(key, new Uint8Array([1]))).rejects.toThrow("SlowDown");
   });
 });

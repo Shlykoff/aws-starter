@@ -1,32 +1,34 @@
 # Long-term archive of everything the application logs.
 #
-#   CloudWatch log groups --subscription filter--> Firehose --> S3 <-- Athena (athena.tf)
+#   CloudWatch log groups --subscription filter--> archiver Lambda --> S3 <-- Athena (athena.tf)
 #
 # CloudWatch Logs is the hot tier (recent lines, Logs Insights, a short retention); this module
-# is the cold one: every line is copied to S3 within minutes and kept for var.expiration_days,
-# and Athena queries it. The logger's guard keeps personal data out of the lines (docs/api.md,
-# "Logs"), which is what makes a long archive acceptable.
+# is the cold one: every batch of lines is copied to S3 within seconds and kept for
+# var.expiration_days, and Athena queries it. The logger's guard keeps personal data out of the
+# lines (docs/api.md, "Logs"), which is what makes a long archive acceptable.
 #
 # The archived envelope carries the AWS account id (the `owner` field), so the bucket stays
 # private: no public access, no bucket policy, only IAM principals of this account read it.
 #
-# Cost at our volume (a few MB of logs a month) is cents. Firehose has no free tier: it bills
-# per GB ingested, and rounds every record up to 5 KB; S3 and Athena are billed per GB stored
-# and per TB scanned (both amounts are tiny here); the subscription filters, the Glue catalog
-# (far below its free 1M objects) and the workgroup cost nothing by themselves.
+# Why a Lambda and not Firehose, the usual way: Firehose has no free tier, and the AWS "free"
+# account plan this project runs on refuses it outright (SubscriptionRequiredException). The
+# Lambda is a small function of our own (backend/src/services/log-archive-service.ts); its
+# invocations, like everything else here, fall inside the always-free Lambda allowance.
+#
+# Cost at our volume (a few MB of logs a month): cents. Each batch is one Lambda invocation and
+# one or two S3 PUT requests; S3 and Athena are billed per GB stored and per TB scanned (both
+# amounts are tiny here); the subscription filters, the Glue catalog (far below its free 1M
+# objects) and the workgroup cost nothing by themselves.
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  account_id  = data.aws_caller_identity.current.account_id
-  region      = data.aws_region.current.region
-  stream_name = "${var.prefix}-log-archive"
+  account_id = data.aws_caller_identity.current.account_id
+  region     = data.aws_region.current.region
 
-  # The name and the stream Firehose's own console gives to its error log; the IAM policy
-  # below is scoped to exactly this stream.
-  firehose_log_group  = "/aws/kinesisfirehose/${local.stream_name}"
-  firehose_log_stream = "DestinationDelivery"
+  # The name only has to be unique within one log group.
+  filter_name = "${var.prefix}-log-archive"
 }
 
 # ---------------------------------------------------------------------------
@@ -61,9 +63,9 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   }
 }
 
-# No versioning: Firehose gives every object a unique name and never overwrites one, so there
-# is no earlier version to protect, and with versions the rules below would need a second set
-# for the old ones.
+# No versioning: an object is named after the hash of its content, so writing it again (a retried
+# invocation) replaces it with identical bytes, and there is no earlier version to protect. With
+# versions the rules below would need a second set for the old ones.
 #
 # No transition to Standard-IA or Glacier on purpose: Standard-IA bills at least 128 KB per
 # object and our objects are a few KB to a few tens of KB, so it would cost more, not less.
@@ -77,21 +79,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 
     filter {
       prefix = "logs/"
-    }
-
-    expiration {
-      days = var.expiration_days
-    }
-  }
-
-  # Batches Firehose could not process or deliver hold the same lines as logs/, so they are
-  # kept as long as the archive; a shorter rule would delete data that is still worth a look.
-  rule {
-    id     = "expire-firehose-errors"
-    status = "Enabled"
-
-    filter {
-      prefix = "errors/"
     }
 
     expiration {
@@ -128,219 +115,72 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 }
 
 # ---------------------------------------------------------------------------
-# Firehose: receives the log batches from CloudWatch Logs and writes them to S3
+# The archiver: receives the log batches from CloudWatch Logs and writes them to S3
 # ---------------------------------------------------------------------------
 
-# Firehose reports its own failures here; without it a delivery problem (say, a broken role)
-# would be silent and the archive would just stay empty. The group is not subscribed to
-# itself, so there is no loop.
-resource "aws_cloudwatch_log_group" "firehose" {
-  name              = local.firehose_log_group
-  retention_in_days = 14
-}
+module "archiver" {
+  source = "../lambda-function"
 
-resource "aws_cloudwatch_log_stream" "firehose" {
-  name           = local.firehose_log_stream
-  log_group_name = aws_cloudwatch_log_group.firehose.name
-}
+  name       = "${var.prefix}-log-archiver"
+  source_dir = var.archiver_source_dir
 
-resource "aws_kinesis_firehose_delivery_stream" "this" {
-  name        = local.stream_name
-  destination = "extended_s3" # the S3 destination that supports processors and a custom prefix
+  environment = merge(var.environment, {
+    ARCHIVE_BUCKET = aws_s3_bucket.this.id
+  })
 
-  extended_s3_configuration {
-    role_arn   = aws_iam_role.firehose.arn
-    bucket_arn = aws_s3_bucket.this.arn
-
-    # Firehose flushes at 5 MB or 300 s, whichever comes first (the defaults, stated on
-    # purpose). At our volume the 300 s always wins, so a line reaches S3 within about five
-    # minutes and an object holds five minutes of lines from all the groups.
-    buffering_size     = 5
-    buffering_interval = 300
-
-    # Gzip: JSON compresses about tenfold, which also cuts what Athena scans (it bills the
-    # compressed bytes) and reads .gz objects without any setting.
-    compression_format = "GZIP"
-
-    # A timestamp prefix, not dynamic partitioning (that is billed per GB extra). The
-    # timestamp is when Firehose wrote the object (UTC), not when the line was logged, so a
-    # line logged just before midnight can sit in the next day's folder. The Hive-style
-    # year=/month=/day= names are what the Glue table (athena.tf) projects.
-    prefix = "logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
-
-    # Required whenever the prefix has expressions; must contain the error type, which
-    # separates failures of processing from failures of delivery.
-    error_output_prefix = "errors/!{firehose:error-output-type}/"
-
-    processing_configuration {
-      enabled = true
-
-      # CloudWatch Logs sends each record as one gzip-compressed batch. Decompression turns it
-      # back into the JSON envelope: { messageType, owner, logGroup, logStream,
-      # subscriptionFilters, logEvents: [ { id, timestamp, message } ] }.
-      # The whole envelope is kept, so the CloudWatchLogProcessing processor (message
-      # extraction, which drops the envelope) is NOT used: the log group and stream names are
-      # what makes an archived line meaningful.
-      processors {
-        type = "Decompression"
-
-        parameters {
-          parameter_name  = "CompressionFormat"
-          parameter_value = "GZIP"
-        }
-      }
-
-      # Firehose concatenates records; a newline after each one makes the object JSON lines,
-      # which is what Athena's JSON reader expects (one envelope per line). Without a
-      # Delimiter parameter the delimiter is a newline. Order matters: after Decompression.
-      processors {
-        type = "AppendDelimiterToRecord"
-      }
-    }
-
-    cloudwatch_logging_options {
-      enabled         = true
-      log_group_name  = aws_cloudwatch_log_group.firehose.name
-      log_stream_name = aws_cloudwatch_log_stream.firehose.name
-    }
-  }
-
-  # The stream is checked against its role when it is created; the role must already have
-  # its permissions then.
-  depends_on = [aws_iam_role_policy.firehose]
-}
-
-# ---------------------------------------------------------------------------
-# IAM: Firehose writes to the bucket
-# ---------------------------------------------------------------------------
-
-data "aws_iam_policy_document" "firehose_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["firehose.amazonaws.com"]
-    }
-
-    # Confused-deputy guard in the form Firehose's documentation prescribes for its role:
-    # only Firehose acting for this account can assume it.
-    condition {
-      test     = "StringEquals"
-      variable = "sts:ExternalId"
-      values   = [local.account_id]
-    }
-  }
-}
-
-resource "aws_iam_role" "firehose" {
-  name               = "${var.prefix}-log-archive-firehose" # starts with the project name: the CI deploy role may manage only those roles
-  assume_role_policy = data.aws_iam_policy_document.firehose_assume.json
-}
-
-data "aws_iam_policy_document" "firehose" {
-  # Bucket-level actions Firehose uses to find the bucket's region and to clean up an
-  # interrupted upload. They take the bucket ARN, not object ARNs.
-  statement {
-    actions = [
-      "s3:GetBucketLocation",
-      "s3:ListBucket",
-      "s3:ListBucketMultipartUploads",
-    ]
-    resources = [aws_s3_bucket.this.arn]
-  }
-
-  # Writing, on the two prefixes Firehose writes to and nowhere else in the bucket.
-  # AbortMultipartUpload is for uploads it starts itself and does not finish. No GetObject:
-  # Firehose never reads back what it wrote.
-  statement {
-    actions   = ["s3:AbortMultipartUpload", "s3:PutObject"]
-    resources = ["${aws_s3_bucket.this.arn}/logs/*", "${aws_s3_bucket.this.arn}/errors/*"]
-  }
-
-  # Its own error log, on its own stream only.
-  statement {
-    actions   = ["logs:PutLogEvents"]
-    resources = [aws_cloudwatch_log_stream.firehose.arn]
-  }
-}
-
-resource "aws_iam_role_policy" "firehose" {
-  name   = "permissions"
-  role   = aws_iam_role.firehose.id
-  policy = data.aws_iam_policy_document.firehose.json
-}
-
-# ---------------------------------------------------------------------------
-# IAM: CloudWatch Logs puts records into the stream
-# ---------------------------------------------------------------------------
-
-data "aws_iam_policy_document" "logs_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-
-    # AWS's documentation shows the global name for this service principal in some places and
-    # the regional one in others; listing both means neither form can break the pipeline.
-    principals {
-      type        = "Service"
-      identifiers = ["logs.amazonaws.com", "logs.${local.region}.amazonaws.com"]
-    }
-
-    # Confused-deputy guard: CloudWatch Logs may use this role only on behalf of log groups
-    # of this account in this region (the documented condition for a Firehose subscription).
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account_id]
-    }
-
-    condition {
-      test     = "StringLike"
-      variable = "aws:SourceArn"
-      values   = ["arn:aws:logs:${local.region}:${local.account_id}:*"]
-    }
-  }
-}
-
-resource "aws_iam_role" "logs_to_firehose" {
-  name               = "${var.prefix}-log-archive-logs" # starts with the project name, see the Firehose role
-  assume_role_policy = data.aws_iam_policy_document.logs_assume.json
-}
-
-data "aws_iam_policy_document" "logs_to_firehose" {
-  # Only the two calls CloudWatch Logs makes, only on this stream.
-  statement {
-    actions   = ["firehose:PutRecord", "firehose:PutRecordBatch"]
-    resources = [aws_kinesis_firehose_delivery_stream.this.arn]
-  }
-}
-
-resource "aws_iam_role_policy" "logs_to_firehose" {
-  name   = "permissions"
-  role   = aws_iam_role.logs_to_firehose.id
-  policy = data.aws_iam_policy_document.logs_to_firehose.json
+  policy_statements = [
+    {
+      # Writing under logs/ and nowhere else in the bucket. No read, no delete: the function
+      # never looks at what it wrote, and the lifecycle rules do the deleting.
+      actions   = ["s3:PutObject"]
+      resources = ["${aws_s3_bucket.this.arn}/logs/*"]
+    },
+  ]
 }
 
 # ---------------------------------------------------------------------------
 # One subscription filter per log group
 # ---------------------------------------------------------------------------
 
+# CloudWatch Logs may invoke the archiver only for the log group named here: without this the
+# function would refuse the call, and one permission per group (not one for all groups) keeps
+# the resource policy of the function as narrow as the archive itself. `:*` is the form of the
+# ARN the service uses as the source of an invocation.
+resource "aws_lambda_permission" "logs" {
+  for_each = var.log_group_names
+
+  statement_id   = "logs-${each.key}"
+  action         = "lambda:InvokeFunction"
+  function_name  = module.archiver.name
+  principal      = "logs.amazonaws.com"
+  source_arn     = "arn:aws:logs:${local.region}:${local.account_id}:log-group:${each.value}:*"
+  source_account = local.account_id
+}
+
 # An empty pattern matches every line, including the platform's START / END / REPORT lines
 # (the REPORT line has the duration and memory of an invocation). A log group may have at
 # most two subscription filters, so a second consumer is possible but not a third.
 #
-# On creation CloudWatch Logs sends a test message to the stream, so the filter needs the
-# role to be assumable and permitted already; the test message is archived too, as a
-# CONTROL_MESSAGE (the queries in athena.tf skip those). If the very first apply still
-# fails with "Could not deliver test message", IAM had not propagated yet: apply again.
+# CloudWatch Logs invokes the archiver asynchronously, and Lambda itself retries a failed
+# asynchronous invocation twice, so a short S3 outage does not lose a batch. A batch that
+# fails all three times is dropped: the archive is a copy, the lines are still in CloudWatch
+# Logs (docs/api.md, "Log archive").
 resource "aws_cloudwatch_log_subscription_filter" "this" {
   for_each = var.log_group_names
 
-  name            = local.stream_name # the name only has to be unique within one log group
+  name            = local.filter_name
   log_group_name  = each.value
   filter_pattern  = ""
-  destination_arn = aws_kinesis_firehose_delivery_stream.this.arn
-  role_arn        = aws_iam_role.logs_to_firehose.arn
+  destination_arn = module.archiver.arn
 
-  depends_on = [aws_iam_role_policy.logs_to_firehose]
+  lifecycle {
+    # The archiver writes its own log lines. Subscribed to its own group it would archive
+    # them, which is more lines, which is another invocation, without end.
+    precondition {
+      condition     = each.value != module.archiver.log_group_name
+      error_message = "The log group of the archiver itself must not be archived: every run would trigger the next one."
+    }
+  }
+
+  depends_on = [aws_lambda_permission.logs]
 }

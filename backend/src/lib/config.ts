@@ -186,3 +186,18 @@ export function loadWebhookConfig(env: Record<string, string | undefined>): Webh
     logLevel: values.LOG_LEVEL,
   };
 }
+
+// ---- log-archiver ----
+
+export interface ArchiverConfig {
+  /** The bucket that receives the archived log batches (`logs/year=.../...json.gz`). */
+  archiveBucket: string;
+  logLevel: LogLevel;
+}
+
+const archiverSchema = z.object({ ARCHIVE_BUCKET: requiredString, LOG_LEVEL: logLevel });
+
+export function loadArchiverConfig(env: Record<string, string | undefined>): ArchiverConfig {
+  const values = parseEnvironment(archiverSchema, env);
+  return { archiveBucket: values.ARCHIVE_BUCKET, logLevel: values.LOG_LEVEL };
+}

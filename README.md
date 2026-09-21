@@ -363,6 +363,25 @@ Written down as they are made; each stage adds its own.
   name: `reason` is a fixed word in the worker and free text in an event from the recipient. Rejected:
   a list of forbidden names (it fails the day somebody picks another name), and CloudWatch's data
   protection policies (billed per GB scanned, so not free).
+- **The numbers come from the log lines, and there are few of them.** The request events already say
+  what happened, so six of the eight custom metrics are counted from them by metric filters; the two
+  durations (time to sent, the recipient's answer time) are written by the worker as embedded-metric-format
+  lines, because a filter can count lines but not compute a time. There are no dimensions: they multiply
+  the count, and 10 custom metrics are free. The filters use plain term patterns, because Lambda's text
+  log format puts `timestamp id LEVEL` before our JSON and a JSON filter pattern does not match such
+  a line (tried with `aws logs test-metric-filter`). Ten alarms is the free limit and it is used up,
+  so the log archiver has a dashboard widget and no alarm. Rejected: a metric per partner or per
+  function as a dimension (the free metrics would be gone at once, and a partner name is not for a
+  metric name), and the JSON log format (it would allow JSON patterns, but changes every line).
+- **Old logs go to S3 through a small Lambda of ours, not through Firehose.** CloudWatch keeps 30 days
+  (fast to search); a subscription filter copies every batch to S3 within seconds, kept 13 months and
+  queried with Athena (partition projection, a 1 GB scan limit per query). Firehose is the usual
+  transport, but it has no free tier and the AWS free account plan this project runs on refuses it
+  (`SubscriptionRequiredException`, found at the first deploy). The function is about a hundred lines:
+  it splits a batch by UTC day, names the object after the hash of its content (so a retry cannot
+  archive a line twice) and writes it. The price: a batch that fails three times is lost from the
+  archive (the lines are still in CloudWatch for 30 days). Rejected: a scheduled export task (a
+  batch job per day, hours of delay, one export at a time) and paying for Firehose.
 - **The recipient runs on a free container host, not on a laptop.** A laptop that sleeps breaks
   deliveries and keeps the data on a personal machine. The image is built by a workflow, so what runs
   is what was tested, and the host only pulls it. Rejected: Render's free tier (no persistent disk,
