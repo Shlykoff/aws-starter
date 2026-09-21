@@ -125,6 +125,13 @@ nothing waits for it and nothing expires.
   a free container host (Northflank sandbox, London) with a volume for its database. Checked: the
   image starts as published, its key and login work, a message survived a rollout restart, and the
   whole loop from AWS (delivery, Approve, Send again, Decline) ran against it.
+- [x] Stage 8: request events in the logs: every real change in the life of a request writes one
+  `Request event` line (created, queued, each delivery attempt with the recipient's answer and how
+  long it took, sent, rejected, failed, retry requested, client decision recorded). Checked on AWS:
+  one Logs Insights query over all the function log groups gives the timeline of a request (created,
+  queued 1.2 s later, delivered with the recipient's answer in 385 ms, sent 5 s after creation, the
+  two decisions); a repeated event produced no line; a retry produced `retry_requested` with the real
+  `retryCount`.
 
 ## Try it
 
@@ -337,6 +344,16 @@ Written down as they are made; each stage adds its own.
 - **The recipient's side of the action is a person, not a timer.** In `partner-sim` two buttons send
   the event, one attempt per click, and "Send again" repeats the same event, which is how the
   receiver's idempotency is seen.
+- **A request has a timeline in the logs, and the events are typed.** The table keeps only the
+  current status, so what happened to a request (and when) was not recorded anywhere. Every real
+  change writes one `Request event` line through a typed catalogue (a misspelled event or a field of
+  another event does not compile) and the log guard checks it at run time. An event is written only
+  when the change was really applied (a conditional update that succeeded), so a duplicate, an ignored
+  webhook event or a refused retry writes nothing; the price is that the trail is at most once (a
+  crash between the write and the line loses the line). There is no user id in it, only a role.
+  Logs Insights parses the JSON fields, so the history of one request across all functions is one
+  query (`docs/api.md`, "Logs"). Rejected: a separate audit table (a second write path to keep in
+  step with the first) and the DynamoDB stream as the audit source (it has no actor and no attempt).
 - **The logs are guarded by the logger, not only by care.** The rule "no message text, names,
   reasons or tokens in a log" was a convention for whoever writes a log call. Now every field is on
   a list with a shape for its value (an id, a word from a closed list, a number), anything else is
