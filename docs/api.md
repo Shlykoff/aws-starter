@@ -12,8 +12,8 @@ Base URL: the `api_url` Terraform output. It contains the **stage**, so it looks
 `Authorization: <Cognito access token>`: the token alone, **without** a `Bearer ` prefix. The gateway's
 Cognito user pool authorizer rejects a missing, expired or foreign token with `401` before a Lambda
 runs. The protected methods ask for the scope `openid`, so the token must be an **access** token (an ID
-token has no `scope` claim). That the authorizer accepts the raw access token is **not verified yet**
-(it is checked after the deploy). Bodies are JSON, except the webhook's (XML).
+token has no `scope` claim). The authorizer accepts the raw access token (checked from a browser). Bodies are
+JSON, except the webhook's (XML).
 
 ## Model
 
@@ -408,8 +408,8 @@ checks ownership in the table before it touches S3).
     guard hit.
   - The API's own metrics come from API Gateway (namespace `AWS/ApiGateway`, dimensions `ApiName` and
     `Stage`): `Count`, `4XXError`, `5XXError`, `Latency`. The two error metrics count requests, so the
-    alarm and the dashboard use `Sum`. Detailed metrics are off (they are billed as custom metrics); that
-    the basic metrics appear all the same is **not verified yet** (it is checked after the deploy).
+    alarm and the dashboard use `Sum`. Detailed metrics are off (they are billed as custom metrics); the
+    basic metrics appear all the same (checked on AWS).
   - One dashboard, `<project>-<env>-delivery`, and saved Logs Insights queries (the timeline of one
     request, failed requests, the slowest deliveries, attempts by outcome, webhook events, guard hits).
 - **One JSON object per line**: `level`, `message` and fields. The `message` is a fixed sentence of
@@ -506,9 +506,9 @@ together.
   that changes something (`POST /requests`, `POST /requests/{id}/retry`); a read sends none. So the trace
   of a user action starts with an id made in the browser. The id is neither a secret nor personal data.
   The browser only makes the id: it sends no segments to X-Ray and is not a node. The header is in the
-  CORS `Access-Control-Allow-Headers` ("Endpoints"), or the browser would not send it. **Not verified
-  yet** (checked after the deploy): that API Gateway continues the browser's id, and that the spans of
-  `create-request` then belong to that same trace.
+  CORS `Access-Control-Allow-Headers` ("Endpoints"), or the browser would not send it. API Gateway continues
+  the browser's id (checked on AWS: the gateway span has the parent id that the browser made), and the
+  spans of `create-request`, the enqueuer and the worker belong to that same trace.
 - **The SDK and the exporter are AWS's.** The Lambda layer `AWSOpenTelemetryDistroJs` (pinned, version
   14) is attached to the functions that write: `create-request`, `retry-request`, `receive-webhook`,
   the `enqueuer` and the `delivery-worker`. Its start script (`AWS_LAMBDA_EXEC_WRAPPER`) starts the
