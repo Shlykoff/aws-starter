@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createRequestSchema } from "../../src/domain/create-request";
 
-const valid = { partner: "Acme Partner", subject: "Order 42", body: "Please ship." };
+const valid = { subject: "Order 42", body: "Please ship." };
 
 describe("createRequestSchema", () => {
   it("accepts a valid body", () => {
@@ -10,18 +10,17 @@ describe("createRequestSchema", () => {
 
   it("trims surrounding whitespace", () => {
     const parsed = createRequestSchema.parse({
-      partner: "  Acme  ",
       subject: "\tOrder 42\n",
       body: " text ",
     });
-    expect(parsed).toEqual({ partner: "Acme", subject: "Order 42", body: "text" });
+    expect(parsed).toEqual({ subject: "Order 42", body: "text" });
   });
 
-  it.each(["partner", "subject", "body"] as const)("rejects an empty %s", (field) => {
+  it.each(["subject", "body"] as const)("rejects an empty %s", (field) => {
     expect(createRequestSchema.safeParse({ ...valid, [field]: "" }).success).toBe(false);
   });
 
-  it.each(["partner", "subject", "body"] as const)(
+  it.each(["subject", "body"] as const)(
     "rejects a %s that is only whitespace (trim happens before the length check)",
     (field) => {
       expect(createRequestSchema.safeParse({ ...valid, [field]: "   " }).success).toBe(false);
@@ -29,7 +28,6 @@ describe("createRequestSchema", () => {
   );
 
   it.each([
-    ["partner", 100],
     ["subject", 200],
     ["body", 5000],
   ] as const)("accepts %s at its maximum of %i characters and rejects one more", (field, max) => {
@@ -37,18 +35,18 @@ describe("createRequestSchema", () => {
     expect(createRequestSchema.safeParse({ ...valid, [field]: "x".repeat(max + 1) }).success).toBe(false);
   });
 
-  it.each(["partner", "subject", "body"] as const)("rejects a missing %s", (field) => {
+  it.each(["subject", "body"] as const)("rejects a missing %s", (field) => {
     const withoutField: Partial<typeof valid> = { ...valid };
     delete withoutField[field];
     expect(createRequestSchema.safeParse(withoutField).success).toBe(false);
   });
 
   it("rejects values that are not strings", () => {
-    expect(createRequestSchema.safeParse({ ...valid, partner: 42 }).success).toBe(false);
+    expect(createRequestSchema.safeParse({ ...valid, subject: 42 }).success).toBe(false);
     expect(createRequestSchema.safeParse({ ...valid, body: null }).success).toBe(false);
   });
 
-  it.each(["owner", "status", "id", "pk"])("rejects the unknown key %s", (key) => {
+  it.each(["owner", "status", "id", "pk", "partner"])("rejects the unknown key %s", (key) => {
     expect(createRequestSchema.safeParse({ ...valid, [key]: "anything" }).success).toBe(false);
   });
 

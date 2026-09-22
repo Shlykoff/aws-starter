@@ -8,8 +8,7 @@ const validator = createRealValidator();
 const input = (overrides: Partial<SubmissionInput> = {}): SubmissionInput => ({
   messageId: "01M30JDSMHY8CRX59V35WV731S",
   sentAt: new Date("2026-09-21T10:00:00.123Z"),
-  senderName: "aws-starter",
-  recipientName: "Partner OK",
+  senderEmail: "sender@example.test",
   subject: "Delivery schedule",
   text: "Please confirm the schedule for next week.",
   ...overrides,
@@ -45,8 +44,8 @@ describe("buildSubmissionXml: the document", () => {
         "  <Header>",
         "    <MessageId>01M30JDSMHY8CRX59V35WV731S</MessageId>",
         "    <SentAt>2026-09-21T10:00:00.123Z</SentAt>",
-        "    <Sender><Name>aws-starter</Name></Sender>",
-        "    <Recipient><Name>Partner OK</Name></Recipient>",
+        "    <Sender><Name>sender@example.test</Name></Sender>",
+        "    <Recipient><Name>Pharmacy</Name></Recipient>",
         "  </Header>",
         "  <Content>",
         "    <Subject>Delivery schedule</Subject>",
@@ -89,10 +88,10 @@ describe("buildSubmissionXml: text that has to be escaped", () => {
     expect(textOf(xml, "Text")).toBe("a ]]> b &amp; c");
   });
 
-  it("escapes the partner name and the subject too", () => {
-    const xml = build({ recipientName: "Smith & Sons", subject: "<b>Sale</b>" });
+  it("escapes the sender's e-mail and the subject too", () => {
+    const xml = build({ senderEmail: "Smith & Sons", subject: "<b>Sale</b>" });
 
-    expect(xml).toContain("<Recipient><Name>Smith &amp; Sons</Name></Recipient>");
+    expect(xml).toContain("<Sender><Name>Smith &amp; Sons</Name></Sender>");
     expect(xml).toContain("<Subject>&lt;b&gt;Sale&lt;/b&gt;</Subject>");
   });
 
@@ -150,7 +149,7 @@ describe("buildSubmissionXml: text that XML 1.0 cannot carry", () => {
 
   it("names every element that has such a character, and never the character", () => {
     const result = buildSubmissionXml(
-      input({ subject: "bad\u0000subject", recipientName: "bad\u0001name", text: "fine" }),
+      input({ subject: "bad\u0000subject", senderEmail: "bad\u0001name", text: "fine" }),
     );
 
     expect(result).toEqual({ ok: false, reason: "unrepresentable", elements: ["Name", "Subject"] });
@@ -179,8 +178,8 @@ describe("buildSubmissionXml: the limits belong to the schema, not to the builde
     });
   });
 
-  it("builds a partner name that the recipient's schema refuses, and the schema check finds it", async () => {
-    const xml = build({ recipientName: "Acme #1" });
+  it("builds a sender e-mail that the recipient's schema refuses, and the schema check finds it", async () => {
+    const xml = build({ senderEmail: "Acme #1" });
 
     expect(await validator.validateSubmission(xml)).toEqual({
       valid: false,

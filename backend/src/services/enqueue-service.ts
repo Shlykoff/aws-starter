@@ -1,4 +1,4 @@
-import { deduplicationId, encodeDeliveryMessage, messageGroupId } from "../domain/delivery-message";
+import { MESSAGE_GROUP_ID, deduplicationId, encodeDeliveryMessage } from "../domain/delivery-message";
 import type { EnqueueRequest } from "../domain/request-image";
 import { describeError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
@@ -127,7 +127,7 @@ export class EnqueueService {
       return {
         id: key,
         body: encodeDeliveryMessage({ requestId: request.requestId, ownerId: request.ownerId }),
-        groupId: messageGroupId(request.partner),
+        groupId: MESSAGE_GROUP_ID,
         // The request id is the deduplication id (plus the retry number for a request sent
         // again), so a message sent twice is delivered once. (Content-based deduplication is
         // off: the body is only two ids.)

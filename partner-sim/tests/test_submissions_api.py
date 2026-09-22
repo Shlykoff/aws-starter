@@ -224,7 +224,9 @@ def test_the_size_is_checked_before_the_document_is_read(post):
 
 
 def test_an_accepted_submission(post, settings, assert_valid_reply):
-    response = post(make_submission(subject="Hello", recipient="Partner OK"))
+    response = post(
+        make_submission(subject="Hello", sender="shlykoff@gmail.com", recipient="Partner OK")
+    )
 
     assert response.status_code == 200
     assert_valid_reply(response)
@@ -232,8 +234,9 @@ def test_an_accepted_submission(post, settings, assert_valid_reply):
     assert reply["status"] == "Accepted"
     assert reply["relates_to"] == SAMPLE_ID
     (row,) = all_rows(settings.db_path)
-    assert (row["message_id"], row["recipient"], row["subject"]) == (
+    assert (row["message_id"], row["sender"], row["recipient"], row["subject"]) == (
         SAMPLE_ID,
+        "shlykoff@gmail.com",
         "Partner OK",
         "Hello",
     )

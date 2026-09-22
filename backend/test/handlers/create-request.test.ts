@@ -1,29 +1,36 @@
+import { CognitoIdentityProviderClient, GetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { handler } from "../../src/handlers/create-request";
 import type { MissingSubKind } from "../helpers/events";
-import { CORS_HEADERS, createRequestEvent, eventWithoutSub, lambdaContext } from "../helpers/events";
+import { ACCESS_TOKEN, CORS_HEADERS, createRequestEvent, eventWithoutSub, lambdaContext } from "../helpers/events";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
 
 // These tests run the real handler, service, repository and container. Only the AWS SDK's
-// `send` is replaced (by an in-memory table), so no network and no credentials are used.
+// `send` is replaced (by an in-memory table, and Cognito's GetUser by a recorder), so no
+// network and no credentials are used.
 const ddb = mockClient(DynamoDBDocumentClient);
+const cognito = mockClient(CognitoIdentityProviderClient);
+const SENDER_EMAIL = "sender@example.test";
 let table: FakeTable;
 let logs: ReturnType<typeof captureLogs>;
 
 beforeEach(() => {
   ddb.reset();
+  cognito.reset();
   table = stubTable(ddb);
+  cognito.on(GetUserCommand).resolves({ UserAttributes: [{ Name: "email", Value: SENDER_EMAIL }] });
   logs = captureLogs();
 });
 afterAll(() => {
   ddb.restore();
+  cognito.restore();
 });
 
-const validBody = { partner: "Acme", subject: "Order 42", body: "Please ship." };
+const validBody = { subject: "Order 42", body: "Please ship." };
 const call = (event = createRequestEvent({ body: JSON.stringify(validBody) })) =>
   handler(event, lambdaContext());
 const json = (response: { body?: string }): unknown => JSON.parse(response.body ?? "null");
@@ -56,13 +63,13 @@ describe("POST /requests", () => {
       const response = await call(createRequestEvent({ sub: "user-42", body: JSON.stringify(validBody) }));
 
       expect(Object.keys(json(response) as object).sort()).toEqual(
-        ["body", "createdAt", "id", "partner", "status", "subject"],
+        ["body", "createdAt", "id", "status", "subject"],
       );
       expect(response.body).not.toContain("user-42");
     });
 
     it("trims the values it stores", async () => {
-      const body = { partner: "  Acme ", subject: " Order 42 ", body: "\nPlease ship.\n" };
+      const body = { subject: " Order 42 ", body: "\nPlease ship.\n" };
 
       await call(createRequestEvent({ body: JSON.stringify(body) }));
 
@@ -77,10 +84,20 @@ describe("POST /requests", () => {
       expect(response.statusCode).toBe(201);
     });
 
-    it("does not need any header: `headers` may be null", async () => {
-      const response = await call(createRequestEvent({ body: JSON.stringify(validBody), headers: null }));
+    it("reads the access token from the Authorization header case-insensitively", async () => {
+      const response = await call(
+        createRequestEvent({ body: JSON.stringify(validBody), headers: { authorization: ACCESS_TOKEN } }),
+      );
 
       expect(response.statusCode).toBe(201);
+      expect(cognito.commandCalls(GetUserCommand)[0]?.args[0].input).toEqual({ AccessToken: ACCESS_TOKEN });
+    });
+
+    it("stores the caller's e-mail as senderEmail, never returned by the API", async () => {
+      const response = await call(createRequestEvent({ body: JSON.stringify(validBody) }));
+
+      expect(table.items()[0]).toMatchObject({ senderEmail: SENDER_EMAIL });
+      expect(response.body).not.toContain(SENDER_EMAIL);
     });
 
     it("gives two requests two different ids", async () => {
@@ -119,12 +136,20 @@ describe("POST /requests", () => {
     });
 
     it("says which field is invalid", async () => {
-      const body = JSON.stringify({ ...validBody, partner: "", subject: "x".repeat(201) });
+      const body = JSON.stringify({ ...validBody, subject: "x".repeat(201), body: "" });
 
       const payload = await expectValidationError(createRequestEvent({ body }));
 
       const paths = (payload.error.details as { path: string }[]).map((detail) => detail.path);
-      expect(paths.sort()).toEqual(["partner", "subject"]);
+      expect(paths.sort()).toEqual(["body", "subject"]);
+    });
+
+    it("rejects a partner field: there is exactly one recipient now", async () => {
+      const body = JSON.stringify({ ...validBody, partner: "Acme" });
+
+      const payload = await expectValidationError(createRequestEvent({ body }));
+
+      expect(payload.error.message).toBe("Request body is invalid");
     });
 
     it("rejects a body that is too long", async () => {
@@ -160,6 +185,53 @@ describe("POST /requests", () => {
       expect(ddb.calls()).toHaveLength(0);
       expect(logs.entries()).toContainEqual(
         expect.objectContaining({ level: "error", errorMessage: "Cognito authorizer did not provide a sub claim" }),
+      );
+    });
+
+    it("fails when there is no Authorization header, and writes nothing", async () => {
+      const response = await call(createRequestEvent({ body: JSON.stringify(validBody), headers: null }));
+
+      expect(response.statusCode).toBe(500);
+      expect(json(response)).toEqual({
+        error: { code: "internal_error", message: "Internal server error" },
+      });
+      expect(ddb.calls()).toHaveLength(0);
+      expect(cognito.commandCalls(GetUserCommand)).toHaveLength(0);
+      expect(logs.entries()).toContainEqual(
+        expect.objectContaining({ level: "error", errorMessage: "Authorization header missing on an authorized route" }),
+      );
+    });
+
+    it("hides the cause when Cognito's GetUser fails, but logs it, and writes nothing", async () => {
+      cognito.on(GetUserCommand).rejects(new Error("NotAuthorizedException: Access Token has expired"));
+
+      const response = await call();
+
+      expect(response.statusCode).toBe(500);
+      expect(json(response)).toEqual({
+        error: { code: "internal_error", message: "Internal server error" },
+      });
+      expect(ddb.calls()).toHaveLength(0);
+      expect(logs.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "error",
+          errorMessage: "NotAuthorizedException: Access Token has expired",
+        }),
+      );
+    });
+
+    it("hides the cause when Cognito has no email attribute for the caller, and writes nothing", async () => {
+      cognito.on(GetUserCommand).resolves({ UserAttributes: [{ Name: "sub", Value: "user-a" }] });
+
+      const response = await call();
+
+      expect(response.statusCode).toBe(500);
+      expect(ddb.calls()).toHaveLength(0);
+      expect(logs.entries()).toContainEqual(
+        expect.objectContaining({
+          level: "error",
+          errorMessage: "Cognito returned no email attribute for the caller",
+        }),
       );
     });
 
@@ -216,7 +288,7 @@ describe("POST /requests", () => {
 
     it("never writes the request body or the user id to the logs", async () => {
       const secret = "TOP-SECRET-BODY-MARKER";
-      const body = JSON.stringify({ partner: "P-MARKER", subject: "S-MARKER", body: secret });
+      const body = JSON.stringify({ subject: "S-MARKER", body: secret });
 
       await call(createRequestEvent({ sub: "user-sub-marker", body }));
       await call(createRequestEvent({ sub: "user-sub-marker", body: `${body}{` })); // 400
@@ -225,7 +297,7 @@ describe("POST /requests", () => {
 
       const everything = logs.lines.join("\n");
       expect(logs.lines.length).toBeGreaterThan(3);
-      for (const marker of [secret, "P-MARKER", "S-MARKER", "user-sub-marker"]) {
+      for (const marker of [secret, "S-MARKER", "user-sub-marker", SENDER_EMAIL]) {
         expect(everything).not.toContain(marker);
       }
     });

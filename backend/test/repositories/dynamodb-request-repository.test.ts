@@ -22,9 +22,9 @@ afterAll(() => {
 });
 
 const ID = "01J8Z3K5W0ABCDEFGHJKMNPQRS";
+const SENDER_EMAIL = "sender@example.test";
 const request: PartnerRequest = {
   id: ID,
-  partner: "Acme",
   subject: "Order 42",
   body: "Please ship.",
   status: "created",
@@ -35,7 +35,7 @@ describe("DynamoRequestRepository.create", () => {
   it("puts one item keyed USER#<owner> / REQ#<id>, and refuses to overwrite an existing key", async () => {
     ddb.on(PutCommand).resolves({});
 
-    await repository.create("user-a", request);
+    await repository.create("user-a", request, SENDER_EMAIL);
 
     const calls = ddb.commandCalls(PutCommand);
     expect(calls).toHaveLength(1);
@@ -45,9 +45,9 @@ describe("DynamoRequestRepository.create", () => {
         pk: "USER#user-a",
         sk: `REQ#${ID}`,
         id: ID,
-        partner: "Acme",
         subject: "Order 42",
         body: "Please ship.",
+        senderEmail: SENDER_EMAIL,
         status: "created",
         createdAt: "2026-09-20T12:00:00.000Z",
       },
@@ -59,8 +59,8 @@ describe("DynamoRequestRepository.create", () => {
     ddb.on(PutCommand).resolves({});
     const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-    await repository.create("user-a", request, traceparent);
-    await repository.create("user-a", request);
+    await repository.create("user-a", request, SENDER_EMAIL, traceparent);
+    await repository.create("user-a", request, SENDER_EMAIL);
 
     const [withTrace, withoutTrace] = ddb.commandCalls(PutCommand).map((call) => call.args[0].input.Item);
     expect(withTrace).toMatchObject({ id: ID, traceparent });
@@ -72,7 +72,7 @@ describe("DynamoRequestRepository.create", () => {
       new ConditionalCheckFailedException({ message: "The conditional request failed", $metadata: {} }),
     );
 
-    await expect(repository.create("user-a", request)).rejects.toBeInstanceOf(
+    await expect(repository.create("user-a", request, SENDER_EMAIL)).rejects.toBeInstanceOf(
       ConditionalCheckFailedException,
     );
   });
@@ -80,7 +80,7 @@ describe("DynamoRequestRepository.create", () => {
   it("lets other DynamoDB failures reach the caller", async () => {
     ddb.on(PutCommand).rejects(new Error("throttled"));
 
-    await expect(repository.create("user-a", request)).rejects.toThrow("throttled");
+    await expect(repository.create("user-a", request, SENDER_EMAIL)).rejects.toThrow("throttled");
   });
 });
 

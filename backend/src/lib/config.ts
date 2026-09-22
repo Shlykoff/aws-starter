@@ -98,8 +98,6 @@ export interface WorkerConfig {
   partnerUrl: string;
   /** The name of the SSM parameter (SecureString) that holds the recipient's API key. */
   partnerApiKeyParam: string;
-  /** The name in `Sender/Name` of every submission. */
-  senderName: string;
   topicArn: string;
   auditBucket: string;
   /** Must equal the `maxReceiveCount` of the queue's redrive policy (both come from Terraform). */
@@ -129,20 +127,10 @@ const partnerUrl = requiredString.refine(
   "must be an https URL made of host and port only, like https://partner.example.com (http is allowed only for localhost)",
 );
 
-// The same rule as `PartyName` in contracts/xsd/common-types.xsd: letters, digits, space and
-// . , ' & - , 1 to 100 characters. The worker refuses to start with a name that the recipient
-// would refuse in every single message. (`u`: count and match whole characters, so an emoji
-// is one character and \p{L} works.)
-const senderName = z
-  .string()
-  .regex(/^[\p{L}\p{N} .,'&-]{1,100}$/u, "must be 1-100 letters, digits, spaces or . , ' & -")
-  .default("aws-starter");
-
 const workerSchema = z.object({
   TABLE_NAME: requiredString,
   PARTNER_URL: partnerUrl,
   PARTNER_API_KEY_PARAM: requiredString,
-  SENDER_NAME: senderName,
   TOPIC_ARN: requiredString,
   AUDIT_BUCKET: requiredString,
   MAX_RECEIVE_COUNT: positiveInteger,
@@ -155,7 +143,6 @@ export function loadWorkerConfig(env: Record<string, string | undefined>): Worke
     tableName: values.TABLE_NAME,
     partnerUrl: values.PARTNER_URL,
     partnerApiKeyParam: values.PARTNER_API_KEY_PARAM,
-    senderName: values.SENDER_NAME,
     topicArn: values.TOPIC_ARN,
     auditBucket: values.AUDIT_BUCKET,
     maxReceiveCount: values.MAX_RECEIVE_COUNT,

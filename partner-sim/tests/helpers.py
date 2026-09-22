@@ -40,6 +40,7 @@ def make_submission(
     *,
     message_id: str = SAMPLE_ID,
     subject: str = "Delivery schedule",
+    sender: str = "aws-starter",
     recipient: str = "Partner OK",
     text: str = "Please confirm the schedule for next week.",
 ) -> bytes:
@@ -49,7 +50,7 @@ def make_submission(
   <Header>
     <MessageId>{escape(message_id)}</MessageId>
     <SentAt>2026-09-20T23:29:07.123Z</SentAt>
-    <Sender><Name>aws-starter</Name></Sender>
+    <Sender><Name>{escape(sender)}</Name></Sender>
     <Recipient><Name>{escape(recipient)}</Name></Recipient>
   </Header>
   <Content>

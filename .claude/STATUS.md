@@ -119,9 +119,31 @@ finishes, add its entry here, not to README (`.claude/CLAUDE.md`, "How a stage r
   the very message it just showed); the tool's own last line already says so, and the fix is simply
   to wait or retry, not a code change.
 
+- [x] Stage 15: one fixed recipient instead of a per-request partner, and the requester's own
+  identity in the message. `partner` is gone end to end (API body, domain, DynamoDB item, FIFO
+  `MessageGroupId`, the frontend form and list); `Recipient/Name` in the XML is now the fixed
+  constant `RECIPIENT_NAME`, and `Sender/Name` is the requester's own e-mail, read once from
+  Cognito's `GetUser` (their own access token, a new unscoped `cognito-idp:GetUser` IAM
+  permission — GetUser takes no pool ARN of its own) when the request is created and stored as
+  `senderEmail`, never re-read. `contracts/xsd/common-types.xsd`'s `PartyName` widened to allow
+  `@ _ +` (common e-mail local-part characters; the full RFC 5322 grammar is not covered — an
+  address with a rarer character such as `!` still fails the recipient's schema and the request
+  is `rejected`, covered by a test). partner-sim now parses and stores `Sender/Name` (it never
+  did before) and its inbox shows the sender's e-mail, the date, the subject and the outcome —
+  `MessageId`, `Recipient` and the raw HTTP status were dropped from both its pages (still parsed
+  and stored, just not shown: the raw XML dumps on the message page still carry them). Checked:
+  full `typecheck`/`lint`/`test` across backend (1499 passed) and frontend (285 passed), the
+  partner-sim Docker suite (442 passed) after every contracts change, `terraform fmt`/`validate`,
+  and a repo-wide grep for stale `partner`-field references (none left; generic prose like "the
+  partner accepted the message" was deliberately left as is). Not yet checked live: creating a
+  real request against the deployed API depends on a real Cognito login, which was not done in
+  this session — the owner doing the existing "Try it" walkthrough once after this deploys would
+  confirm the `GetUser` call and the sender e-mail showing up in partner-sim's inbox.
+
 ## Open
 
 - Visual polish of the frontend (not started).
 - No smoke test runs automatically after a deploy (not started).
 - A second, from-scratch account has never run "Try it": the steps are only verified on the
   author's own account, through CI.
+- Stage 15's live check (see above): the owner running "Try it" once after this deploys.

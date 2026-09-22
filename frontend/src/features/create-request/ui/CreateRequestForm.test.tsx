@@ -14,11 +14,7 @@ function setup() {
   return { api, onCreated, ...view };
 }
 
-async function fillIn(
-  user: ReturnType<typeof setup>["user"],
-  values: { partner?: string; subject?: string; body?: string },
-) {
-  if (values.partner !== undefined) await user.type(screen.getByLabelText("Partner"), values.partner);
+async function fillIn(user: ReturnType<typeof setup>["user"], values: { subject?: string; body?: string }) {
   if (values.subject !== undefined) await user.type(screen.getByLabelText("Subject"), values.subject);
   if (values.body !== undefined) await user.type(screen.getByLabelText("Message"), values.body);
 }
@@ -29,11 +25,10 @@ describe("CreateRequestForm", () => {
 
     await user.click(screen.getByRole("button", { name: "Send request" }));
 
-    expect(screen.getByText("Enter the partner name.")).toBeInTheDocument();
     expect(screen.getByText("Enter the subject.")).toBeInTheDocument();
     expect(screen.getByText("Enter the message.")).toBeInTheDocument();
-    expect(screen.getByLabelText("Partner")).toHaveFocus();
-    expect(screen.getByLabelText("Partner")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Subject")).toHaveFocus();
+    expect(screen.getByLabelText("Subject")).toHaveAttribute("aria-invalid", "true");
     expect(api.create).not.toHaveBeenCalled();
     expect(onCreated).not.toHaveBeenCalled();
   });
@@ -41,33 +36,33 @@ describe("CreateRequestForm", () => {
   it("treats a value made only of spaces as empty", async () => {
     const { api, user } = setup();
 
-    await fillIn(user, { partner: "   ", subject: "Hello", body: "Text" });
+    await fillIn(user, { subject: "   ", body: "Text" });
     await user.click(screen.getByRole("button", { name: "Send request" }));
 
-    expect(screen.getByText("Enter the partner name.")).toBeInTheDocument();
+    expect(screen.getByText("Enter the subject.")).toBeInTheDocument();
     expect(api.create).not.toHaveBeenCalled();
   });
 
   it("rejects a value that is longer than the server allows", async () => {
     const { api, user } = setup();
 
-    await fillIn(user, { partner: "p".repeat(101), subject: "Hello", body: "Text" });
+    await fillIn(user, { subject: "s".repeat(201), body: "Text" });
     await user.click(screen.getByRole("button", { name: "Send request" }));
 
-    expect(screen.getByText("The partner name can have at most 100 characters.")).toBeInTheDocument();
+    expect(screen.getByText("The subject can have at most 200 characters.")).toBeInTheDocument();
     expect(api.create).not.toHaveBeenCalled();
   });
 
   it("sends the trimmed input through the store and reports the created request", async () => {
     const { api, onCreated, requests, user } = setup();
-    const created = makeRequest({ partner: "Acme", subject: "Hello", body: "Text" });
+    const created = makeRequest({ subject: "Hello", body: "Text" });
     api.create.mockResolvedValue(created);
 
-    await fillIn(user, { partner: "  Acme ", subject: "Hello", body: "Text" });
+    await fillIn(user, { subject: "  Hello ", body: "Text" });
     await user.click(screen.getByRole("button", { name: "Send request" }));
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(created));
-    expect(api.create).toHaveBeenCalledWith({ partner: "Acme", subject: "Hello", body: "Text" });
+    expect(api.create).toHaveBeenCalledWith({ subject: "Hello", body: "Text" });
     expect(requests.items).toEqual([created]);
   });
 
@@ -76,7 +71,7 @@ describe("CreateRequestForm", () => {
     let finish: (request: ReturnType<typeof makeRequest>) => void = () => undefined;
     api.create.mockImplementation(() => new Promise((resolve) => (finish = resolve)));
 
-    await fillIn(user, { partner: "Acme", subject: "Hello", body: "Text" });
+    await fillIn(user, { subject: "Hello", body: "Text" });
     await user.click(screen.getByRole("button", { name: "Send request" }));
 
     const sending = await screen.findByRole("button", { name: "Sending…" });
@@ -90,14 +85,14 @@ describe("CreateRequestForm", () => {
     const { api, onCreated, user } = setup();
     api.create.mockRejectedValue(new ApiError(500, "internal_error", "Internal server error"));
 
-    await fillIn(user, { partner: "Acme", subject: "Hello", body: "Text" });
+    await fillIn(user, { subject: "Hello", body: "Text" });
     await user.click(screen.getByRole("button", { name: "Send request" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("The request was not sent");
     expect(alert).toHaveTextContent("Internal server error");
     await waitFor(() => expect(alert).toHaveFocus());
-    expect(screen.getByLabelText("Partner")).toHaveValue("Acme");
+    expect(screen.getByLabelText("Subject")).toHaveValue("Hello");
     expect(screen.getByRole("button", { name: "Send request" })).toBeEnabled();
     expect(onCreated).not.toHaveBeenCalled();
   });

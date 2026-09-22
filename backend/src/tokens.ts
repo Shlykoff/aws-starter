@@ -21,6 +21,7 @@ export const TOKENS = {
   SnsClient: Symbol("SnsClient"),
   S3Client: Symbol("S3Client"),
   SsmClient: Symbol("SsmClient"),
+  CognitoClient: Symbol("CognitoClient"),
 
   // Repositories, ports and clients
   RequestRepository: Symbol("RequestRepository"),
@@ -34,6 +35,7 @@ export const TOKENS = {
   WebhookToken: Symbol("WebhookToken"), // a SecretProvider
   XmlValidator: Symbol("XmlValidator"),
   PartnerClient: Symbol("PartnerClient"),
+  SenderIdentityProvider: Symbol("SenderIdentityProvider"),
 
   // Services
   RequestService: Symbol("RequestService"),

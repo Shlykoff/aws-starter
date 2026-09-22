@@ -57,7 +57,7 @@ function setup(count = 1, validator?: FakeXmlValidator | ReturnType<typeof creat
     apiKeys,
     exchanges,
     notifier,
-    { senderName: "aws-starter", maxReceiveCount: MAX_RECEIVE_COUNT },
+    { maxReceiveCount: MAX_RECEIVE_COUNT },
     () => NOW,
   );
   const deliver = (...jobs: DeliveryJob[]) => service.deliver(jobs, createLogger("debug"));
@@ -98,8 +98,8 @@ describe("DeliveryService: delivered (200 + Accepted)", () => {
     expect(sent.xml).toContain('<Submission xmlns="urn:aws-starter:submission:v1" version="1">');
     expect(sent.xml).toContain(`<MessageId>${idNumber(1)}</MessageId>`);
     expect(sent.xml).toContain("<SentAt>2026-09-21T10:00:00.000Z</SentAt>");
-    expect(sent.xml).toContain("<Sender><Name>aws-starter</Name></Sender>");
-    expect(sent.xml).toContain("<Recipient><Name>Acme</Name></Recipient>");
+    expect(sent.xml).toContain("<Sender><Name>sender@example.test</Name></Sender>");
+    expect(sent.xml).toContain("<Recipient><Name>Pharmacy</Name></Recipient>");
     expect(sent.xml).toContain("<Subject>Order 42</Subject>");
     expect(sent.xml).toContain("<Text>Please ship.</Text>");
     // The document that was checked against the schema is the document that was sent.
@@ -161,11 +161,11 @@ describe("DeliveryService: delivered (200 + Accepted)", () => {
     expect(result.failedMessageIds).toEqual([]);
   });
 
-  it("uses the sender name from its settings", async () => {
+  it("uses the sender e-mail stored on the request, not a fixed setting", async () => {
     const journal: Journal = [];
     const repository = new FakeDeliveryRepository(journal);
     const partner = new FakePartnerClient(journal);
-    repository.seed(aRequest({ id: idNumber(1) }));
+    repository.seed(aRequest({ id: idNumber(1), senderEmail: "Sender & Sons" }));
     const service = new DeliveryService(
       repository,
       partner,
@@ -173,13 +173,21 @@ describe("DeliveryService: delivered (200 + Accepted)", () => {
       new FakeApiKeyProvider(journal),
       new FakeExchangeStore(journal),
       new FakeStatusNotifier(journal),
-      { senderName: "Sender & Sons", maxReceiveCount: MAX_RECEIVE_COUNT },
+      { maxReceiveCount: MAX_RECEIVE_COUNT },
       () => NOW,
     );
 
     await service.deliver([job(1)], createLogger("error"));
 
     expect(partner.sent[0]?.xml).toContain("<Sender><Name>Sender &amp; Sons</Name></Sender>");
+  });
+
+  it("always addresses the fixed recipient, whatever the request", async () => {
+    const { partner, deliver } = setup();
+
+    await deliver(job(1));
+
+    expect(partner.sent[0]?.xml).toContain("<Recipient><Name>Pharmacy</Name></Recipient>");
   });
 });
 
@@ -285,7 +293,7 @@ describe("DeliveryService: a request that must not be sent (nobody is called)", 
 
   it("names every element that has such a character, and never the character", async () => {
     const { repository, exchanges, deliver } = setup();
-    repository.seed(aRequest({ id: idNumber(1), partner: "p\u0001", subject: "s\u0002", body: "b\uD800" }));
+    repository.seed(aRequest({ id: idNumber(1), senderEmail: "p\u0001", subject: "s\u0002", body: "b\uD800" }));
 
     await deliver(job(1));
 
@@ -333,8 +341,10 @@ describe("DeliveryService: the real validator finds what the schema forbids", ()
   it.each([
     ["text over 5000 characters", { body: "x".repeat(5001) }, [{ element: "Text", rule: "too long" }]],
     ["a subject over 200 characters", { subject: "s".repeat(201) }, [{ element: "Subject", rule: "too long" }]],
-    ["a partner name with a character the schema does not allow", { partner: "Acme #1" }, [{ element: "Name", rule: "does not match the allowed pattern" }]],
-    ["a partner name over 100 characters", { partner: "p".repeat(101) }, [{ element: "Name", rule: "too long" }]],
+    // '+' and '_' are real e-mail local-part characters and PartyName allows them; '!' does not
+    // (contracts/xsd/common-types.xsd: common characters, not the full RFC 5322 grammar).
+    ["a sender e-mail with a character the schema still does not allow", { senderEmail: "sender!bad@example.test" }, [{ element: "Name", rule: "does not match the allowed pattern" }]],
+    ["a sender e-mail over 100 characters", { senderEmail: "p".repeat(101) }, [{ element: "Name", rule: "too long" }]],
   ])("%s ends as invalid_request, and nobody is called", async (_label, overrides, problems) => {
     const { repository, partner, exchanges, deliver } = setup(1, real);
     repository.seed(aRequest({ id: idNumber(1), ...overrides }));
@@ -349,7 +359,7 @@ describe("DeliveryService: the real validator finds what the schema forbids", ()
 
   it("delivers a request with characters that need escaping", async () => {
     const { repository, partner, deliver } = setup(1, real);
-    repository.seed(aRequest({ id: idNumber(1), partner: "Smith & Sons, Inc.", subject: "Fish & chips <3", body: "a > b ]]> c\r\n😀" }));
+    repository.seed(aRequest({ id: idNumber(1), senderEmail: "Smith & Sons, Inc.", subject: "Fish & chips <3", body: "a > b ]]> c\r\n😀" }));
 
     const result = await deliver(job(1));
 
@@ -891,7 +901,7 @@ describe("DeliveryService: errors on our side", () => {
 });
 
 // The rule of this class: what a request contains never reaches a log line. Every branch of
-// a delivery runs here with a CANARY in the subject, the text and the partner name, and the
+// a delivery runs here with a CANARY in the subject, the text and the sender's e-mail, and the
 // recipient's answers hold it too; then all captured log lines are searched for it. The
 // validator is the REAL one, so the real messages of libxml2 (which quote values) are in play.
 describe("DeliveryService: logging", () => {
@@ -899,7 +909,7 @@ describe("DeliveryService: logging", () => {
   const canaryRequest = (n: number, overrides: Partial<Parameters<typeof aRequest>[0]> = {}) =>
     aRequest({
       id: idNumber(n),
-      partner: `Partner ${CANARY}`,
+      senderEmail: `sender-${CANARY}@example.test`,
       subject: `Subject ${CANARY}`,
       body: `Text ${CANARY} <b>&</b>`,
       ...overrides,
@@ -925,7 +935,7 @@ describe("DeliveryService: logging", () => {
       return (scripted[n] ?? acceptedAnswer)(submission);
     };
     for (let n = 1; n <= 10; n++) repository.seed(canaryRequest(n));
-    repository.seed(canaryRequest(11, { partner: `Partner ${CANARY} #` })); // invalid: libxml2 quotes the name
+    repository.seed(canaryRequest(11, { senderEmail: `sender-${CANARY}#` })); // invalid: libxml2 quotes the name
     repository.seed(canaryRequest(12, { subject: `Subject ${CANARY}\u0000` })); // unrepresentable
     repository.seed(canaryRequest(13, { body: `x${CANARY}`.padEnd(5100, "y") })); // invalid: too long
     repository.seed(canaryRequest(14)); // the record cannot be written
@@ -1149,7 +1159,7 @@ describe("DeliveryService: request events", () => {
         new FakeApiKeyProvider(journal),
         new FakeExchangeStore(journal),
         new FakeStatusNotifier(journal),
-        { senderName: "aws-starter", maxReceiveCount: MAX_RECEIVE_COUNT },
+        { maxReceiveCount: MAX_RECEIVE_COUNT },
         () => (partner.sent.length === 0 ? NOW : afterCall),
       );
       return { logs, run: () => service.deliver([job(1, 1)], createLogger("debug")) };
@@ -1227,14 +1237,14 @@ describe("DeliveryService: the span `call recipient`", () => {
     expect(spans.named("call recipient")).toEqual([]);
   });
 
-  it("carries no text of the request, no partner name and no key, however the call ends", async () => {
+  it("carries no text of the request, no sender's e-mail and no key, however the call ends", async () => {
     const { partner, deliver } = setup();
     partner.answer = (submission) => refusedAnswer(submission);
 
     await deliver(job(1));
 
     const whole = wholeSpan(spans.only("call recipient"));
-    for (const secret of ["Order 42", "Please ship.", "Acme", "fake-api-key-for-tests", "aws-starter"]) {
+    for (const secret of ["Order 42", "Please ship.", "sender@example.test", "fake-api-key-for-tests"]) {
       expect(whole).not.toContain(secret);
     }
   });

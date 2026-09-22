@@ -12,7 +12,6 @@ export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 // only in the DynamoDB partition key, so it cannot leak into a response by accident.
 export interface PartnerRequest {
   id: string; // ULID, time-sortable
-  partner: string;
   subject: string;
   body: string;
   status: RequestStatus;

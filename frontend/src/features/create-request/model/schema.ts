@@ -12,7 +12,6 @@ const text = (label: string, max: number) =>
     .max(max, `The ${label} can have at most ${max} characters.`);
 
 export const createRequestSchema = z.object({
-  partner: text("partner name", REQUEST_LIMITS.partner),
   subject: text("subject", REQUEST_LIMITS.subject),
   body: text("message", REQUEST_LIMITS.body),
 });

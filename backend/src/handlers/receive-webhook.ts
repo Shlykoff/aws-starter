@@ -1,7 +1,7 @@
 import type { Context } from "aws-lambda";
 import { container } from "../container-webhook";
 import { describeError } from "../lib/errors";
-import { emptyResponse } from "../lib/http";
+import { emptyResponse, getHeader } from "../lib/http";
 import type { ApiEvent, ApiResult } from "../lib/http";
 import type { Logger } from "../lib/logger";
 import type { WebhookOutcome, WebhookService } from "../services/webhook-service";
@@ -28,15 +28,6 @@ const STATUS_BY_OUTCOME: Record<WebhookOutcome, number> = {
   unknown_request: 404,
 };
 
-// A REST API keeps the header names as the sender wrote them ("X-Webhook-Signature", or
-// "x-webhook-signature", whatever the sender's HTTP library does), so the lookup ignores case
-// (`name` is given in lower case). `headers` can be null when the sender sent none, although
-// the type says it cannot.
-function header(event: ApiEvent, name: string): string | undefined {
-  const found = Object.entries(event.headers ?? {}).find(([key]) => key.toLowerCase() === name);
-  return found?.[1];
-}
-
 export const handler = async (event: ApiEvent, context: Context): Promise<ApiResult> => {
   const log = logger.child({ awsRequestId: context.awsRequestId });
 
@@ -49,9 +40,9 @@ export const handler = async (event: ApiEvent, context: Context): Promise<ApiRes
     const outcome = await service.receive(
       {
         body,
-        timestampHeader: header(event, "x-webhook-timestamp"),
-        signatureHeader: header(event, "x-webhook-signature"),
-        contentType: header(event, "content-type"),
+        timestampHeader: getHeader(event, "x-webhook-timestamp"),
+        signatureHeader: getHeader(event, "x-webhook-signature"),
+        contentType: getHeader(event, "content-type"),
       },
       log,
     );

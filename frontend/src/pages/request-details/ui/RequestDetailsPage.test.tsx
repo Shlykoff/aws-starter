@@ -33,14 +33,13 @@ function setup() {
 describe("RequestDetailsPage", () => {
   it("loads and shows the request", async () => {
     const { api, open } = setup();
-    const request = makeRequest({ subject: "Big order", partner: "Acme", body: "Line one", status: "queued" });
+    const request = makeRequest({ subject: "Big order", body: "Line one", status: "queued" });
     api.get.mockResolvedValue(request);
 
     open(request.id);
 
     expect(screen.getByRole("status", { name: "Loading request" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Big order" })).toBeInTheDocument();
-    expect(screen.getByText(/Acme/)).toBeInTheDocument();
     expect(screen.getByText("Line one")).toBeInTheDocument();
     expect(screen.getByText("Queued")).toBeInTheDocument();
     expect(api.get).toHaveBeenCalledWith(request.id);
@@ -188,7 +187,7 @@ describe("RequestDetailsPage status polling", () => {
     const { api, requests, open } = setup();
     const request = makeRequest({ status: "queued" });
     api.create.mockResolvedValue(request);
-    await requests.create({ partner: "p", subject: "s", body: "b" });
+    await requests.create({ subject: "s", body: "b" });
     api.get.mockResolvedValue({ ...request, status: "sent" });
 
     open(request.id);
@@ -246,7 +245,7 @@ describe("RequestDetailsPage exchange panel", () => {
     const { api, requests, exchangeApi, open } = setup();
     const request = makeRequest({ status: "sent" });
     api.create.mockResolvedValue(request);
-    await requests.create({ partner: "p", subject: "s", body: "b" });
+    await requests.create({ subject: "s", body: "b" });
     exchangeApi.get.mockResolvedValue(makeExchange());
 
     open(request.id);

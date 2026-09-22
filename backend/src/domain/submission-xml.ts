@@ -9,9 +9,8 @@ export interface SubmissionInput {
   /** The request id (a ULID). */
   messageId: string;
   sentAt: Date;
-  senderName: string;
-  /** The `partner` of the request. */
-  recipientName: string;
+  /** The requester's own verified e-mail (Cognito), captured once when the request was created. */
+  senderEmail: string;
   subject: string;
   /** The `body` of the request. */
   text: string;
@@ -26,6 +25,12 @@ export type SubmissionXml =
 // The namespace of contracts/xsd/submission.xsd. The XSD files themselves are the contract;
 // this string must match their `targetNamespace`, and the fixtures test proves that it does.
 const NAMESPACE = "urn:aws-starter:submission:v1";
+
+// There is exactly one recipient in this project (docs/api.md, "The recipient"): a plain code
+// constant, not an environment variable or a Terraform variable, because it does not vary by
+// environment and there is nothing to configure. Any value that fits PartyName
+// (contracts/xsd/common-types.xsd) would do; this one is a placeholder, not a real business name.
+const RECIPIENT_NAME = "Pharmacy";
 
 // The characters XML 1.0 allows in a document: the `Char` production of the specification,
 // https://www.w3.org/TR/xml/#charsets, written in the same order:
@@ -59,8 +64,8 @@ export function buildSubmissionXml(input: SubmissionInput): SubmissionXml {
   // The element that holds each value, in document order.
   const values: [element: string, value: string][] = [
     ["MessageId", input.messageId],
-    ["Name", input.senderName],
-    ["Name", input.recipientName],
+    ["Name", input.senderEmail],
+    ["Name", RECIPIENT_NAME],
     ["Subject", input.subject],
     ["Text", input.text],
   ];
@@ -79,8 +84,8 @@ export function buildSubmissionXml(input: SubmissionInput): SubmissionXml {
     "  <Header>",
     `    <MessageId>${escapeText(input.messageId)}</MessageId>`,
     `    <SentAt>${input.sentAt.toISOString()}</SentAt>`,
-    `    <Sender><Name>${escapeText(input.senderName)}</Name></Sender>`,
-    `    <Recipient><Name>${escapeText(input.recipientName)}</Name></Recipient>`,
+    `    <Sender><Name>${escapeText(input.senderEmail)}</Name></Sender>`,
+    `    <Recipient><Name>${escapeText(RECIPIENT_NAME)}</Name></Recipient>`,
     "  </Header>",
     "  <Content>",
     `    <Subject>${escapeText(input.subject)}</Subject>`,

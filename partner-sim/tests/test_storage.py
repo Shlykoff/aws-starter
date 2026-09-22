@@ -17,6 +17,7 @@ def new_message(message_id: str | None = "A", **changes) -> NewMessage:
     values = {
         "received_at": "2026-09-21T10:11:12.000Z",
         "message_id": message_id,
+        "sender": "s@example.com",
         "recipient": "r",
         "subject": "s",
         "outcome": "accepted",
@@ -44,9 +45,10 @@ def test_initialize_creates_the_folder_the_table_and_wal_mode(store):
         columns = [row[1] for row in conn.execute("PRAGMA table_info(messages)")]
     finally:
         conn.close()
+    # sender is last: migration 0003 ALTERs it onto the end of the table.
     assert columns == [
         "id", "received_at", "message_id", "recipient", "subject", "outcome", "code",
-        "http_status", "request_xml", "reply_xml", "problems",
+        "http_status", "request_xml", "reply_xml", "problems", "sender",
     ]  # fmt: skip
 
 
@@ -112,6 +114,14 @@ def test_findings_survive_the_round_trip(store):
     store.add(new_message("A", problems=findings))
 
     assert store.find_answered("A").problems == findings
+
+
+def test_sender_survives_the_round_trip_and_none_is_allowed(store):
+    store.add(new_message("A", sender="requester@example.com"))
+    store.add(new_message("B", sender=None))
+
+    assert store.find_answered("A").sender == "requester@example.com"
+    assert store.find_answered("B").sender is None
 
 
 def test_the_newest_100_come_first(store):
@@ -202,6 +212,6 @@ def test_messages_and_idempotency_survive_a_restart(make_client, settings):
 
     inbox = after_restart.get("/", auth=UI_AUTH)
     again = after_restart.post("/v1/submissions", content=body, headers=headers)
-    assert "01M30JDSMHY8CRX59V35WV731S" in inbox.text
+    assert "Delivery schedule" in inbox.text  # the subject of make_submission(), still on screen
     assert again.content == first.content
     assert len(all_rows(settings.db_path)) == 1

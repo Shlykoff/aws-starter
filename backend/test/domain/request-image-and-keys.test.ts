@@ -6,19 +6,18 @@ const image = {
   pk: "USER#user-a",
   sk: "REQ#01J8Z3K5W0ABCDEFGHJKMNPQR1",
   id: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
-  partner: "Acme",
   subject: "Order 42",
   body: "Please ship.",
+  senderEmail: "sender@example.test",
   status: "created",
   createdAt: "2026-09-21T09:00:00.000Z",
 };
 
 describe("newRequestImageSchema", () => {
-  it("keeps only the request id, the owner, the partner and the retry count (0 for a new request)", () => {
+  it("keeps only the request id, the owner and the retry count (0 for a new request)", () => {
     expect(newRequestImageSchema.parse(image)).toEqual({
       requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
       ownerId: "user-a",
-      partner: "Acme",
       retryCount: 0,
     });
   });
@@ -37,7 +36,6 @@ describe("newRequestImageSchema", () => {
     expect(newRequestImageSchema.parse(withDecision)).toEqual({
       requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
       ownerId: "user-a",
-      partner: "Acme",
       retryCount: 0,
     });
   });
@@ -62,7 +60,6 @@ describe("newRequestImageSchema", () => {
     expect(parsed.data).toEqual({
       requestId: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
       ownerId: "user-a",
-      partner: "Acme",
       retryCount: 0,
     });
   });
@@ -79,9 +76,6 @@ describe("newRequestImageSchema", () => {
     ["pk", { pk: "USER#" }],
     ["id", { id: undefined }],
     ["id", { id: "" }],
-    ["partner", { partner: undefined }],
-    ["partner", { partner: "" }],
-    ["partner", { partner: 42 }],
     ["retryCount", { retryCount: -1 }],
     ["retryCount", { retryCount: 1.5 }],
     ["retryCount", { retryCount: "1" }],

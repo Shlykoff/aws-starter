@@ -49,6 +49,18 @@ data "aws_iam_policy_document" "permissions" {
     }
   }
 
+  # GetUser reads the profile of whichever user the caller's access token belongs to: the pool
+  # is picked by the token, not by a parameter of the call, so there is no ARN to scope this to
+  # (the same reasoning as the X-Ray statement above). It does not read or list any other user.
+  dynamic "statement" {
+    for_each = var.needs_cognito_get_user ? [1] : []
+
+    content {
+      actions   = ["cognito-idp:GetUser"]
+      resources = ["*"]
+    }
+  }
+
   # What the function needs besides logging, resource-scoped by the caller.
   dynamic "statement" {
     for_each = var.policy_statements

@@ -11,7 +11,7 @@ import { createRequestSchema, type CreateRequestField, type CreateRequestValues 
 
 type FieldErrors = Partial<Record<CreateRequestField, string>>;
 
-const FIELD_ORDER: CreateRequestField[] = ["partner", "subject", "body"];
+const FIELD_ORDER: CreateRequestField[] = ["subject", "body"];
 
 // Label, hint and error message around one control. The ids `<name>-hint` and
 // `<name>-error` are what the control's aria-describedby points at (see controlProps
@@ -48,7 +48,7 @@ function Field({
 // and nothing else reads it. The finished request goes to the shared RequestsStore.
 export function CreateRequestForm({ onCreated }: { onCreated: (request: PartnerRequest) => void }) {
   const requests = useRequestsStore();
-  const [values, setValues] = useState<CreateRequestValues>({ partner: "", subject: "", body: "" });
+  const [values, setValues] = useState<CreateRequestValues>({ subject: "", body: "" });
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -111,15 +111,6 @@ export function CreateRequestForm({ onCreated }: { onCreated: (request: PartnerR
 
   return (
     <form ref={formRef} onSubmit={(event) => void handleSubmit(event)} noValidate className="space-y-6">
-      <Field
-        name="partner"
-        label="Partner"
-        hint={`Who the request is for, up to ${REQUEST_LIMITS.partner} characters.`}
-        error={fieldErrors.partner}
-      >
-        <Input {...controlProps("partner")} placeholder="e.g. Acme Logistics" autoComplete="off" />
-      </Field>
-
       <Field
         name="subject"
         label="Subject"

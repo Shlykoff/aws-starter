@@ -6,7 +6,6 @@ import { z } from "zod";
 // - `strictObject` rejects unknown keys. That matters for security: a client that sends
 //   `owner` or `status` gets a 400 instead of being silently ignored.
 export const createRequestSchema = z.strictObject({
-  partner: z.string().trim().min(1).max(100),
   subject: z.string().trim().min(1).max(200),
   body: z.string().trim().min(1).max(5000),
 });

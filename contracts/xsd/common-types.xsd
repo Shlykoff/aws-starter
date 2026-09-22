@@ -24,13 +24,17 @@
 
   <!--
     The name of a party. Deliberately stricter than the sender's own API, which accepts any
-    text of 1-100 characters: the recipient owns this rule. Letters, digits, space and . , ' &amp; -
+    text of 1-100 characters: the recipient owns this rule. Letters, digits, space and . , ' &amp; -,
+    plus @ _ + for the sender: it is the requester's e-mail address, verified by Cognito, not a
+    free-text name. This covers the common local-part characters, not the full RFC 5322 grammar
+    (a real address using one of the rarer ones, such as ! # % etc., would fail this check and
+    the request would be `rejected` before delivery is attempted).
   -->
   <xs:simpleType name="PartyName">
     <xs:restriction base="xs:string">
       <xs:minLength value="1"/>
       <xs:maxLength value="100"/>
-      <xs:pattern value="[\p{L}\p{N} .,'&amp;-]+"/>
+      <xs:pattern value="[\p{L}\p{N} .,'&amp;@_+-]+"/>
     </xs:restriction>
   </xs:simpleType>
 

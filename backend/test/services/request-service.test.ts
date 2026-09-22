@@ -7,6 +7,7 @@ import { createLogger } from "../../src/lib/logger";
 import { withSpan } from "../../src/lib/tracing";
 import type { RequestRepository, RetryOutcome } from "../../src/repositories/request-repository";
 import { MAX_LIST_ITEMS, RequestService } from "../../src/services/request-service";
+import { FakeSenderIdentityProvider } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
 import { parentIdOf, recordSpans, traceparentOf } from "../helpers/tracing";
 
@@ -17,9 +18,12 @@ class FakeRequestRepository implements RequestRepository {
   /** The traceparent that each call of `create` / `retry` was given (undefined: none). */
   readonly createTraceparents: (string | undefined)[] = [];
   readonly retryTraceparents: (string | undefined)[] = [];
+  /** The senderEmail each call of `create` was given. */
+  readonly createSenderEmails: string[] = [];
   failWith: Error | undefined;
 
-  create(ownerId: string, request: PartnerRequest, traceparent?: string): Promise<void> {
+  create(ownerId: string, request: PartnerRequest, senderEmail: string, traceparent?: string): Promise<void> {
+    this.createSenderEmails.push(senderEmail);
     this.createTraceparents.push(traceparent);
     if (this.failWith) return Promise.reject(this.failWith);
     this.byOwner.set(ownerId, [...(this.byOwner.get(ownerId) ?? []), request]);
@@ -58,7 +62,8 @@ class FakeRequestRepository implements RequestRepository {
   }
 }
 
-const input = { partner: "Acme", subject: "Order 42", body: "Please ship." };
+const input = { subject: "Order 42", body: "Please ship." };
+const ACCESS_TOKEN = "test-access-token";
 // The service writes its request events to this logger; the tests read them from `logs`.
 const log = createLogger("debug");
 let logs: ReturnType<typeof captureLogs>;
@@ -70,19 +75,21 @@ const fixedNow = new Date("2026-09-20T12:34:56.789Z");
 
 function setup() {
   const repository = new FakeRequestRepository();
+  const identity = new FakeSenderIdentityProvider();
   let counter = 0;
   const service = new RequestService(
     repository,
+    identity,
     () => fixedNow,
     () => ulid(1_000_000 + counter++), // distinct, valid, increasing ULIDs
   );
-  return { repository, service };
+  return { repository, identity, service };
 }
 
 // A stored request that the pipeline has moved to `status`.
 async function storedWithStatus(status: PartnerRequest["status"]) {
   const context = setup();
-  const created = await context.service.create("user-a", input, log);
+  const created = await context.service.create("user-a", input, ACCESS_TOKEN, log);
   const items = context.repository.byOwner.get("user-a") ?? [];
   items[0] = { ...created, status };
   return { ...context, id: created.id };
@@ -92,7 +99,7 @@ describe("RequestService.create", () => {
   it("returns the new request with status created, a ULID id and an ISO UTC timestamp", async () => {
     const { service } = setup();
 
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(created).toEqual({
       id: expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/) as string,
@@ -105,7 +112,7 @@ describe("RequestService.create", () => {
   it("stores the request under the owner it was given", async () => {
     const { service, repository } = setup();
 
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(repository.byOwner.get("user-a")).toEqual([created]);
     expect(repository.byOwner.has("user-b")).toBe(false);
@@ -114,10 +121,10 @@ describe("RequestService.create", () => {
   it("never puts the owner into the returned request", async () => {
     const { service } = setup();
 
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(Object.keys(created).sort()).toEqual(
-      ["body", "createdAt", "id", "partner", "status", "subject"],
+      ["body", "createdAt", "id", "status", "subject"],
     );
   });
 
@@ -125,25 +132,56 @@ describe("RequestService.create", () => {
     const { service, repository } = setup();
     repository.failWith = new Error("storage is down");
 
-    await expect(service.create("user-a", input, log)).rejects.toThrow("storage is down");
+    await expect(service.create("user-a", input, ACCESS_TOKEN, log)).rejects.toThrow("storage is down");
   });
 
   it("uses a real clock and real ULIDs when none are injected", async () => {
-    const service = new RequestService(new FakeRequestRepository());
+    const service = new RequestService(new FakeRequestRepository(), new FakeSenderIdentityProvider());
     const before = Date.now();
 
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(created.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
     expect(Date.parse(created.createdAt)).toBeGreaterThanOrEqual(before);
+  });
+
+  it("reads the sender's e-mail with the caller's own access token, and stores it (never in the returned request)", async () => {
+    const { service, repository, identity } = setup();
+    identity.email = "sender@example.test";
+
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
+
+    expect(identity.tokensSeen).toEqual([ACCESS_TOKEN]);
+    expect(repository.createSenderEmails).toEqual(["sender@example.test"]);
+    expect(created).not.toHaveProperty("senderEmail");
+  });
+
+  it("does not store a request when GetUser fails: no empty sender identity is ever written", async () => {
+    const { service, repository, identity } = setup();
+    identity.failWith = new Error("Cognito unavailable");
+
+    await expect(service.create("user-a", input, ACCESS_TOKEN, log)).rejects.toThrow("Cognito unavailable");
+
+    expect(repository.byOwner.size).toBe(0);
+    expect(repository.createSenderEmails).toEqual([]);
+  });
+
+  it("does not store a request when Cognito has no email attribute for the caller", async () => {
+    const { service, repository, identity } = setup();
+    identity.failWith = new Error("Cognito returned no email attribute for the caller");
+
+    await expect(service.create("user-a", input, ACCESS_TOKEN, log)).rejects.toThrow(
+      "Cognito returned no email attribute for the caller",
+    );
+    expect(repository.byOwner.size).toBe(0);
   });
 });
 
 describe("RequestService.list", () => {
   it("returns the owner's requests, newest first", async () => {
     const { service } = setup();
-    const first = await service.create("user-a", input, log);
-    const second = await service.create("user-a", { ...input, subject: "Order 43" }, log);
+    const first = await service.create("user-a", input, ACCESS_TOKEN, log);
+    const second = await service.create("user-a", { ...input, subject: "Order 43" }, ACCESS_TOKEN, log);
 
     expect(await service.list("user-a")).toEqual([second, first]);
   });
@@ -159,7 +197,7 @@ describe("RequestService.list", () => {
 
   it("returns an empty list for an owner without requests", async () => {
     const { service } = setup();
-    await service.create("user-a", input, log);
+    await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(await service.list("user-b")).toEqual([]);
   });
@@ -168,14 +206,14 @@ describe("RequestService.list", () => {
 describe("RequestService.get", () => {
   it("returns the owner's request", async () => {
     const { service } = setup();
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(await service.get("user-a", created.id)).toEqual(created);
   });
 
   it("answers not found for another user's request, exactly like for a missing one", async () => {
     const { service } = setup();
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
     const missingId = ulid(2_000_000);
 
     const foreign = await service.get("user-b", created.id).catch((error: unknown) => error);
@@ -263,7 +301,7 @@ describe("RequestService: request events (docs/api.md, Logs)", () => {
   it("request_created is written once, with exactly its fields, after the request is stored", async () => {
     const { service } = setup();
 
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     expect(requestEvents()).toEqual([
       { level: "info", message: "Request event", event: "request_created", role: "user", requestId: created.id, toStatus: "created" },
@@ -274,7 +312,7 @@ describe("RequestService: request events (docs/api.md, Logs)", () => {
     const { service, repository } = setup();
     repository.failWith = new Error("storage is down");
 
-    await expect(service.create("user-a", input, log)).rejects.toThrow("storage is down");
+    await expect(service.create("user-a", input, ACCESS_TOKEN, log)).rejects.toThrow("storage is down");
 
     expect(requestEvents()).toEqual([]);
   });
@@ -307,12 +345,12 @@ describe("RequestService: request events (docs/api.md, Logs)", () => {
     expect(eventNames()).toEqual(["request_created"]); // only the one of the setup
   });
 
-  it("no event carries the owner, the partner or the text of the request", async () => {
-    const { service, id } = await storedWithStatus("failed");
+  it("no event carries the owner, the sender's e-mail or the text of the request", async () => {
+    const { service, identity, id } = await storedWithStatus("failed");
     await service.retry("user-a", id, log);
 
     const written = logs.lines.join("\n");
-    for (const secret of ["user-a", input.partner, input.subject, input.body]) expect(written).not.toContain(secret);
+    for (const secret of ["user-a", identity.email, input.subject, input.body]) expect(written).not.toContain(secret);
   });
 });
 
@@ -322,7 +360,7 @@ describe("RequestService: the trace of a request", () => {
   it("create: the request is stored with the traceparent of the span `create request`, which has the request id", async () => {
     const { service, repository } = setup();
 
-    const created = await service.create("user-a", input, log);
+    const created = await service.create("user-a", input, ACCESS_TOKEN, log);
 
     const span = spans.only("create request");
     expect(span.attributes).toEqual({ requestId: created.id });
@@ -332,7 +370,7 @@ describe("RequestService: the trace of a request", () => {
   it("create: the span is a child of the active span (the invocation), in the same trace", async () => {
     const { service } = setup();
 
-    await withSpan("invocation", {}, () => service.create("user-a", input, log));
+    await withSpan("invocation", {}, () => service.create("user-a", input, ACCESS_TOKEN, log));
 
     expect(parentIdOf(spans.only("create request"))).toBe(spans.only("invocation").spanContext().spanId);
   });
@@ -341,7 +379,7 @@ describe("RequestService: the trace of a request", () => {
     const { service, repository } = setup();
     repository.failWith = new Error("storage is down");
 
-    await expect(service.create("user-a", input, log)).rejects.toThrow("storage is down");
+    await expect(service.create("user-a", input, ACCESS_TOKEN, log)).rejects.toThrow("storage is down");
 
     expect(spans.only("create request").status).toEqual({ code: SpanStatusCode.ERROR, message: "Error" });
   });

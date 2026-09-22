@@ -2,12 +2,13 @@ import type { PartnerClient, PartnerSubmission } from "../../src/clients/partner
 import type { XmlValidator } from "../../src/clients/xml-validator";
 import type { Exchange } from "../../src/domain/exchange";
 import type { PartnerAnswer } from "../../src/domain/partner-answer";
-import type { PartnerRequest, RequestStatus } from "../../src/domain/request";
+import type { RequestStatus } from "../../src/domain/request";
 import type { ValidationResult } from "../../src/domain/validation-result";
 import type { ApiKeyProvider } from "../../src/repositories/api-key-provider";
 import type { DeliveryQueue, QueueMessage } from "../../src/repositories/delivery-queue";
-import type { DeliveryRepository } from "../../src/repositories/delivery-repository";
+import type { DeliveryRepository, RequestForDelivery } from "../../src/repositories/delivery-repository";
 import type { ExchangeStore } from "../../src/repositories/exchange-store";
+import type { SenderIdentityProvider } from "../../src/repositories/sender-identity-provider";
 import type { StatusEvent, StatusNotifier } from "../../src/repositories/status-notifier";
 
 // In-memory fakes for every port of the delivery services. They all write into one shared
@@ -19,15 +20,15 @@ export type Journal = string[];
 export const OWNER = "user-a";
 export const NOW = new Date("2026-09-21T10:00:00.000Z");
 
-/** A stored request with fake data. */
-export function aRequest(overrides: Partial<PartnerRequest> = {}): PartnerRequest {
+/** A stored request with fake data, as the delivery pipeline reads it. */
+export function aRequest(overrides: Partial<RequestForDelivery> = {}): RequestForDelivery {
   return {
     id: "01J8Z3K5W0ABCDEFGHJKMNPQR1",
-    partner: "Acme",
     subject: "Order 42",
     body: "Please ship.",
     status: "queued",
     createdAt: "2026-09-21T09:00:00.000Z",
+    senderEmail: "sender@example.test",
     ...overrides,
   };
 }
@@ -42,7 +43,7 @@ const ALLOWED_FROM: Record<Exclude<RequestStatus, "created">, RequestStatus[]> =
 };
 
 export class FakeDeliveryRepository implements DeliveryRepository {
-  private readonly items = new Map<string, PartnerRequest>();
+  private readonly items = new Map<string, RequestForDelivery>();
   /** Operations (find, markQueued, markSent, ...) that should throw this error. */
   readonly failures = new Map<string, Error>();
   /** Runs right after a read: lets a test change the item as a parallel run would. */
@@ -50,7 +51,7 @@ export class FakeDeliveryRepository implements DeliveryRepository {
 
   constructor(private readonly journal: Journal) {}
 
-  seed(request: PartnerRequest, ownerId = OWNER): void {
+  seed(request: RequestForDelivery, ownerId = OWNER): void {
     this.items.set(`${ownerId}/${request.id}`, { ...request });
   }
 
@@ -63,7 +64,7 @@ export class FakeDeliveryRepository implements DeliveryRepository {
     if (item) item.status = status;
   }
 
-  findForDelivery(ownerId: string, id: string): Promise<PartnerRequest | undefined> {
+  findForDelivery(ownerId: string, id: string): Promise<RequestForDelivery | undefined> {
     this.journal.push("repo.find");
     const failure = this.failures.get("find");
     if (failure) return Promise.reject(failure);
@@ -230,6 +231,19 @@ export class FakeStatusNotifier implements StatusNotifier {
     if (this.failWith) return Promise.reject(this.failWith);
     this.published.push(event);
     return Promise.resolve();
+  }
+}
+
+/** What create-request asks Cognito for: the caller's own e-mail, from their access token. */
+export class FakeSenderIdentityProvider implements SenderIdentityProvider {
+  /** The access token each call received, in order. */
+  readonly tokensSeen: string[] = [];
+  email = "sender@example.test";
+  failWith: Error | undefined;
+
+  getEmail(accessToken: string): Promise<string> {
+    this.tokensSeen.push(accessToken);
+    return this.failWith ? Promise.reject(this.failWith) : Promise.resolve(this.email);
   }
 }
 

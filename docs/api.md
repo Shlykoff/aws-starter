@@ -20,7 +20,6 @@ JSON, except the webhook's (XML).
 ```
 Request {
   id:        string   // ULID, time-sortable
-  partner:   string   // 1-100 chars
   subject:   string   // 1-200 chars
   body:      string   // 1-5000 chars
   status:    "created" | "queued" | "sent" | "failed" | "rejected"   // DELIVERY of the message
@@ -38,7 +37,10 @@ Request {
 with it (approved, for example paid; declined, for example out of stock). They are independent:
 the decision arrives by webhook, minutes or months after `sent`, and there is no deadline.
 
-The owner (`sub` claim of the token) is stored with the item but never returned.
+The owner (`sub` claim of the token) is stored with the item but never returned, and so is
+`senderEmail` (the owner's own e-mail, read once from Cognito at creation: "Delivery pipeline").
+There is one recipient for every request now, not a per-request choice, so nothing about it is
+part of the model.
 
 ## Statuses
 
@@ -120,7 +122,7 @@ status without a decision (`created`, `queued`, `rejected`, `failed`) no client 
 
 | Method | Path | Body | Success | Errors |
 |---|---|---|---|---|
-| POST | `/requests` | `{ partner, subject, body }` | `201` `Request` (status `created`) | `400` validation, `500` |
+| POST | `/requests` | `{ subject, body }` | `201` `Request` (status `created`) | `400` validation, `500` |
 | GET | `/requests` | | `200` `{ items: Request[] }`, newest first, at most 50 (pagination later) | `500` |
 | GET | `/requests/{id}` | | `200` `Request` | `404` (also for a malformed id), `500` |
 | POST | `/requests/{id}/retry` | | `200` `Request` (status `created`) | `404` (also for a malformed id), `409` `not_retryable` (the status is not `failed`), `500` |
@@ -194,8 +196,9 @@ Table `<project>-<env>-requests`, provisioned 5 RCU / 5 WCU, no autoscaling.
 | partition | `pk` (S) | `USER#<sub>` |
 | sort | `sk` (S) | `REQ#<ULID>` |
 
-Other attributes: `id`, `partner`, `subject`, `body`, `status`, `createdAt`, `retryCount` (once
-the request has been sent again), `traceparent` (the W3C trace context of its creation or of the last
+Other attributes: `id`, `subject`, `body`, `status`, `createdAt`, `retryCount` (once
+the request has been sent again), `senderEmail` (the owner's e-mail, read once from Cognito at
+creation: "Delivery pipeline"; never returned), `traceparent` (the W3C trace context of its creation or of the last
 resend: see "Traces"; never returned), and once the client has acted `clientDecision` (a map: the fields of "Model" plus `eventId`, the id of the event
 that set it, kept for the "same event" rule and never returned) and `decisionAtMs` (number, epoch
 milliseconds of `clientDecision.at`, for the comparison of the webhook).
@@ -233,6 +236,15 @@ GET /requests/{id}/exchange -> the XML we sent and the XML that came back
 `enqueuer`, so a request cannot be stored without also being queued (at least once), and the
 API needs no permission for the queue.
 
+**create-request.** Before writing the item, the function calls Cognito's `GetUser` with the
+caller's own raw access token (the `Authorization` header, unmodified — not the verified `sub`
+claim `ownerId` comes from) and reads the `email` attribute it returns. That value is stored on
+the item as `senderEmail` and never re-read from Cognito again (a later delivery, or a retry,
+reuses the stored value). A `GetUser` failure, or a response with no `email` attribute, fails the
+whole request (`500`) before anything is written: an empty sender identity is never stored. The
+call is purely for the outgoing XML's `Sender/Name` ("delivery-worker" below); it plays no part in
+authorization.
+
 **enqueuer** (event source mapping on the stream):
 - Filter: a new request (`INSERT`) or a request sent again (`MODIFY` whose new image has status
   `created` and a `retryCount`), so the status updates of the pipeline (`queued`, `sent`, ...) do
@@ -250,9 +262,8 @@ API needs no permission for the queue.
 **Queue** `<project>-<env>-deliveries.fifo` and its DLQ `<project>-<env>-deliveries-dlq.fifo`
 (a FIFO queue needs a FIFO DLQ):
 - Message body: `{ "requestId": ULID, "ownerId": string }`. Ids only: no request text in the queue.
-- `MessageGroupId` = SHA-256 hex of `partner.trim().toLowerCase()`. A hash, because a group id
-  may only contain alphanumerics and punctuation and the partner is free text. Order is kept
-  per partner; a failing message blocks its own partner's later messages until it is
+- `MessageGroupId` = the fixed constant `MESSAGE_GROUP_ID` (`domain/delivery-message.ts`). There
+  is one recipient, so one group: a failing message blocks every later message until it is
   acknowledged (its last attempt) or in the DLQ.
 - `MessageDeduplicationId` = `requestId` for the first send and `<requestId>-r<retryCount>` for
   a send after a retry, so that a request sent again is never taken for a duplicate of its first
@@ -273,15 +284,18 @@ an "error" outcome (our own infra hiccup) once the underlying problem is fixed, 
 1. `GetItem` with `ConsistentRead` (the item was written moments ago). Terminal status:
    acknowledge and do nothing (idempotent consumer).
 2. Build the `Submission` XML (`contracts/xsd/submission.xsd`) from the request: `MessageId` =
-   the request id, `SentAt` = now (UTC), `Sender/Name` = the `SENDER_NAME` setting,
-   `Recipient/Name` = the request's `partner`, `Subject` and `Text` from `subject` and `body`.
-   Text is XML-escaped. A character that XML 1.0 cannot carry at all (most control characters)
-   makes the request **unrepresentable**: it is `rejected` without calling anybody.
+   the request id, `SentAt` = now (UTC), `Sender/Name` = `senderEmail` (read once from Cognito's
+   `GetUser` at creation, "create-request" below), `Recipient/Name` = the fixed constant
+   `RECIPIENT_NAME` (`domain/submission-xml.ts`; there is one recipient, so it is not
+   configurable), `Subject` and `Text` from `subject` and `body`. Text is XML-escaped. A
+   character that XML 1.0 cannot carry at all (most control characters) makes the request
+   **unrepresentable**: it is `rejected` without calling anybody.
 3. Check that XML against `submission.xsd` (the schema files are packaged with the function).
    A violation is `rejected` without calling anybody: the recipient would refuse it anyway, and
    retrying cannot change it. The problems are recorded as element and rule, never with the
-   value. (The recipient's schema is stricter than the API: `partner` may be any text of 1-100
-   characters when the request is created, but a name with `#` in it fails here.)
+   value. (The recipient's schema is stricter than a real e-mail address needs to be: `PartyName`
+   covers the common local-part characters — letters, digits, `. , ' & @ _ + -` — not the full
+   RFC 5322 grammar, so an address with a rarer character, such as `!`, fails here.)
 4. `POST` it to the recipient (`contracts/partner-api.md`) with an 8 s timeout and no redirects:
    `X-API-Key` (read from SSM Parameter Store, cached for 5 minutes), `Content-Type:
    application/xml`, `Idempotency-Key` = the request id, `User-Agent: aws-starter-worker/1`.
@@ -364,7 +378,7 @@ checks ownership in the table before it touches S3).
 
 | Function | Trigger | DynamoDB | Other permissions (all resource-scoped) |
 |---|---|---|---|
-| `create-request` | `POST /requests` | `PutItem` | |
+| `create-request` | `POST /requests` | `PutItem` | `cognito-idp:GetUser` (unscoped: takes no `UserPoolId`, the caller's own access token picks the pool, "Delivery pipeline") |
 | `list-requests` | `GET /requests` | `Query` | |
 | `get-request` | `GET /requests/{id}` | `GetItem` | |
 | `retry-request` | `POST /requests/{id}/retry` | `UpdateItem` | |
@@ -391,7 +405,7 @@ checks ownership in the table before it touches S3).
   (the build is minified; the source map keeps stack traces readable). Per function:
   API functions `TABLE_NAME`; `get-exchange` `TABLE_NAME`, `AUDIT_BUCKET`; `enqueuer`
   `TABLE_NAME`, `QUEUE_URL`; `delivery-worker` `TABLE_NAME`, `PARTNER_URL`,
-  `PARTNER_API_KEY_PARAM`, `SENDER_NAME` (default `aws-starter`), `TOPIC_ARN` (request-status),
+  `PARTNER_API_KEY_PARAM`, `TOPIC_ARN` (request-status),
   `AUDIT_BUCKET`, `MAX_RECEIVE_COUNT`; `receive-webhook` `TABLE_NAME`, `WEBHOOK_TOKEN_PARAM` (the
   SSM parameter name); `log-archiver` `ARCHIVE_BUCKET` (no table).
 - The XSD files of `contracts/xsd/` are copied into the package of every function that needs

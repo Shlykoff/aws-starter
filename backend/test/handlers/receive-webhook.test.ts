@@ -1,3 +1,4 @@
+import { CognitoIdentityProviderClient, GetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
@@ -32,6 +33,8 @@ vi.mock("../../src/lib/schemas-location", () => ({
 
 const ddb = mockClient(DynamoDBDocumentClient);
 const ssm = mockClient(SSMClient);
+// Only the "request API after a decision" tests, which create through the real API, need this.
+const cognito = mockClient(CognitoIdentityProviderClient);
 let handler: typeof import("../../src/handlers/receive-webhook").handler;
 let tokens: ApiKeyProvider;
 let table: FakeTable;
@@ -54,8 +57,10 @@ beforeEach(() => {
   tokens.invalidate();
   ddb.reset();
   ssm.reset();
+  cognito.reset();
   table = stubTable(ddb);
   ssm.on(GetParameterCommand).resolves({ Parameter: { Value: WEBHOOK_TOKEN } });
+  cognito.on(GetUserCommand).resolves({ UserAttributes: [{ Name: "email", Value: "sender@example.test" }] });
   logs = captureLogs();
 });
 afterEach(() => {
@@ -64,6 +69,7 @@ afterEach(() => {
 afterAll(() => {
   ddb.restore();
   ssm.restore();
+  cognito.restore();
 });
 
 const NOW_ISO = new Date(NOW_SECONDS * 1000).toISOString();
@@ -571,7 +577,7 @@ describe("receive-webhook: failures on our side", () => {
 // The request API after a decision was stored: the same routes as before, one more field.
 describe("the request API shows the decision and hides everything internal", () => {
   const CLIENT_DECISION = { decision: "Declined", reason: "Out of stock", at: "2026-09-21T10:15:32.000Z", receivedAt: NOW_ISO };
-  const request = { id: REQUEST_ID, partner: "Acme", subject: "Order 42", body: "Please ship.", status: "sent", createdAt: "2026-09-21T09:00:00.000Z" };
+  const request = { id: REQUEST_ID, subject: "Order 42", body: "Please ship.", status: "sent", createdAt: "2026-09-21T09:00:00.000Z" };
 
   async function getHandlers() {
     const { handler: get } = await import("../../src/handlers/get-request");
@@ -604,7 +610,7 @@ describe("the request API shows the decision and hides everything internal", () 
 
     const one = await get(getRequestEvent({ sub: "user-a", id: REQUEST_ID }), lambdaContext());
     const all = await list(listRequestsEvent({ sub: "user-a" }), lambdaContext());
-    const created = await create(createRequestEvent({ sub: "user-a", body: JSON.stringify({ partner: "Acme", subject: "s", body: "b" }) }), lambdaContext());
+    const created = await create(createRequestEvent({ sub: "user-a", body: JSON.stringify({ subject: "s", body: "b" }) }), lambdaContext());
 
     expect(json(one)).toEqual(request);
     expect(json(all)).toEqual({ items: [request] });

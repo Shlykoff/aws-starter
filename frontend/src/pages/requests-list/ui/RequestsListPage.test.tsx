@@ -228,7 +228,7 @@ describe("RequestsListPage status polling", () => {
     const { api, requests } = setup();
     // A request the store already knows (e.g. just created) is on screen while the list loads.
     api.create.mockResolvedValue(makeRequest({ status: "created" }));
-    await requests.create({ partner: "p", subject: "s", body: "b" });
+    await requests.create({ subject: "s", body: "b" });
     api.list.mockReturnValue(new Promise(() => undefined));
 
     renderWithProviders(<RequestsListPage />, { requests });

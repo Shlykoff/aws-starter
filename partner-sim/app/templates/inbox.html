@@ -24,16 +24,15 @@
     <table>
       <thead>
         <tr>
-          <th>Received (UTC)</th><th>MessageId</th><th>Recipient</th><th>Subject</th>
-          <th>Outcome</th><th>HTTP</th><th>Client</th>
+          <th>Received (UTC)</th><th>Sender</th><th>Subject</th>
+          <th>Outcome</th><th>Client</th>
         </tr>
       </thead>
       <tbody>
         {% for m in rows %}
           <tr>
             <td class="nowrap"><a href="/messages/{{ m.id }}">{{ m.received_at|time_tag }}</a></td>
-            <td><code>{{ m.message_id|truncate(30, True) if m.message_id else "-" }}</code></td>
-            <td>{{ m.recipient|truncate(30, True) if m.recipient else "-" }}</td>
+            <td>{{ m.sender|truncate(30, True) if m.sender else "-" }}</td>
             <td>{{ m.subject|truncate(50, True) if m.subject else "-" }}</td>
             <td>
               {% if m.outcome == "accepted" %}
@@ -42,7 +41,6 @@
                 <span class="badge bad">Rejected &middot; {{ m.code }}</span>
               {% endif %}
             </td>
-            <td>{{ m.http_status }}</td>
             <td>
               {# The newest decision of the client, how many events there are, and whether the
                  newest one reached the sender. #}

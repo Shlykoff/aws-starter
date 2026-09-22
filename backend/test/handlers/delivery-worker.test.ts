@@ -44,9 +44,9 @@ function seed(n: number, overrides: Record<string, unknown> = {}) {
     pk: "USER#user-a",
     sk: `REQ#${idNumber(n)}`,
     id: idNumber(n),
-    partner: "Acme",
     subject: "Order 42",
     body: "Please ship.",
+    senderEmail: "sender@example.test",
     status: "queued",
     createdAt: "2026-09-21T09:00:00.000Z",
     ...overrides,
@@ -142,7 +142,7 @@ describe("delivery-worker: a delivered request", () => {
   });
 
   it("POSTs to /v1/submissions with the API key from SSM and the request id as Idempotency-Key", async () => {
-    seed(1, { partner: "Smith & Sons", subject: "Fish <3", body: "a > b ]]> c" });
+    seed(1, { senderEmail: "Smith & Sons", subject: "Fish <3", body: "a > b ]]> c" });
 
     await run(message(1));
 
@@ -164,8 +164,8 @@ describe("delivery-worker: a delivered request", () => {
     });
     const xml = init?.body as string;
     expect(xml).toContain(`<MessageId>${idNumber(1)}</MessageId>`);
-    expect(xml).toContain("<Sender><Name>aws-starter</Name></Sender>");
-    expect(xml).toContain("<Recipient><Name>Smith &amp; Sons</Name></Recipient>");
+    expect(xml).toContain("<Sender><Name>Smith &amp; Sons</Name></Sender>");
+    expect(xml).toContain("<Recipient><Name>Pharmacy</Name></Recipient>");
     expect(xml).toContain("<Subject>Fish &lt;3</Subject>");
     expect(xml).toContain("<Text>a &gt; b ]]&gt; c</Text>");
   });
@@ -313,8 +313,23 @@ describe("delivery-worker: the recipient refuses or is unavailable", () => {
 });
 
 describe("delivery-worker: a request that cannot be sent", () => {
-  it("rejects a partner name the recipient's schema forbids, without calling anybody", async () => {
-    seed(1, { partner: "Acme #1" });
+  // PartyName (contracts/xsd/common-types.xsd) allows the common e-mail local-part characters
+  // (letters, digits, . , ' & @ _ + -), because Sender/Name now carries the requester's e-mail:
+  // a '+' (plus addressing, a real Gmail feature) and '_' must go through, not be rejected.
+  it("sends a sender e-mail with '+' and '_' (real local-part characters), not rejected", async () => {
+    seed(1, { senderEmail: "user+test_two@example.test" });
+
+    const response = await run(message(1));
+
+    expect(response).toEqual({ batchItemFailures: [] });
+    expect(statusOf(1)).toBe("sent");
+    expect(fetchFake).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a sender e-mail with a character the recipient's schema still forbids, without calling anybody", async () => {
+    // '!' is valid in an RFC 5322 local part but outside PartyName's pattern: the honest limit
+    // documented in contracts/xsd/common-types.xsd (common characters, not the full grammar).
+    seed(1, { senderEmail: "user!test@example.test" });
 
     const response = await run(message(1));
 
@@ -456,8 +471,8 @@ describe("delivery-worker: logging", () => {
 
   it("never logs the request text, the reply text or the API key", async () => {
     const CANARY = "CANARY9f3a7c";
-    seed(1, { partner: `Partner ${CANARY}`, subject: `Subject ${CANARY}`, body: `Text ${CANARY}` });
-    seed(2, { partner: `Partner ${CANARY} #`, subject: `Subject ${CANARY}` });
+    seed(1, { senderEmail: `sender-${CANARY}@example.test`, subject: `Subject ${CANARY}`, body: `Text ${CANARY}` });
+    seed(2, { senderEmail: `sender-${CANARY}#`, subject: `Subject ${CANARY}` });
     respondWith(422, (id) => replyXml({ status: "Rejected", relatesTo: id, code: "SCHEMA_INVALID", description: `The value '${CANARY}' is wrong` }));
     sns.on(PublishCommand).rejects(new Error("SNS down"));
 

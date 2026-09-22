@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  MESSAGE_GROUP_ID,
   decodeDeliveryMessage,
   deduplicationId,
   encodeDeliveryMessage,
-  messageGroupId,
 } from "../../src/domain/delivery-message";
 
 describe("deduplicationId", () => {
@@ -23,30 +23,13 @@ describe("deduplicationId", () => {
   });
 });
 
-describe("messageGroupId", () => {
-  // Reference values computed outside the code: printf 'acme' | shasum -a 256
-  it("is the SHA-256 hex digest of the trimmed, lower-cased partner", () => {
-    expect(messageGroupId("acme")).toBe(
-      "822b33ad87c148a0a20a5ba7cd5ebcaa68d36a18e7aad165554903f52ca82757",
-    );
-    expect(messageGroupId("globex")).toBe(
-      "5bc1a08d28e40fe79ca3ecb077b3bd14ff00df9bad0c4a0d74ecd0805ecf0b1f",
-    );
+describe("MESSAGE_GROUP_ID", () => {
+  it("is a fixed literal: one recipient, one group", () => {
+    expect(MESSAGE_GROUP_ID).toBe("requests");
   });
 
-  it("gives one group to the spellings of the same partner", () => {
-    const expected = messageGroupId("acme");
-    expect(messageGroupId("Acme")).toBe(expected);
-    expect(messageGroupId("  ACME\n")).toBe(expected);
-  });
-
-  it("gives different partners different groups", () => {
-    expect(messageGroupId("acme")).not.toBe(messageGroupId("globex"));
-  });
-
-  it("only uses characters a FIFO group id allows, however odd the partner is", () => {
-    const group = messageGroupId("Ünïcode & spaces / [brackets] 😀");
-    expect(group).toMatch(/^[0-9a-f]{64}$/);
+  it("only uses characters a FIFO group id allows", () => {
+    expect(MESSAGE_GROUP_ID).toMatch(/^[A-Za-z0-9!"#$%&'()*+,\-./:;=?@_]{1,128}$/);
   });
 });
 

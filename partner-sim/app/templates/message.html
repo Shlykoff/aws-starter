@@ -15,10 +15,8 @@
 
   <dl class="facts">
     <dt>Received</dt><dd>{{ m.received_at|time_tag }}</dd>
-    <dt>MessageId</dt><dd>{{ m.message_id if m.message_id is not none else "(not readable)" }}</dd>
-    <dt>Recipient</dt><dd>{{ m.recipient if m.recipient is not none else "(not readable)" }}</dd>
+    <dt>Sender</dt><dd>{{ m.sender if m.sender is not none else "(not readable)" }}</dd>
     <dt>Subject</dt><dd>{{ m.subject if m.subject is not none else "(not readable)" }}</dd>
-    <dt>HTTP status sent</dt><dd>{{ m.http_status }}</dd>
   </dl>
 
   {# Only an accepted message can get a client action: the client acts on what it received. #}

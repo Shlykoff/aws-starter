@@ -25,9 +25,9 @@ import type { RequestRepository, RetryOutcome } from "./request-repository";
 //   sk (sort key, S)       "REQ#<ULID>"   a ULID sorts by creation time, so a descending
 //                                         Query on one pk returns the newest request first
 //
-// Other attributes: id, partner, subject, body, status, createdAt (see RequestItem), retryCount
-// once the request has been sent again, and once the client has acted clientDecision and
-// decisionAtMs (written by the webhook, see dynamodb-decision-repository.ts, which also
+// Other attributes: id, subject, body, status, createdAt, senderEmail (see RequestItem),
+// retryCount once the request has been sent again, and once the client has acted clientDecision
+// and decisionAtMs (written by the webhook, see dynamodb-decision-repository.ts, which also
 // explains the index `by-request-id`). And, when tracing is on, `traceparent`: the trace of the
 // request (see RequestItem).
 //
@@ -38,16 +38,19 @@ import type { RequestRepository, RetryOutcome } from "./request-repository";
 // One partition per user is fine here: traffic is spread across users. A hot partition
 // would need a single user sending very heavy traffic.
 
-/** An item as stored: the API model plus the two key attributes. */
-interface RequestItem {
+/** An item as stored: the API model plus the two key attributes. Also read by
+ * dynamodb-delivery-repository.ts, which needs `senderEmail` for delivery. */
+export interface RequestItem {
   pk: string;
   sk: string;
   id: string;
-  partner: string;
   subject: string;
   body: string;
   status: RequestStatus;
   createdAt: string;
+  // The requester's own verified e-mail (Cognito), captured once at creation. Internal only,
+  // like `traceparent`: never part of a `PartnerRequest`, never returned by the API.
+  senderEmail: string;
   // Only there once the request has been sent again. Counted here, never returned.
   retryCount?: number;
   // The W3C traceparent of the request's trace (lib/tracing.ts), written by the same PutItem
@@ -65,7 +68,6 @@ interface RequestItem {
 function toPartnerRequest(item: RequestItem): PartnerRequest {
   return {
     id: item.id,
-    partner: item.partner,
     subject: item.subject,
     body: item.body,
     status: item.status,
@@ -82,16 +84,21 @@ export class DynamoRequestRepository implements RequestRepository {
     private readonly tableName: string,
   ) {}
 
-  async create(ownerId: string, request: PartnerRequest, traceparent?: string): Promise<void> {
+  async create(
+    ownerId: string,
+    request: PartnerRequest,
+    senderEmail: string,
+    traceparent?: string,
+  ): Promise<void> {
     const item: RequestItem = {
       pk: ownerKey(ownerId),
       sk: requestKey(request.id),
       id: request.id,
-      partner: request.partner,
       subject: request.subject,
       body: request.body,
       status: request.status,
       createdAt: request.createdAt,
+      senderEmail,
       // Only when there is a trace: an item without one is valid (tracing off, older items).
       ...(traceparent !== undefined && { traceparent }),
     };

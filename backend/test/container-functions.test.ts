@@ -118,13 +118,6 @@ describe("delivery-worker container", () => {
     },
   );
 
-  it("fails fast when SENDER_NAME is a name the recipient's schema would refuse", async () => {
-    vi.stubEnv("SENDER_NAME", "Acme #1");
-    vi.resetModules();
-
-    await expect(import("../src/container-worker")).rejects.toThrow(/SENDER_NAME must be 1-100 letters/);
-  });
-
   it("names every missing variable at once", async () => {
     unset("TABLE_NAME", "PARTNER_URL", "PARTNER_API_KEY_PARAM", "TOPIC_ARN", "AUDIT_BUCKET", "MAX_RECEIVE_COUNT");
 

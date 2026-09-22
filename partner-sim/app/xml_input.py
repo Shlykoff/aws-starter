@@ -91,9 +91,10 @@ def pretty_print(text: str) -> str:
 
 @dataclass(frozen=True)
 class SubmissionFields:
-    """The three values the simulator cares about. None where the document has no such element."""
+    """The four values the simulator cares about. None where the document has no such element."""
 
     message_id: str | None
+    sender: str | None  # Header/Sender/Name: the requester's e-mail address (PartyName allows @)
     recipient: str | None
     subject: str | None
 
@@ -108,6 +109,7 @@ def read_fields(root: etree._Element) -> SubmissionFields:
 
     return SubmissionFields(
         message_id=text_at("s:Header/s:MessageId"),
+        sender=text_at("s:Header/s:Sender/s:Name"),
         recipient=text_at("s:Header/s:Recipient/s:Name"),
         subject=text_at("s:Content/s:Subject"),
     )

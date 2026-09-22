@@ -11,9 +11,18 @@ locals {
   # second module block, so that the routes, environments and permissions of all API
   # functions stay in this one map.
   functions = {
-    create-request = { route_key = "POST /requests", dynamodb_action = "dynamodb:PutItem", traced = true }
-    list-requests  = { route_key = "GET /requests", dynamodb_action = "dynamodb:Query" }
-    get-request    = { route_key = "GET /requests/{id}", dynamodb_action = "dynamodb:GetItem" }
+    # needs_cognito_get_user: the function reads the caller's own e-mail (verified by Cognito,
+    # never trusted from the client) with the same access token the authorizer already checked,
+    # to record who wrote the request. See the module for why this is not a policy_statements
+    # entry.
+    create-request = {
+      route_key              = "POST /requests"
+      dynamodb_action        = "dynamodb:PutItem"
+      traced                 = true
+      needs_cognito_get_user = true
+    }
+    list-requests = { route_key = "GET /requests", dynamodb_action = "dynamodb:Query" }
+    get-request   = { route_key = "GET /requests/{id}", dynamodb_action = "dynamodb:GetItem" }
 
     # Sends a failed request again: one conditional update (failed -> created). It needs no queue
     # permission: the change reaches the enqueuer through the table's stream, like a new request.
@@ -96,10 +105,11 @@ module "function" {
   source   = "../../modules/lambda-function"
   for_each = local.functions
 
-  name       = "${local.prefix}-${each.key}"
-  source_dir = "${var.backend_dist_dir}/${each.key}"
-  tracing    = lookup(each.value, "traced", false)
-  layers     = lookup(each.value, "traced", false) ? local.otel_layers : []
+  name                   = "${local.prefix}-${each.key}"
+  source_dir             = "${var.backend_dist_dir}/${each.key}"
+  tracing                = lookup(each.value, "traced", false)
+  needs_cognito_get_user = lookup(each.value, "needs_cognito_get_user", false)
+  layers                 = lookup(each.value, "traced", false) ? local.otel_layers : []
   # 256 MB is the module's default; a traced function gets more (tracing.tf says why).
   memory_size = lookup(each.value, "traced", false) ? local.traced_memory_mb : 256
 
@@ -371,7 +381,6 @@ module "delivery_worker" {
     TABLE_NAME            = module.requests_table.name
     PARTNER_URL           = var.partner_url
     PARTNER_API_KEY_PARAM = aws_ssm_parameter.partner_api_key.name # the name only, never the key
-    SENDER_NAME           = var.sender_name
     TOPIC_ARN             = module.request_status_topic.arn
     AUDIT_BUCKET          = module.audit_bucket.name
     MAX_RECEIVE_COUNT     = tostring(local.delivery_max_receive_count) # environment variables are strings

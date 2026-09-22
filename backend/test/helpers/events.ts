@@ -9,6 +9,10 @@ import type { ApiEvent } from "../../src/lib/http";
 /** The header that every response of the API carries (src/lib/http.ts). */
 export const CORS_HEADERS = { "Access-Control-Allow-Origin": "*" };
 
+/** A fake Cognito access token: the raw value create-request reads from the Authorization
+ * header (never a Bearer-prefixed one; docs/api.md). */
+export const ACCESS_TOKEN = "test-access-token";
+
 export interface RestEventOptions {
   httpMethod: string;
   /** The route template, as API Gateway puts it in `resource`: "/requests/{id}". */
@@ -127,7 +131,14 @@ export const createRequestEvent = (
     isBase64Encoded?: boolean;
     headers?: Record<string, string> | null;
   } = {},
-): ApiEvent => buildEvent({ route: "POST /requests", ...options });
+): ApiEvent =>
+  buildEvent({
+    route: "POST /requests",
+    ...options,
+    // A real request always carries Authorization (the authorizer needed it to run at all), so
+    // tests get it by default; a test of a missing token passes `headers: null` or its own map.
+    headers: options.headers === undefined ? { Authorization: ACCESS_TOKEN } : options.headers,
+  });
 
 export const listRequestsEvent = (options: { sub?: string } = {}): ApiEvent =>
   buildEvent({ route: "GET /requests", ...options });

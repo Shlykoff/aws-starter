@@ -119,10 +119,30 @@ def only_the_first_file(tmp_path: Path) -> Path:
     return folder
 
 
-def new_message(message_id: str) -> NewMessage:
+@pytest.fixture
+def only_the_first_two_files(tmp_path: Path) -> Path:
+    """A folder holding 0001_initial.sql and 0002_decision_events.sql: the schema before the
+    sender column existed (version 2)."""
+    folder = tmp_path / "only-0001-0002"
+    folder.mkdir()
+    shutil.copy(MIGRATIONS_DIR / "0001_initial.sql", folder)
+    shutil.copy(MIGRATIONS_DIR / "0002_decision_events.sql", folder)
+    return folder
+
+
+def columns_of(db_path: Path, table: str) -> list[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        return [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+    finally:
+        conn.close()
+
+
+def new_message(message_id: str, sender: str | None = "s@example.com") -> NewMessage:
     return NewMessage(
         received_at="2026-09-21T10:11:12.000Z",
         message_id=message_id,
+        sender=sender,
         recipient="r",
         subject="s",
         outcome="accepted",
@@ -165,11 +185,17 @@ def test_a_database_at_version_1_with_rows_is_upgraded_to_2_and_keeps_its_rows(
     assert "decision_events" not in tables_of(db_path)
     rows_before = all_rows(db_path)
 
-    MessageStore(db_path).initialize()  # what the start of the new version does
+    MessageStore(db_path).initialize()  # what the start of the new version does: EVERY pending
+    # migration runs, not just 0002, so the database lands on the newest version there is today.
 
-    assert version_of(db_path) == 2
+    assert version_of(db_path) == NEWEST
     assert message_ids_of(db_path) == ["ROW-1", "ROW-2"]
-    assert [tuple(row) for row in all_rows(db_path)] == [tuple(row) for row in rows_before]
+    after = all_rows(db_path)
+    # The columns 0001 created are untouched; later migrations (0003's sender column) only ever
+    # append, so the old rows compare equal on their original columns and read NULL on the rest.
+    width = len(rows_before[0])
+    assert [tuple(row)[:width] for row in after] == [tuple(row) for row in rows_before]
+    assert all(row["sender"] is None for row in after)
     assert event_rows(db_path) == []  # the new table is there and empty
     # ...and it works: an event for one of the old messages.
     store = MessageStore(db_path)
@@ -259,6 +285,46 @@ def test_an_event_id_is_stored_only_once(db_path):
         conn.close()
 
 
+# --- 0003: the sender column -----------------------------------------------------------------
+
+
+def test_a_database_at_version_2_gets_a_sender_column_and_old_rows_get_null(
+    db_path, only_the_first_two_files
+):
+    # A real version-2 database, made and filled before the sender column existed.
+    migrate(db_path, only_the_first_two_files)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO messages (received_at, message_id, recipient, subject, outcome, code,"
+        " http_status, request_xml, reply_xml, problems)"
+        " VALUES ('t', 'OLD-ROW', 'r', 's', 'accepted', NULL, 200, '<a/>', '<b/>', '[]')"
+    )
+    conn.commit()
+    conn.close()
+    assert version_of(db_path) == 2
+    assert "sender" not in columns_of(db_path, "messages")
+
+    MessageStore(db_path).initialize()  # what the start of the new version does
+
+    assert version_of(db_path) == NEWEST
+    assert "sender" in columns_of(db_path, "messages")
+    store = MessageStore(db_path)
+    assert store.find_answered("OLD-ROW").sender is None  # backfilled with NULL, not a guess
+    # ...and it works: a new message can carry a sender.
+    assert store.add(new_message("NEW-ROW", sender="requester@example.com")) is None
+    assert store.find_answered("NEW-ROW").sender == "requester@example.com"
+
+
+def test_a_fresh_database_has_the_sender_column_and_it_round_trips(db_path):
+    store = MessageStore(db_path)
+
+    store.initialize()
+
+    assert "sender" in columns_of(db_path, "messages")
+    store.add(new_message("A", sender="requester@example.com"))
+    assert store.find_answered("A").sender == "requester@example.com"
+
+
 # --- A new database ------------------------------------------------------------------------------
 
 
@@ -307,6 +373,7 @@ def test_the_shipped_migrations_bring_an_old_database_to_the_newest_version(db_p
     assert version_of(db_path) == NEWEST
     assert message_ids_of(db_path) == ["OLD-ROW"]
     assert "decision_events" in tables_of(db_path)
+    assert "sender" in columns_of(db_path, "messages")
 
 
 # --- An up-to-date database ----------------------------------------------------------------------

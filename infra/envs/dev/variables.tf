@@ -84,20 +84,6 @@ variable "partner_api_key_version" {
   nullable    = false
 }
 
-variable "sender_name" {
-  description = "How this system names itself in the messages (Sender/Name in the XML). Letters, digits, space and . , ' & - only, 1 to 100 characters: the recipient's schema (PartyName in contracts/xsd/common-types.xsd) accepts nothing else."
-  type        = string
-  default     = "aws-starter"
-  nullable    = false
-
-  validation {
-    # The same rule as the schema's PartyName pattern, written in Terraform's (RE2) regular
-    # expressions: \p{L} = any letter, \p{N} = any digit-like character.
-    condition     = can(regex("^[\\p{L}\\p{N} .,'&-]{1,100}$", var.sender_name))
-    error_message = "Expected 1 to 100 characters: letters, digits, space and . , ' & - only."
-  }
-}
-
 # ---------------------------------------------------------------------------
 # The webhook the recipient calls (docs/api.md, "Client decision (webhook)"; its HTTP
 # contract is contracts/webhook-api.md).

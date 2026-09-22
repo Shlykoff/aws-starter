@@ -6,7 +6,7 @@ import re
 import secrets
 
 import pytest
-from helpers import API_KEY, UI_AUTH, UI_PASSWORD, UI_USER, make_submission, ulid
+from helpers import API_KEY, SAMPLE_ID, UI_AUTH, UI_PASSWORD, UI_USER, make_submission, ulid
 
 from app.ui import LOCAL_TIME_SCRIPT
 
@@ -180,9 +180,33 @@ def test_the_inbox_shows_outcomes_status_and_the_newest_first(client, post):
     assert "Rejected &middot; RECIPIENT_REJECTED" in page
     assert "Rejected &middot; SCHEMA_INVALID" in page
     assert "Rejected &middot; MALFORMED_XML" in page
-    assert ulid(1) in page and "second [reject]" in page
-    for status in ("200", "422", "400"):
-        assert f"<td>{status}</td>" in page
+    assert "first accepted" in page and "second [reject]" in page
+
+
+def test_the_inbox_shows_sender_and_drops_messageid_recipient_and_http(client, post):
+    post(make_submission(sender="shlykoff@gmail.com", recipient="Partner OK"))
+
+    page = client.get("/", auth=UI_AUTH).text
+
+    assert "<th>Sender</th>" in page
+    assert "shlykoff@gmail.com" in page
+    for gone in ("<th>MessageId</th>", "<th>Recipient</th>", "<th>HTTP</th>"):
+        assert gone not in page
+    assert SAMPLE_ID not in page  # the MessageId text itself is gone too, not just its column
+    assert "Partner OK" not in page  # the fixed Recipient is no longer informative, so not shown
+
+
+def test_the_message_page_shows_sender_and_drops_messageid_recipient_and_http(client, post):
+    post(make_submission(sender="shlykoff@gmail.com", recipient="Partner OK"))
+
+    page = client.get("/messages/1", auth=UI_AUTH).text
+
+    assert "<dt>Sender</dt>" in page
+    assert "shlykoff@gmail.com" in page
+    # The three summary fields are gone; the MessageId/Recipient text can still legitimately
+    # appear further down, inside the raw "Received XML"/"Reply sent" <pre> dumps.
+    for gone in ("<dt>MessageId</dt>", "<dt>Recipient</dt>", "HTTP status sent"):
+        assert gone not in page
 
 
 def test_the_inbox_shows_only_the_newest_100(client, post):

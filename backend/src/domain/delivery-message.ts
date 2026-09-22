@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 
 // What travels on the SQS queue (docs/api.md, "Queue"). Ids only: the request text stays
@@ -27,19 +26,16 @@ export function decodeDeliveryMessage(body: string): DeliveryMessage | undefined
 }
 
 /**
- * The FIFO `MessageGroupId`: one group per partner, so the messages of one partner are
- * delivered in order while different partners are handled independently.
+ * The FIFO `MessageGroupId`: this project has exactly one requester-to-recipient path, so
+ * every message shares one fixed group (order within it is still FIFO). It used to be a hash
+ * of the free-text partner name, one group per partner; now there is only one recipient, so a
+ * literal replaces it. Any value that fits SQS FIFO's allowed characters (letters, digits and
+ * `!"#$%&'()*+,-./:;=?@_` up to 128 characters) would do.
  *
- * It is a hash because a group id may only contain letters, digits and some punctuation
- * (at most 128 characters), while the partner is free text. Trimming and lower-casing
- * make "Acme", "acme" and " ACME " the same partner.
- *
- * Trade-off: a message that keeps failing blocks the later messages of its own partner
- * until it is acknowledged (its last attempt) or lands in the dead-letter queue.
+ * Trade-off: a message that keeps failing blocks every later message until it is acknowledged
+ * (its last attempt) or lands in the dead-letter queue — there is only one group to block.
  */
-export function messageGroupId(partner: string): string {
-  return createHash("sha256").update(partner.trim().toLowerCase()).digest("hex");
-}
+export const MESSAGE_GROUP_ID = "requests";
 
 /**
  * The FIFO `MessageDeduplicationId`: the request id for the first send. A FIFO queue drops a

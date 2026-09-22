@@ -24,7 +24,6 @@ afterAll(() => {
 const ID = ulid(Date.UTC(2026, 8, 20, 12, 0));
 const stored = {
   id: ID,
-  partner: "Acme",
   subject: "Order 42",
   body: "Please ship.",
   status: "created",

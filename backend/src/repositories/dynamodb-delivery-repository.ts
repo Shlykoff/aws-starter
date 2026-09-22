@@ -1,10 +1,11 @@
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import type { PartnerRequest, RequestStatus } from "../domain/request";
+import type { RequestStatus } from "../domain/request";
 import { ownerKey, requestKey } from "../domain/request-keys";
 import { allowedPreviousStatuses } from "../domain/request-status";
-import type { DeliveryRepository } from "./delivery-repository";
+import type { DeliveryRepository, RequestForDelivery } from "./delivery-repository";
+import type { RequestItem } from "./dynamodb-request-repository";
 
 // The same table and keys as DynamoRequestRepository (see the comment above that class:
 // pk = USER#<sub>, sk = REQ#<ULID>). Access patterns of the delivery side:
@@ -24,7 +25,7 @@ export class DynamoDeliveryRepository implements DeliveryRepository {
     private readonly tableName: string,
   ) {}
 
-  async findForDelivery(ownerId: string, id: string): Promise<PartnerRequest | undefined> {
+  async findForDelivery(ownerId: string, id: string): Promise<RequestForDelivery | undefined> {
     const result = await this.client.send(
       new GetCommand({
         TableName: this.tableName,
@@ -36,15 +37,15 @@ export class DynamoDeliveryRepository implements DeliveryRepository {
     // Only this project's code writes to the table, so the stored shape is known. The
     // fields are copied one by one, so the key attributes (which hold the owner) are
     // dropped, like in the API repository.
-    const item = result.Item as PartnerRequest | undefined;
+    const item = result.Item as RequestItem | undefined;
     if (item === undefined) return undefined;
     return {
       id: item.id,
-      partner: item.partner,
       subject: item.subject,
       body: item.body,
       status: item.status,
       createdAt: item.createdAt,
+      senderEmail: item.senderEmail,
     };
   }
 

@@ -81,6 +81,17 @@ export function getOwnerId(event: ApiEvent): string {
   return sub;
 }
 
+/**
+ * A header value, found case-insensitively: a REST API keeps header names exactly as the sender
+ * wrote them ("X-Webhook-Signature", or "x-webhook-signature", whatever the sender's HTTP
+ * library does). `name` must already be lower case. `headers` can be null when the sender sent
+ * none, although the type says it cannot.
+ */
+export function getHeader(event: Pick<ApiEvent, "headers">, name: string): string | undefined {
+  const found = Object.entries(event.headers ?? {}).find(([key]) => key.toLowerCase() === name);
+  return found?.[1];
+}
+
 /** Parses the JSON body and validates it against a zod schema; throws ValidationError. */
 export function parseJsonBody<T>(
   event: Pick<ApiEvent, "body" | "isBase64Encoded">,
