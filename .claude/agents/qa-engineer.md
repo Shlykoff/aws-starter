@@ -44,7 +44,8 @@ The engineers test what they built, from what they built. You test what was **pr
   `live-verify-<yyyymmdd>` for direct Lambda invocations, only read or "create a test request"
   calls, never `apply`, `destroy` or deleting anything but what you created and the brief names.
   Read secrets from git-ignored files into a shell variable and never print them.
-- No `git` commands. No new dependencies (report the need instead).
+- Git: only `git status`, `git diff`, `git log`, `git show`. No new dependencies (report the
+  need instead).
 
 ## Which checks are yours
 

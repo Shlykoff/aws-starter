@@ -21,7 +21,7 @@ cloud), not inside the main system's AWS stack.
   changing them is the tech lead's decision. Report what you would change instead.
 - Never import from, read the source of, or depend on `backend/`, `frontend/` or `infra/`. The
   only thing the two sides share is `contracts/`.
-- No AWS calls or credentials. No git commands.
+- No AWS calls or credentials. Git: only `git status`, `git diff`, `git log`, `git show`.
 
 ## Conventions
 

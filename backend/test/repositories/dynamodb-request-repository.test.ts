@@ -241,9 +241,9 @@ describe("DynamoRequestRepository.retry", () => {
       TableName: "demo-dev-requests",
       Key: { pk: "USER#user-a", sk: `REQ#${ID}` },
       UpdateExpression: "SET #status = :created ADD retryCount :one",
-      ConditionExpression: "attribute_exists(pk) AND #status = :failed",
+      ConditionExpression: "attribute_exists(pk) AND #status IN (:from0)",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":created": "created", ":failed": "failed", ":one": 1 },
+      ExpressionAttributeValues: { ":created": "created", ":from0": "failed", ":one": 1 },
       ReturnValues: "ALL_NEW",
       ReturnValuesOnConditionCheckFailure: "ALL_OLD",
     });
@@ -259,8 +259,8 @@ describe("DynamoRequestRepository.retry", () => {
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
     expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({
       UpdateExpression: "SET #status = :created, traceparent = :traceparent ADD retryCount :one",
-      ConditionExpression: "attribute_exists(pk) AND #status = :failed",
-      ExpressionAttributeValues: { ":created": "created", ":failed": "failed", ":one": 1, ":traceparent": traceparent },
+      ConditionExpression: "attribute_exists(pk) AND #status IN (:from0)",
+      ExpressionAttributeValues: { ":created": "created", ":from0": "failed", ":one": 1, ":traceparent": traceparent },
     });
   });
 

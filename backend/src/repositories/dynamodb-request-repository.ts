@@ -6,6 +6,7 @@ import { toClientDecision } from "../domain/client-decision";
 import type { StoredClientDecision } from "../domain/client-decision";
 import type { PartnerRequest, RequestStatus } from "../domain/request";
 import { ownerKey, requestKey } from "../domain/request-keys";
+import { allowedPreviousStatuses } from "../domain/request-status";
 import type { RequestRepository, RetryOutcome } from "./request-repository";
 
 // DynamoDB table `<project>-<env>-requests` (created by Terraform, see docs/api.md).
@@ -141,6 +142,16 @@ export class DynamoRequestRepository implements RequestRepository {
   // The API writes only to the table (the outbox): the stream shows the change to the enqueuer,
   // which puts the request on the queue again (docs/api.md, "Sending a failed request again").
   async retry(ownerId: string, id: string, traceparent?: string): Promise<RetryOutcome> {
+    // The statuses from which a request may move to `created` (today: only `failed`), the same
+    // source of truth `moveTo()` in dynamodb-delivery-repository.ts reads. The allowed values
+    // become :from0, :from1, ... because IN needs one placeholder each.
+    const from = allowedPreviousStatuses("created");
+    const fromValues: Record<string, RequestStatus> = {};
+    from.forEach((status, index) => {
+      fromValues[`:from${index}`] = status;
+    });
+    const placeholders = from.map((_, index) => `:from${index}`).join(", ");
+
     try {
       const result = await this.client.send(
         new UpdateCommand({
@@ -153,15 +164,16 @@ export class DynamoRequestRepository implements RequestRepository {
             traceparent === undefined
               ? "SET #status = :created ADD retryCount :one"
               : "SET #status = :created, traceparent = :traceparent ADD retryCount :one",
-          // Only a failed request may be sent again (the rule of request-status.ts). A missing
-          // item has no status, so this fails for it too and no item is created;
-          // attribute_exists(pk) only says so out loud.
+          // Only a request in one of `allowedPreviousStatuses("created")` (the rule of
+          // request-status.ts, today just `failed`) may be sent again. A missing item has no
+          // status, so this fails for it too and no item is created; attribute_exists(pk) only
+          // says so out loud.
           // `status` is a reserved word in DynamoDB expressions, hence the #status alias.
-          ConditionExpression: "attribute_exists(pk) AND #status = :failed",
+          ConditionExpression: `attribute_exists(pk) AND #status IN (${placeholders})`,
           ExpressionAttributeNames: { "#status": "status" },
           ExpressionAttributeValues: {
             ":created": "created",
-            ":failed": "failed",
+            ...fromValues,
             ":one": 1,
             ...(traceparent !== undefined && { ":traceparent": traceparent }),
           },

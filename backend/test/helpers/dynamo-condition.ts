@@ -5,9 +5,9 @@
 // newer one, or an item that appears out of nowhere), not because a string differs.
 //
 // Supported: attribute_exists(x), attribute_not_exists(x), `x < :v` (also <=, >, >=, =, <>),
-// AND, OR, and parentheses; SET a = :x, b = :y; ADD n :v (a number: a missing one counts as 0).
-// Names may be #aliases. Anything else throws, so a new kind of expression is noticed instead
-// of silently accepted.
+// `x IN (:v1, :v2, ...)`, AND, OR, and parentheses; SET a = :x, b = :y; ADD n :v (a number: a
+// missing one counts as 0). Names may be #aliases. Anything else throws, so a new kind of
+// expression is noticed instead of silently accepted.
 
 type Item = Record<string, unknown>;
 
@@ -67,9 +67,18 @@ export function evaluateCondition(expression: string, context: Context): boolean
       const exists = context.item?.[name] !== undefined;
       return token === "attribute_exists" ? exists : !exists;
     }
-    // a comparison: <attribute> <sign> <:value>
+    // a comparison: <attribute> <sign> <:value>, or <attribute> IN (<:value>, ...)
     const left = valueAt(context.item, attribute(token));
     const sign = next();
+    if (sign.toUpperCase() === "IN") {
+      if (next() !== "(") fail();
+      const values: unknown[] = [];
+      while (position < tokens.length && tokens[position] !== ")") values.push(context.values[next()]);
+      if (next() !== ")") fail();
+      // Comparing something that is not there is false, as in DynamoDB (`left` is undefined
+      // and never one of the resolved :values, so `includes` already agrees).
+      return values.includes(left);
+    }
     const right = context.values[next()];
     // Comparing something that is not there is false, as in DynamoDB.
     if (left === undefined || right === undefined) return false;

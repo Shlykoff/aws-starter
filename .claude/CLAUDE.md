@@ -113,6 +113,10 @@ and say what is good too.
   batch responses; FIFO `MessageGroupId` chosen on purpose.
 - **Cost**: no NAT Gateway / VPC for Lambda, DynamoDB on-demand, log retention set,
   API throttling on, no unbounded concurrency.
+- **Observability**: a new failure mode gets a metric, an alarm or at least a
+  `Request event` log line; an alarm has somewhere to go (SNS) and a reason a human
+  can act on; a new call that crosses a boundary (queue, webhook, outbound HTTP)
+  carries the trace instead of starting an orphan one.
 - **Explainability**: could the owner defend this line to a tech lead? Naming, comments
   where non-obvious, no dead code, no dependency without a reason.
 - **Consistency**: names `${project}-${env}-<thing>`, tags, folder layout, FSD import
@@ -122,9 +126,16 @@ and say what is good too.
 ## Hard rules
 
 - No `terraform apply` / `destroy` and no mutating AWS calls (create, put, update,
-  delete, ...) without the owner's explicit confirmation in the current conversation.
-  Plans and read-only calls (`describe-*`, `list-*`, `get-*`, `sts get-caller-identity`)
-  are fine. Agents never apply. The local AWS profile is an admin one: be conservative.
+  delete, ...) from an interactive session, without the owner's explicit confirmation
+  in the current conversation. Plans and read-only calls (`describe-*`, `list-*`,
+  `get-*`, `sts get-caller-identity`) are fine. Agents never apply. The local AWS
+  profile is an admin one: be conservative.
+- That rule does not cover the deploy pipeline: merging a PR to `main` runs
+  `terraform apply` automatically (`.github/workflows/deploy.yml`), by design (see
+  README "Try it"). The owner's confirmation for that apply is the act of merging, so
+  the lead reads the plan for its blast radius before merging, not only the CI status.
+  The workflow itself refuses any delete or replace unless run by hand with
+  `allow_destroy`, so a destructive change still needs a separate, explicit decision.
 - Git: agents use only the four read-only commands above. The lead commits and pushes feature
   branches for the PR flow, never `main`, and merges after green CI.
 - Tracked files contain no secrets, account IDs or personal e-mails. `*.tfvars` are
@@ -169,4 +180,7 @@ Topics to cover over the project: cold starts, DynamoDB keys / GSI / hot partiti
 SQS visibility timeout and idempotency, FIFO message groups, DLQ and redrive, Lambda
 concurrency, the cost model, IAM least privilege, GitHub OIDC, Terraform state and
 locking, HTTP vs REST API Gateway, Cognito / JWT, sensitive data in logs, XML/XSD,
-React 19 / MobX / FSD.
+React 19 / MobX / FSD, webhook HMAC authentication and replay protection, observability
+(CloudWatch metrics/alarms, X-Ray and OpenTelemetry tracing across queue and webhook
+boundaries), SLOs and the game day, the long-term log archive (S3 + Athena), and
+CI/CD deploy safety (OIDC, plan-then-apply, `allow_destroy`).
