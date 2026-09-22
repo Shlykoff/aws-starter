@@ -153,7 +153,11 @@ function truncateSubject(subject) {
   return subject.length <= 60 ? subject : `${subject.slice(0, 59)}…`;
 }
 
-const NOT_FOUND_MESSAGE = "not found in this batch — run `list` again";
+// Seen live: every command does its own receive, which hides what it sees for 30 s. Running
+// `list` right before `redrive`/`discard` on the SAME message can hide it from that next
+// command until the 30 s pass — "not found" there does not mean the message is gone, only that
+// this call's own receive did not see it. Waiting a few seconds and trying again is the fix.
+const NOT_FOUND_MESSAGE = "not found in this batch (or hidden by a receive from seconds ago) — wait a few seconds and run `list` again";
 
 // ---------------------------------------------------------------------------------------------
 // Commands.

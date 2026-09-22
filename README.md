@@ -189,10 +189,19 @@ nothing waits for it and nothing expires.
   locally with the owner's own AWS profile: no new Lambda, IAM role or Terraform resource. It
   duplicates four small pieces of `src/domain/` logic on purpose (it runs with plain `node`, no
   bundler, and the domain module is TypeScript), held against the real ones by a test so the two
-  cannot drift apart silently. Checked live: `list` against the real (empty) DLQ, an unknown
-  command, a missing environment variable and `redrive` of a nonexistent id all behaved as
-  documented; a real redrive was not exercised, because the DLQ is empty and putting a message
-  into it on purpose is a deliberate AWS mutation, not done without asking first.
+  cannot drift apart silently. Checked live, with the owner's consent, by putting two messages into
+  the real DLQ by hand: `list` showed the right requestId, partner, status and age for a real
+  request, and "request not found" for one whose id does not exist; `redrive` sent the real one back
+  to the delivery queue with a fresh deduplication id, deleted it from the DLQ, and the real worker
+  (its own SQS event source mapping, not a direct invoke) picked it up seconds later and logged
+  `"Request is already finished, skipping" status=sent` — the idempotent-consumer path, not a
+  duplicate delivery, because the request had already reached `sent` through the ordinary
+  pipeline; `discard` removed the message for the nonexistent request, and the DLQ was empty again
+  afterwards, with no `dlq-not-empty` alarm noise (checked against `describe-alarms`: it never left
+  OK, the test was shorter than its evaluation window). One finding along the way: back-to-back
+  invocations can race the DLQ's 30 s visibility timeout (a `list` right before a `redrive` can hide
+  the very message it just showed); the tool's own last line already says so, and the fix is simply
+  to wait or retry, not a code change.
 
 ## Try it
 
