@@ -560,3 +560,25 @@ together.
   0.5 to 0.7 s.
 - **IAM**: the two write actions (`xray:PutTraceSegments`, `xray:PutTelemetryRecords`) on `*`: X-Ray
   has no resource-level permissions for them. Only the traced functions get them.
+
+## Service Level Objectives
+
+Three SLOs, each an attainment percentage (or, for the third, a duration) over a **30-day rolling
+window**, read from metrics the project already has:
+
+- **API availability, target ≥ 99.5 %**: `100 - (5XXError_sum / Count_sum * 100)`, from
+  `AWS/ApiGateway` `Count` and `5XXError` (dimensions `ApiName`, `Stage`, "Logs"), `Sum` over 30
+  days.
+- **Delivery success, target ≥ 95 %**: `DeliverySent_sum / (DeliverySent_sum + DeliveryFailed_sum)
+  * 100`, from the existing custom metrics `DeliverySent` and `DeliveryFailed` (namespace
+  `<project>/<env>`, "Logs"), `Sum` over 30 days. `DeliveryRejected` is deliberately **not** one of
+  the operands: it is the partner's own business refusal (out of stock, wrong recipient, a
+  malformed name, ...), not a failure of this stack to deliver. The 95 % target itself is loose on
+  purpose: the recipient's uptime is another organisation's to run, not this project's to promise.
+- **Time to sent, p95, target ≤ 5 min**: the existing `TimeToSentMs` metric (namespace
+  `<project>/<env>`), `p95` over 30 days, against a 300000 ms line.
+
+They are drawn as attainment widgets on the existing dashboard
+(`infra/modules/observability/dashboard.tf`, "Service level objectives"), not as new CloudWatch
+alarms, because the account's 10 free alarms are already spent by the metrics/alarms stage
+("Logs"): an SLO is meant to be read over a month, not paged on within minutes.
