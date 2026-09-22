@@ -1,8 +1,9 @@
 # One dashboard for the whole delivery flow, read top to bottom:
-# alarms -> deliveries and their latency -> the worker and the queue -> the table -> the API -> the log archiver.
+# alarms -> deliveries and their latency -> the worker and the queue -> the table -> the API -> the
+# log archiver -> the three SLOs.
 #
-# 28 metric lines, inside the free tier (3 dashboards of up to 50 metrics each). Counted the
-# strict way: every line, also the one that only feeds a metric-math expression and the second
+# 19 widgets, 37 metric lines, inside the free tier (3 dashboards of up to 50 metrics each). Counted
+# the strict way: every line, also the one that only feeds a metric-math expression and the second
 # percentile of the same metric. The grid is 24 columns wide, every row holds three widgets of 8
 # columns. A dashboard body is checked only when it is applied, so a typo in this JSON shows up
 # at `terraform apply`, not at `validate`.
@@ -263,6 +264,74 @@ locals {
           ["AWS/Lambda", "Invocations", "FunctionName", var.archiver_function_name, { label = "Runs" }],
           ["AWS/Lambda", "Errors", "FunctionName", var.archiver_function_name, { label = "Errors" }],
         ]
+      }
+    },
+
+    # --- Service level objectives (attainment, 30-day rolling; scorecards, not alarms: -------
+    # the account's 10 free alarms are already spent, see docs/api.md, "Service Level Objectives")
+    {
+      type = "text", x = 0, y = 37, width = 24, height = 3
+      properties = {
+        markdown = join("\n\n", [
+          "## Service level objectives (30-day rolling attainment)",
+          "**API availability, target 99.5 %**: share of API requests that did not answer 5xx. **Delivery success, target 95 %**: sent deliveries against sent + failed (a partner's rejection is excluded on purpose). **Time to sent, p95, target 5 min**: from creation to the worker's `sent` status. Attainment scorecards, not alarms: docs/api.md, \"Service Level Objectives\".",
+        ])
+      }
+    },
+    {
+      # e1 = 100 - (m2/m1*100): the share of requests that did NOT answer 5xx, as a percentage.
+      # m1 and m2 are hidden (visible = false): only the computed attainment is meant to be read.
+      type = "metric", x = 0, y = 40, width = 8, height = 6
+      properties = {
+        title     = "SLO: API availability (target 99.5 %, 30-day)"
+        region    = local.region
+        view      = "singleValue"
+        sparkline = true
+        stat      = "Sum"
+        period    = 2592000
+        metrics = [
+          [{ expression = "100 - (m2/m1*100)", label = "Availability %", id = "e1" }],
+          ["AWS/ApiGateway", "Count", "ApiName", var.api_name, "Stage", var.stage_name, { id = "m1", visible = false }],
+          ["AWS/ApiGateway", "5XXError", "ApiName", var.api_name, "Stage", var.stage_name, { id = "m2", visible = false }],
+        ]
+      }
+    },
+    {
+      # e1 = m1/(m1+m2)*100: sent deliveries against sent + failed. DeliveryRejected (the
+      # partner's own refusal, not our reliability) is deliberately not one of the operands.
+      type = "metric", x = 8, y = 40, width = 8, height = 6
+      properties = {
+        title     = "SLO: delivery success (target 95 %, 30-day)"
+        region    = local.region
+        view      = "singleValue"
+        sparkline = true
+        stat      = "Sum"
+        period    = 2592000
+        metrics = [
+          [{ expression = "m1/(m1+m2)*100", label = "Delivery success %", id = "e1" }],
+          [var.namespace, "DeliverySent", { id = "m1", visible = false }],
+          [var.namespace, "DeliveryFailed", { id = "m2", visible = false }],
+        ]
+      }
+    },
+    {
+      # A duration, not a percentage: the metric itself is the SLI, no metric math needed.
+      type = "metric", x = 16, y = 40, width = 8, height = 6
+      properties = {
+        title  = "SLO: time to sent, p95 (target 5 min, 30-day)"
+        region = local.region
+        view   = "timeSeries"
+        stat   = "p95"
+        period = 2592000
+        yAxis  = { left = { min = 0 } }
+        metrics = [
+          [var.namespace, "TimeToSentMs", { label = "p95" }],
+        ]
+        annotations = {
+          horizontal = [
+            { label = "target: 5 min", value = 300000 },
+          ]
+        }
       }
     },
   ]
