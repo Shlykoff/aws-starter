@@ -184,6 +184,15 @@ nothing waits for it and nothing expires.
   storm of eight retries on a `sent` (not `failed`) request was refused all eight times, no phantom
   `retry_requested` line; five canary strings, the owner id and the webhook token were searched across
   every log group, `aws/spans` and the S3 log archive (not swept before) and found nowhere. No defect.
+- [x] Stage 14: an operator CLI for the dead-letter queue,
+  `backend/scripts/redrive-dlq.mjs` (`list`, `redrive <messageId>`, `discard <messageId>`), run
+  locally with the owner's own AWS profile: no new Lambda, IAM role or Terraform resource. It
+  duplicates four small pieces of `src/domain/` logic on purpose (it runs with plain `node`, no
+  bundler, and the domain module is TypeScript), held against the real ones by a test so the two
+  cannot drift apart silently. Checked live: `list` against the real (empty) DLQ, an unknown
+  command, a missing environment variable and `redrive` of a nonexistent id all behaved as
+  documented; a real redrive was not exercised, because the DLQ is empty and putting a message
+  into it on purpose is a deliberate AWS mutation, not done without asking first.
 
 ## Try it
 
@@ -494,6 +503,14 @@ Written down as they are made; each stage adds its own.
   needs a pinger); Fly.io, Railway and Koyeb (no longer a free tier that fits). Northflank's sandbox
   asks for a card and charges for the volume ($0.15 per GB per month, 6 GB minimum); that is the price
   of a database that survives a restart.
+- **The DLQ redrive tool is a local script, not a Lambda, and it never acts on more than one
+  message at a time.** A local script needs no new IAM role and costs nothing; it runs with the
+  same admin profile `terraform apply` already does. One message at a time because the DLQ mixes
+  an outcome worth redriving (our own infra hiccup) with one that is never worth it (a malformed
+  message, or the request is gone) and nothing in the message can tell the two apart automatically
+  — rejected a bulk "redrive everything" flag for exactly that reason. It also keeps its own
+  small copies of four pieces of `src/domain/` logic (a plain script run with `node` cannot import
+  TypeScript without a bundler), held against the real functions by a test.
 
 ## Limits
 
@@ -514,7 +531,8 @@ Written down as they are made; each stage adds its own.
   Lambdas. The recipient writes to its container's output, and its host terminates TLS and can see the
   traffic: fine for fake data, not for real data.
 - Sending again has no limit on how often it is used, and only a `failed` request can be sent
-  again. There is no tool to redrive the DLQ: an operator moves those messages by hand.
+  again. `backend/scripts/redrive-dlq.mjs` inspects and redrives the DLQ ("Decisions"), but the
+  choice of redrive-or-discard per message is still the operator's, not automatic.
 - The webhook is authenticated by a shared token, and rotating it is a manual step on both sides.
   Once the signature is right the recipient is trusted: an `OccurredAt` far in the future would keep
   the decision from ever being replaced.
