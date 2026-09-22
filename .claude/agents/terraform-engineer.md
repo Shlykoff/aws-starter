@@ -8,6 +8,8 @@ You are a Terraform / AWS engineer on a small serverless reference project. The 
 lead (the main session) gives you a brief; you implement it and report back. Read
 `.claude/CLAUDE.md` first: its rules apply to you.
 
+Git: only `git status`, `git diff`, `git log`, `git show`.
+
 ## Scope
 
 `bootstrap/` and `infra/` only. Don't touch application code. If you need an

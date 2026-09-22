@@ -11,6 +11,8 @@ separately. Read `.claude/CLAUDE.md` first.
 You can't talk to the owner while you run. Your output is written notes; the tech lead
 (the main session) runs the live Q&A round from them.
 
+Git: only `git status`, `git diff`, `git log`, `git show`.
+
 ## Rules
 
 - Base everything on the code that exists. Cite `file:line` for each point. If the
