@@ -70,8 +70,11 @@ pitch for a stranger; this file and `docs/api.md` are where its claims are backe
   token (a new Lambda and a new trigger wired to the user pool, for what one extra read already
   does with one IAM permission and no new infrastructure). Read once and stored, not re-read on
   every delivery attempt, so a retry cannot show a different sender than the one who wrote it, and
-  a delivery does not cost a Cognito call. Mechanics: `docs/api.md`, "Delivery pipeline"
-  ("create-request").
+  a delivery does not cost a Cognito call. Found only by running it: `GetUser` also needs the
+  token to carry Cognito's own scope `aws.cognito.signin.user.admin` — `openid` and `email` alone
+  get `NotAuthorizedException` even though the API Gateway authorizer accepts the same token
+  (it checks for `openid`, not this scope). The app client now allows it and the frontend asks for
+  it. Mechanics: `docs/api.md`, "Delivery pipeline" ("create-request").
 - **The worker writes `failed` itself on the last attempt**, not a stuck message: a failure the
   owner can act on is a state of the request. Mechanics: `docs/api.md`, "Delivery pipeline"
   (`delivery-worker`, step 7).

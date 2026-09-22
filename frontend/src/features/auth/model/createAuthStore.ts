@@ -21,7 +21,9 @@ export function createAuthStore(config: AppConfig): AuthStore {
     client_id: config.clientId, // a public client: no client secret exists or is needed
     redirect_uri: `${origin}/auth/callback`,
     response_type: "code", // authorization code flow; oidc-client-ts adds PKCE (S256) itself
-    scope: "openid email",
+    // aws.cognito.signin.user.admin is Cognito's own scope for the self-service API
+    // (GetUser and its siblings): create-request reads the signed-in user's e-mail with it.
+    scope: "openid email aws.cognito.signin.user.admin",
     // Renew shortly before the access token expires, using the refresh token.
     automaticSilentRenew: true,
     userStore: store,

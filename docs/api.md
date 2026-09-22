@@ -243,7 +243,10 @@ the item as `senderEmail` and never re-read from Cognito again (a later delivery
 reuses the stored value). A `GetUser` failure, or a response with no `email` attribute, fails the
 whole request (`500`) before anything is written: an empty sender identity is never stored. The
 call is purely for the outgoing XML's `Sender/Name` ("delivery-worker" below); it plays no part in
-authorization.
+authorization. `GetUser` needs the token to carry Cognito's own built-in scope
+`aws.cognito.signin.user.admin` (found live: without it, a token with `openid` and `email` still
+fails `GetUser` with `NotAuthorizedException`), so the app client allows it and the frontend asks
+for it alongside `openid email`.
 
 **enqueuer** (event source mapping on the stream):
 - Filter: a new request (`INSERT`) or a request sent again (`MODIFY` whose new image has status
