@@ -64,8 +64,11 @@ resource "aws_cognito_user_pool_client" "web" {
   # and Cognito then requires the matching code_verifier on /oauth2/token.
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
-  allowed_oauth_scopes                 = ["openid", "email"]
-  supported_identity_providers         = ["COGNITO"]
+  # aws.cognito.signin.user.admin is Cognito's own built-in scope for the self-service API
+  # (GetUser and its siblings): without it on the token, GetUser answers NotAuthorizedException
+  # even though the token is otherwise valid. It only ever acts on the token's own account.
+  allowed_oauth_scopes         = ["openid", "email", "aws.cognito.signin.user.admin"]
+  supported_identity_providers = ["COGNITO"]
 
   callback_urls = local.callback_urls
   logout_urls   = local.logout_urls
