@@ -260,6 +260,14 @@ API needs no permission for the queue.
 - Visibility timeout 120 s (at least 6 x the worker timeout), `maxReceiveCount` 5, retention
   4 days on the queue and 14 days on the DLQ, server-side encryption on.
 
+**Inspecting and redriving the DLQ.** `backend/scripts/redrive-dlq.mjs` is a small operator CLI
+(`list`, `redrive <messageId>`, `discard <messageId>`) that the owner runs locally with their
+own AWS profile: no new Lambda, no IAM role, no Terraform change. `list` is read-only; `redrive`
+resends one message to the delivery queue and only then removes it from the DLQ; `discard`
+removes one message for good, without resending it. The judgement call is the human's: redrive
+an "error" outcome (our own infra hiccup) once the underlying problem is fixed, discard an
+"undeliverable" one (a malformed message, or the request is gone) because it will never succeed.
+
 **delivery-worker** (SQS event source mapping: batch size 1, `maximum_concurrency` 2,
 `ReportBatchItemFailures`):
 1. `GetItem` with `ConsistentRead` (the item was written moments ago). Terminal status:
