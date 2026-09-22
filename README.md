@@ -172,6 +172,18 @@ nothing waits for it and nothing expires.
   which was restarting, the second was delivered), and the gateway span has the parent id that the
   browser made, so API Gateway continued the browser's trace. The recipient's `WEBHOOK_URL` changed with
   the URL (it contains the stage).
+- [x] Stage 13: three SLOs and a game day. SLOs (30-day rolling attainment, on the existing dashboard,
+  no new alarm: the free 10 are spent) — API availability ≥ 99.5 %, delivery success ≥ 95 % (a
+  partner's own refusal does not count against it), time to sent p95 ≤ 5 min; read live after the
+  deploy: 100 %, 100 %, and a p95 of about 123 s. Game day (a QA agent, the public API and webhook
+  only, never `partner-sim`, never a direct write to SQS or DynamoDB): a flood of six bad webhook
+  signatures moved `webhook-unauthorized` to ALARM and it returned to OK on its own five minutes
+  after the flood stopped (checked independently, not only in the agent's report); the order-of-checks
+  matrix of the webhook contract (413, 401, 415, 400, 422, 404, a clock five minutes each way) matched
+  exactly; a replayed and an out-of-order decision event both left the stored decision untouched; a
+  storm of eight retries on a `sent` (not `failed`) request was refused all eight times, no phantom
+  `retry_requested` line; five canary strings, the owner id and the webhook token were searched across
+  every log group, `aws/spans` and the S3 log archive (not swept before) and found nowhere. No defect.
 
 ## Try it
 
