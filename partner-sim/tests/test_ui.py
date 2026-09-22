@@ -311,6 +311,25 @@ def test_a_hostile_host_header_cannot_inject_markup_into_the_example(client):
     assert "<script>x</script>" not in page
 
 
+@pytest.mark.parametrize("path", PAGES)
+def test_the_clear_button_is_on_every_authenticated_page(client, post, path):
+    post(make_submission())
+
+    page = client.get(path, auth=UI_AUTH).text
+
+    assert '<form class="inline" method="post" action="/admin/reset">' in page
+    assert ">Clear<" in page
+
+
+def test_the_clear_button_is_not_shown_without_the_login(client, post):
+    post(make_submission())
+
+    response = client.get("/")
+
+    assert response.status_code == 401
+    assert "/admin/reset" not in response.text
+
+
 # --- Switching the interface off --------------------------------------------------------------
 
 

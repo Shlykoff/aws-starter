@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from helpers import API_KEY, SCHEMA_DIR, UI_AUTH, all_rows, make_submission, ulid
 
-from app.models import Finding, NewMessage
+from app.models import Finding, NewDecisionEvent, NewMessage
 from app.service import SubmissionService
 from app.storage import MessageStore
 from app.validation import SchemaValidator
@@ -139,6 +139,20 @@ def test_get_returns_none_for_unknown_and_impossible_ids(store):
     assert store.get(1) is None
     assert store.get(0) is None
     assert store.get(2**70) is None  # SQLite cannot even bind this number
+
+
+def test_reset_clears_both_tables_in_the_order_the_foreign_key_requires(store):
+    """The message has an event pointing at it. With foreign_keys=ON (see _connect), deleting
+    messages before decision_events would raise IntegrityError: this is what would catch that
+    delete-order bug if reset() ever got it backwards."""
+    store.add(new_message("A"))
+    row_id = store.find_answered("A").id
+    store.add_event(NewDecisionEvent(row_id, "evt-1", "Approved", None, "t", "<x/>"))
+
+    store.reset()  # must not raise
+
+    assert store.list_recent() == []
+    assert store.events_of(row_id) == []
 
 
 # --- Idempotency at the service level, with the lost race made deterministic -------------------

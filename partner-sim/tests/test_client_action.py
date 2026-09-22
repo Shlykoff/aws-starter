@@ -15,6 +15,7 @@ from helpers import (
     SAMPLE_ID,
     UI_AUTH,
     WEBHOOK_TOKEN,
+    all_rows,
     closed_port_url,
     event_rows,
     make_submission,
@@ -91,7 +92,8 @@ def test_without_the_webhook_settings_the_page_offers_no_action(client, webhook,
     text = page(client)
 
     assert "Client action" in text and "The webhook is not configured" in text
-    assert "<form" not in text and "Approve" not in text
+    # No decision form (the header's own "Clear" form is unrelated and always there).
+    assert 'action="/messages/1/decision"' not in text and "Approve" not in text
     response = press(client)
     assert response.status_code == 409
     assert "The webhook is not configured" in response.text
@@ -503,6 +505,42 @@ def test_with_the_interface_off_there_is_no_action_at_all(make_client, webhook):
     accept(client)
 
     assert press(client).status_code == 404 and webhook.requests == []
+
+
+# --- Admin: wiping test data out of a running instance --------------------------------------------
+
+
+def test_admin_reset_needs_the_login(ready, settings):
+    press(ready, "Declined", reason="Out of stock")  # something to wipe, and to confirm it wasn't
+
+    response = ready.post("/admin/reset", headers=SAME_ORIGIN)
+
+    assert response.status_code == 401
+    assert all_rows(settings.db_path) != [] and event_rows(settings.db_path) != []
+
+
+def test_admin_reset_is_refused_cross_site(ready, settings):
+    press(ready, "Declined", reason="Out of stock")
+
+    response = ready.post("/admin/reset", auth=UI_AUTH, headers={"Origin": "http://evil.example"})
+
+    assert response.status_code == 403
+    assert all_rows(settings.db_path) != [] and event_rows(settings.db_path) != []
+
+
+def test_admin_reset_clears_both_tables(ready, settings):
+    # A message with a decision event: if reset() deleted messages before decision_events, the
+    # foreign key (foreign_keys=ON) would raise IntegrityError and this call would fail loudly.
+    press(ready, "Declined", reason="Out of stock")
+    assert all_rows(settings.db_path) != [] and event_rows(settings.db_path) != []
+
+    response = ready.post("/admin/reset", auth=UI_AUTH, headers=SAME_ORIGIN, follow_redirects=False)
+
+    # 303 back to the inbox, like the header's "Clear" button (a plain form post) lands on.
+    assert response.status_code == 303 and response.headers["location"] == "/"
+    assert all_rows(settings.db_path) == [] and event_rows(settings.db_path) == []
+    assert "Nothing has arrived yet" in ready.get("/", auth=UI_AUTH).text
+    assert ready.get("/messages/1", auth=UI_AUTH).status_code == 404
 
 
 # --- Secrets: not in the log, not in the database ------------------------------------------------

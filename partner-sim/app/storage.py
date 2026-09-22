@@ -195,6 +195,20 @@ class MessageStore:
             for row in rows
         }
 
+    # --- Admin (operator only) ----------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Wipe every row, for an operator clearing test data out of a running instance.
+
+        decision_events first: it has a foreign key to messages.id, and foreign_keys=ON
+        (see _connect) would refuse deleting a message that still has an event pointing at it.
+        Both deletes run in the one transaction _connect already opens, so a reset is all-or-
+        nothing.
+        """
+        with self._connect() as conn:
+            conn.execute("DELETE FROM decision_events")
+            conn.execute("DELETE FROM messages")
+
 
 def _event(row: sqlite3.Row) -> StoredEvent:
     return StoredEvent(
