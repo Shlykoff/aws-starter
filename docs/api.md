@@ -3,8 +3,8 @@
 The single source of truth for backend, infrastructure and frontend. Change it here
 first, then in the code.
 
-The API is an API Gateway **REST API** (`infra/modules/rest-api`; why it is not an HTTP API is in the
-README, "Decisions").
+The API is an API Gateway **REST API** (`infra/modules/rest-api`; why it is not an HTTP API is in
+`.claude/DECISIONS.md`).
 
 Base URL: the `api_url` Terraform output. It contains the **stage**, so it looks like
 `https://<id>.execute-api.<region>.amazonaws.com/v1`, and a path is appended to it

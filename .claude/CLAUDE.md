@@ -9,13 +9,19 @@ technical discussions, backend and frontend separately.
 
 So the rule above all others: **the owner must be able to explain every line.**
 Prefer plain, boring, well-commented solutions over clever ones. If something can't be
-explained in two sentences, simplify it, or write down why in the README "Decisions".
+explained in two sentences, simplify it, or write down why in `.claude/DECISIONS.md`.
 
-## Two files, two readers
+## Three files, three readers
 
-`README.md` is for a stranger: what the project shows, how to try it, the architecture, the
-`Decisions` (non-obvious choices and the rejected alternative) and `Limits`. Keep it short.
-Never add a stage-by-stage build log to it, and never write "checked on AWS: ..." there.
+`README.md` is for a stranger: what the project shows, diagrams, the stack, how to try it, and
+the handful of limits a reviewer needs up front. Keep it short — a few minutes to read. Never add
+a stage-by-stage build log to it, never write "checked on AWS: ..." there, and never restate the
+mechanics `docs/api.md` already specifies.
+
+`.claude/DECISIONS.md` is for whoever must defend a line: the full decision log (every
+non-obvious choice, with the rejected alternative) and the full `Limits` list. Owned by the
+`technical-writer` agent; a decision whose mechanics are already in `docs/api.md` points there
+instead of repeating them.
 
 `.claude/STATUS.md` is for Claude Code: read it at the start of a session to pick up where the
 project stands, and add one entry per finished stage there (what was built, what was checked,
@@ -33,6 +39,7 @@ history is not lost, but it is not part of the pitch a reader sees first.
   - `qa-engineer` tests independently: from the contracts, not from the code (see its file).
   - `walkthrough-coach` turns the finished code into study notes (questions and
     honest answers).
+  - `technical-writer` keeps `README.md` and `.claude/DECISIONS.md` short and accurate.
 
 ## How a stage runs
 
@@ -46,7 +53,7 @@ history is not lost, but it is not part of the pitch a reader sees first.
    as a short brief of its own; after two rounds without a fix, bring the decision to the owner.
 4. **Walkthrough.** Explain the change to the owner in Russian, briefly, then run a
    Q&A round on it (below). Add the stage's entry to `.claude/STATUS.md` (never to
-   README: see "Two files, two readers" below), a Decisions line in README when the
+   README: see "Three files, three readers" below), a line in `.claude/DECISIONS.md` when the
    stage made a non-obvious choice, and the stage's questions to `NOTES.md` (personal,
    git-ignored; `walkthrough-coach` can draft them). Every answer there must say what
    is in the repo and what is not yet.
@@ -165,7 +172,7 @@ and say what is good too.
 - **DynamoDB**: provisioned, small and fixed (5 RCU / 5 WCU per table and per GSI, no
   autoscaling) to stay inside the always-free limits; key design is explained in the
   README.
-- **Decisions**: every non-obvious choice gets a line in README "Decisions", with the
+- **Decisions**: every non-obvious choice gets a line in `.claude/DECISIONS.md`, with the
   alternative that was rejected.
 
 ## Q&A rounds

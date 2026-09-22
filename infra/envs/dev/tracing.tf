@@ -8,7 +8,7 @@
 #
 # The layer sends the spans straight to the X-Ray OTLP endpoint, signed with the function's role:
 # no collector to run. AWS requires CloudWatch "Transaction Search" for that endpoint (last part of
-# this file). Details and the alternatives that were rejected: README, Decisions.
+# this file). Details and the alternatives that were rejected: .claude/DECISIONS.md.
 
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
