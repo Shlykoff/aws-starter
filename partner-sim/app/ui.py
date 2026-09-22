@@ -6,9 +6,10 @@ the simulator may be reachable through a public tunnel and the inbox holds other
 messages. Text from a submission or a reason is untrusted: it only ever reaches the page through
 Jinja2 with autoescape on, so markup in it is shown as text and is never interpreted.
 
-The two POST routes change state, and a browser attaches the Basic-auth login to ANY request to
-this address, also to one made by a form on another web site. So they refuse cross-site requests
-(_is_same_origin) before they do anything else.
+The state-changing POST routes (decision, resend, and the operator's admin/reset) change state,
+and a browser attaches the Basic-auth login to ANY request to this address, also to one made by
+a form on another web site. So they refuse cross-site requests (_is_same_origin) before they do
+anything else.
 """
 
 import base64
@@ -221,6 +222,19 @@ def build_ui_router(
         if not _is_same_origin(request):
             return _refuse_cross_site()
         return await run_in_threadpool(resend, message_id, event_id)
+
+    # --- Admin: an operator wiping test data out of a running instance (no UI, curl only) ------
+
+    @router.post("/admin/reset")
+    def admin_reset(request: Request) -> Response:
+        # Same guard as decision/resend: a cached Basic-auth login must not let another site
+        # trigger this by pointing a hidden form at it.
+        if not _is_same_origin(request):
+            return _refuse_cross_site()
+        store.reset()
+        # 303 back to the now-empty inbox: the header's "Clear" button is a plain form post,
+        # and this is the natural landing page for it (same pattern as _see_other below).
+        return RedirectResponse("/", status_code=303, headers=SECURITY_HEADERS)
 
     return router
 
