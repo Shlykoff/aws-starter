@@ -22,6 +22,8 @@ It can run entirely on your computer, no AWS needed — see "Try it" below. Toda
 on a free container host instead of a laptop, because AWS cannot reach a laptop's `127.0.0.1` —
 the recipient needs a stable public address for the AWS side to call it.
 
+<video src="./docs/preview.mp4" autoplay loop muted playsinline></video>
+
 ## Stack
 
 **Backend**
