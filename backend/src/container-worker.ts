@@ -102,10 +102,9 @@ container
       apiKeys: ApiKeyProvider,
       exchanges: ExchangeStore,
       notifier: StatusNotifier,
-      { senderName, maxReceiveCount }: WorkerConfig,
+      { maxReceiveCount }: WorkerConfig,
     ) =>
       new DeliveryService(repository, partner, validator, apiKeys, exchanges, notifier, {
-        senderName,
         maxReceiveCount,
       }),
     [

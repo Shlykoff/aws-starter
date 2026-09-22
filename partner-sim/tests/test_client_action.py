@@ -540,9 +540,9 @@ def test_the_token_and_the_signature_are_not_stored(ready, webhook, settings):
 
 def _accepted(message_id: str) -> NewMessage:
     return NewMessage(
-        received_at="2026-09-21T10:11:12.000Z", message_id=message_id, recipient="r", subject="s",
-        outcome="accepted", code=None, http_status=200, request_xml="<a/>", reply_xml="<b/>",
-        problems=[],
+        received_at="2026-09-21T10:11:12.000Z", message_id=message_id, sender="s@example.com",
+        recipient="r", subject="s", outcome="accepted", code=None, http_status=200,
+        request_xml="<a/>", reply_xml="<b/>", problems=[],
     )  # fmt: skip
 
 

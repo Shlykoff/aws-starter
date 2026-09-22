@@ -6,6 +6,7 @@ import type { Logger } from "../lib/logger";
 import { logRequestEvent } from "../lib/request-events";
 import { currentTraceparent, withSpan } from "../lib/tracing";
 import type { RequestRepository } from "../repositories/request-repository";
+import type { SenderIdentityProvider } from "../repositories/sender-identity-provider";
 
 // docs/api.md: GET /requests returns at most 50 items, newest first.
 export const MAX_LIST_ITEMS = 50;
@@ -15,16 +16,30 @@ export const MAX_LIST_ITEMS = 50;
 export class RequestService {
   constructor(
     private readonly repository: RequestRepository,
+    private readonly identity: SenderIdentityProvider,
     // The clock and the id generator are parameters only so that tests can control them.
     // Production code (the container) uses the defaults.
     private readonly now: () => Date = () => new Date(),
     private readonly newId: () => string = ulid,
   ) {}
 
-  async create(ownerId: string, input: CreateRequestInput, log: Logger): Promise<PartnerRequest> {
+  /**
+   * `accessToken` is the caller's own raw Cognito access token (from the Authorization header,
+   * not the verified `sub` claim `ownerId` came from): it is used ONLY to read the caller's own
+   * verified e-mail for the sender identity, never for authorization.
+   */
+  async create(
+    ownerId: string,
+    input: CreateRequestInput,
+    accessToken: string,
+    log: Logger,
+  ): Promise<PartnerRequest> {
+    // Read before anything is stored: a GetUser failure or a missing e-mail attribute must not
+    // create a request with an empty sender identity. It is not re-fetched on delivery.
+    const senderEmail = await this.identity.getEmail(accessToken);
+
     const request: PartnerRequest = {
       id: this.newId(),
-      partner: input.partner,
       subject: input.subject,
       body: input.body,
       status: "created", // stage 1 never moves a request past "created"
@@ -34,7 +49,7 @@ export class RequestService {
     // the same write, and the enqueuer and the webhook continue from it (lib/tracing.ts). The
     // event is logged inside it, so its line carries the trace id.
     await withSpan("create request", { requestId: request.id }, async () => {
-      await this.repository.create(ownerId, request, currentTraceparent());
+      await this.repository.create(ownerId, request, senderEmail, currentTraceparent());
       logRequestEvent(log, { event: "request_created", role: "user", requestId: request.id, toStatus: "created" });
     });
     return request;

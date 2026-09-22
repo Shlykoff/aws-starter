@@ -28,7 +28,6 @@ const ID = ulid(Date.UTC(2026, 8, 20, 12, 0));
 const key = { pk: "USER#user-a", sk: `REQ#${ID}` };
 const fields = {
   id: ID,
-  partner: "Acme",
   subject: "Order 42",
   body: "Please ship.",
   createdAt: "2026-09-20T12:00:00.000Z",

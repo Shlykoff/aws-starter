@@ -79,12 +79,13 @@ class MessageStore:
         try:
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO messages (received_at, message_id, recipient, subject, outcome,"
-                    " code, http_status, request_xml, reply_xml, problems)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO messages (received_at, message_id, sender, recipient, subject,"
+                    " outcome, code, http_status, request_xml, reply_xml, problems)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         new.received_at,
                         new.message_id,
+                        new.sender,
                         new.recipient,
                         new.subject,
                         new.outcome,
@@ -107,8 +108,8 @@ class MessageStore:
         with self._connect() as conn:
             rows = conn.execute(
                 # Not SELECT *: the two XML columns can be 64 KiB each; the list does not need them.
-                "SELECT id, received_at, message_id, recipient, subject, outcome, code, http_status"
-                " FROM messages ORDER BY id DESC LIMIT ?",
+                "SELECT id, received_at, message_id, sender, recipient, subject, outcome, code,"
+                " http_status FROM messages ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [_summary(row) for row in rows]
@@ -216,6 +217,7 @@ def _summary(row: sqlite3.Row) -> MessageSummary:
         id=row["id"],
         received_at=row["received_at"],
         message_id=row["message_id"],
+        sender=row["sender"],
         recipient=row["recipient"],
         subject=row["subject"],
         outcome=row["outcome"],
@@ -229,6 +231,7 @@ def _detail(row: sqlite3.Row) -> MessageDetail:
         id=row["id"],
         received_at=row["received_at"],
         message_id=row["message_id"],
+        sender=row["sender"],
         recipient=row["recipient"],
         subject=row["subject"],
         outcome=row["outcome"],

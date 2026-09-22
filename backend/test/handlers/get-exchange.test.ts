@@ -29,7 +29,7 @@ afterAll(() => {
 });
 
 const ID = ulid(Date.UTC(2026, 8, 20, 12, 0));
-const request = { id: ID, partner: "Acme", subject: "Order 42", body: "Please ship.", status: "sent", createdAt: "2026-09-20T12:00:00.000Z" };
+const request = { id: ID, subject: "Order 42", body: "Please ship.", status: "sent", createdAt: "2026-09-20T12:00:00.000Z" };
 const exchange: Exchange = {
   attempt: 1,
   at: "2026-09-20T12:00:05.000Z",

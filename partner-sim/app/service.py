@@ -44,7 +44,7 @@ FAIL_TRIGGER = "[fail]"
 
 _REPLACEMENT_CHARACTER = "\N{REPLACEMENT CHARACTER}"  # U+FFFD, what a reader sees for a bad byte
 
-_NOTHING_READ = SubmissionFields(message_id=None, recipient=None, subject=None)
+_NOTHING_READ = SubmissionFields(message_id=None, sender=None, recipient=None, subject=None)
 
 
 @dataclass(frozen=True)
@@ -140,6 +140,7 @@ class SubmissionService:
         message = NewMessage(
             received_at=format_utc(received_at),
             message_id=fields.message_id,
+            sender=fields.sender,
             recipient=fields.recipient,
             subject=fields.subject,
             outcome="accepted" if code is None else "rejected",

@@ -40,6 +40,12 @@ variable "tracing" {
   default     = false
 }
 
+variable "needs_cognito_get_user" {
+  description = "Grant cognito-idp:GetUser (reads the caller's own attributes with their access token). Like the X-Ray actions below, GetUser takes no UserPoolId or ARN of its own to scope a policy to, so it cannot go through policy_statements, which refuses \"*\"."
+  type        = bool
+  default     = false
+}
+
 variable "timeout" {
   description = "Timeout in seconds."
   type        = number

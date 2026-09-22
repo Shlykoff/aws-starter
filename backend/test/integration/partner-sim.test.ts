@@ -33,13 +33,12 @@ describe.skipIf(baseUrl === undefined || apiKey === undefined)("against a runnin
   }
 
   // The XML the worker would build for these values.
-  function build(overrides: { subject?: string; text?: string; partner?: string; id?: string } = {}) {
+  function build(overrides: { subject?: string; text?: string; senderEmail?: string; id?: string } = {}) {
     const id = overrides.id ?? ulid();
     const built = buildSubmissionXml({
       messageId: id,
       sentAt: new Date(),
-      senderName: "aws-starter",
-      recipientName: overrides.partner ?? "Partner OK",
+      senderEmail: overrides.senderEmail ?? "sender@example.test",
       subject: overrides.subject ?? "Integration test",
       text: overrides.text ?? "Hello from the integration test.",
     });
@@ -70,7 +69,7 @@ describe.skipIf(baseUrl === undefined || apiKey === undefined)("against a runnin
 
   it("accepts text that needed escaping and characters outside ASCII", async () => {
     const { id, xml } = build({
-      partner: "Smith & Sons, Inc.",
+      senderEmail: "Smith & Sons, Inc.",
       subject: "Fish & chips <3 «Привет» 😀",
       text: "a > b ]]> c\r\nline two\tindented\n</Text><Injected/>",
     });

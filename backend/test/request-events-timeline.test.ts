@@ -16,6 +16,7 @@ import {
   FakeDeliveryQueue,
   FakeExchangeStore,
   FakePartnerClient,
+  FakeSenderIdentityProvider,
   FakeStatusNotifier,
   FakeXmlValidator,
   acceptedAnswer,
@@ -32,11 +33,12 @@ import { WEBHOOK_TOKEN, eventXml, sign } from "./helpers/webhook";
 // an `event` and the request's id, in the order they were written.
 
 const OWNER = "CANARY-owner-7e1c";
-const PARTNER = "CANARY-partner-7e1c";
+const SENDER_EMAIL = "CANARY-sender-7e1c@example.test";
+const ACCESS_TOKEN = "test-access-token";
 const SUBJECT = "CANARY-subject-7e1c";
 const BODY = "CANARY-body-7e1c";
 const REASON = "CANARY-reason-7e1c"; // the Reason of the client's event
-const CANARIES = [OWNER, PARTNER, SUBJECT, BODY, REASON];
+const CANARIES = [OWNER, SENDER_EMAIL, SUBJECT, BODY, REASON];
 const MAX_RECEIVE_COUNT = 5;
 const TABLE = "test-requests";
 
@@ -61,7 +63,9 @@ function build() {
   const journal: Journal = [];
   const queue = new FakeDeliveryQueue(journal);
   const partner = new FakePartnerClient(journal);
-  const requests = new RequestService(new DynamoRequestRepository(client, TABLE), now, (() => {
+  const identity = new FakeSenderIdentityProvider();
+  identity.email = SENDER_EMAIL;
+  const requests = new RequestService(new DynamoRequestRepository(client, TABLE), identity, now, (() => {
     let n = 0;
     return () => ulid(1_000_000 + n++);
   })());
@@ -73,7 +77,7 @@ function build() {
     new FakeApiKeyProvider(journal),
     new FakeExchangeStore(journal),
     new FakeStatusNotifier(journal),
-    { senderName: "aws-starter", maxReceiveCount: MAX_RECEIVE_COUNT },
+    { maxReceiveCount: MAX_RECEIVE_COUNT },
     now,
   );
   const webhook = new WebhookService(
@@ -85,7 +89,7 @@ function build() {
 
   // The enqueuer: the request goes onto the queue (`retryCount` is what the stream image says).
   const enqueue = async (requestId: string, retryCount = 0) => {
-    await enqueuer.enqueue([{ key: `seq-${queue.calls.length}`, request: { requestId, ownerId: OWNER, partner: PARTNER, retryCount } }], log);
+    await enqueuer.enqueue([{ key: `seq-${queue.calls.length}`, request: { requestId, ownerId: OWNER, retryCount } }], log);
   };
   // The worker: the message the enqueuer sent last, received `receiveCount` times.
   const deliver = async (receiveCount: number) => {
@@ -102,7 +106,7 @@ function build() {
       log,
     );
   };
-  const create = () => requests.create(OWNER, { partner: PARTNER, subject: SUBJECT, body: BODY }, log);
+  const create = () => requests.create(OWNER, { subject: SUBJECT, body: BODY }, ACCESS_TOKEN, log);
 
   // What the Logs Insights query of docs/api.md gives: the events of one request, in order.
   const timeline = (requestId: string) =>
@@ -193,7 +197,7 @@ describe("the timeline of a request across the functions", () => {
     expect(timeline(second.id)).toHaveLength(4);
   });
 
-  it("nothing in the logs of the whole flow holds the text of the request, the partner, the reason or the owner", async () => {
+  it("nothing in the logs of the whole flow holds the text of the request, the sender's e-mail, the reason or the owner", async () => {
     const { logs, requests, log, partner, create, enqueue, deliver, decide } = build();
 
     const request = await create();

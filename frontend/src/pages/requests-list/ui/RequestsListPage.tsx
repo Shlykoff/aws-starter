@@ -22,7 +22,6 @@ function RequestsTable({ items }: { items: PartnerRequest[] }) {
       <TableHeader>
         <TableRow>
           <TableHead>Subject</TableHead>
-          <TableHead>Partner</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Created</TableHead>
         </TableRow>
@@ -37,7 +36,6 @@ function RequestsTable({ items }: { items: PartnerRequest[] }) {
                   {request.subject}
                 </Link>
               </TableCell>
-              <TableCell className="max-w-40 truncate">{request.partner}</TableCell>
               <TableCell>
                 {/* The delivery status, and next to it the client's status: the decision, or
                     "Waiting" for a delivered request without one. None for the others. */}

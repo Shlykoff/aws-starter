@@ -44,4 +44,3 @@ partner_url = "https://partner.example.com"
 # region                  = "eu-north-1"
 # backend_dist_dir        = "../../../backend/dist"   # build output, relative to this directory
 # enable_static_site      = true                      # false = no S3 + CloudFront (API and Cognito only)
-# sender_name             = "aws-starter"             # Sender/Name in the XML: letters, digits, space and . , ' & - only, 1-100 characters

@@ -1,9 +1,12 @@
+import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { Container } from "inversify";
 import { bindDynamoDocumentClient } from "./container-dynamodb";
 import { bindLogger } from "./container-shared";
+import { CognitoSenderIdentityProvider } from "./repositories/cognito-sender-identity-provider";
 import { DynamoRequestRepository } from "./repositories/dynamodb-request-repository";
 import type { RequestRepository } from "./repositories/request-repository";
+import type { SenderIdentityProvider } from "./repositories/sender-identity-provider";
 import { RequestService } from "./services/request-service";
 import { loadConfig } from "./lib/config";
 import type { Config } from "./lib/config";
@@ -41,6 +44,12 @@ container.bind<Config>(TOKENS.Config).toConstantValue(config);
 
 bindLogger(container, config.logLevel);
 bindDynamoDocumentClient(container);
+// Only create-request calls this (to read the caller's own e-mail via GetUser), but the four
+// request functions share this one container file, so list/get/retry also construct the client
+// and the port; they never call it, and no command is sent until `.getEmail` actually runs.
+container
+  .bind<CognitoIdentityProviderClient>(TOKENS.CognitoClient)
+  .toConstantValue(new CognitoIdentityProviderClient({}));
 
 container
   .bind<RequestRepository>(TOKENS.RequestRepository)
@@ -52,9 +61,18 @@ container
   .inSingletonScope();
 
 container
+  .bind<SenderIdentityProvider>(TOKENS.SenderIdentityProvider)
+  .toResolvedValue(
+    (client: CognitoIdentityProviderClient) =>
+      tracedPort(new CognitoSenderIdentityProvider(client), "sender-identity"),
+    [TOKENS.CognitoClient],
+  )
+  .inSingletonScope();
+
+container
   .bind<RequestService>(TOKENS.RequestService)
   .toResolvedValue(
-    (repository: RequestRepository) => new RequestService(repository),
-    [TOKENS.RequestRepository],
+    (repository: RequestRepository, identity: SenderIdentityProvider) => new RequestService(repository, identity),
+    [TOKENS.RequestRepository, TOKENS.SenderIdentityProvider],
   )
   .inSingletonScope();

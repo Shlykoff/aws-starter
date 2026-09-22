@@ -1,5 +1,6 @@
 import { SpanStatusCode } from "@opentelemetry/api";
 import { describe, expect, it } from "vitest";
+import { MESSAGE_GROUP_ID } from "../../src/domain/delivery-message";
 import { EnqueueService } from "../../src/services/enqueue-service";
 import type { EnqueueEntry } from "../../src/services/enqueue-service";
 import { createLogger } from "../../src/lib/logger";
@@ -13,14 +14,10 @@ import type { Journal } from "../helpers/fakes";
 import { captureLogs } from "../helpers/logs";
 import { STORED_SPAN_ID, STORED_TRACEPARENT, STORED_TRACE_ID, parentIdOf, recordSpans } from "../helpers/tracing";
 
-// Reference values computed outside the code: printf 'acme' | shasum -a 256
-const ACME_GROUP = "822b33ad87c148a0a20a5ba7cd5ebcaa68d36a18e7aad165554903f52ca82757";
-const GLOBEX_GROUP = "5bc1a08d28e40fe79ca3ecb077b3bd14ff00df9bad0c4a0d74ecd0805ecf0b1f";
-
 const idNumber = (n: number): string => `01J8Z3K5W0ABCDEFGHJKMN${String(n).padStart(4, "0")}`;
 
-function entry(n: number, partner = "Acme", ownerId = "user-a", retryCount = 0): EnqueueEntry {
-  return { key: `seq-${n}`, request: { requestId: idNumber(n), ownerId, partner, retryCount } };
+function entry(n: number, ownerId = "user-a", retryCount = 0): EnqueueEntry {
+  return { key: `seq-${n}`, request: { requestId: idNumber(n), ownerId, retryCount } };
 }
 
 function setup(requestCount = 0) {
@@ -35,17 +32,17 @@ function setup(requestCount = 0) {
 }
 
 describe("EnqueueService: the message", () => {
-  it("sends the two ids as the body, the partner hash as group id and the request id as deduplication id", async () => {
+  it("sends the two ids as the body, the fixed group id and the request id as deduplication id", async () => {
     const { queue, enqueue } = setup(1);
 
-    await enqueue([entry(1, "Acme")]);
+    await enqueue([entry(1)]);
 
     expect(queue.calls).toEqual([
       [
         {
           id: "seq-1",
           body: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
-          groupId: ACME_GROUP,
+          groupId: MESSAGE_GROUP_ID,
           deduplicationId: idNumber(1),
         },
       ],
@@ -55,7 +52,7 @@ describe("EnqueueService: the message", () => {
   it("sends a request that was sent again with its own deduplication id: <requestId>-r<retryCount>", async () => {
     const { queue, enqueue } = setup(2);
 
-    await enqueue([entry(1, "Acme", "user-a", 1), entry(2, "Acme", "user-a", 12)]);
+    await enqueue([entry(1, "user-a", 1), entry(2, "user-a", 12)]);
 
     // The body and the group are those of a first send; only the deduplication id differs,
     // so the queue does not take the message for a duplicate of the first one.
@@ -63,29 +60,28 @@ describe("EnqueueService: the message", () => {
       `${idNumber(1)}-r1`,
       `${idNumber(2)}-r12`,
     ]);
-    expect(queue.calls[0]?.map((message) => message.groupId)).toEqual([ACME_GROUP, ACME_GROUP]);
+    expect(queue.calls[0]?.map((message) => message.groupId)).toEqual([MESSAGE_GROUP_ID, MESSAGE_GROUP_ID]);
     expect(queue.calls[0]?.[0]?.body).toBe(JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }));
   });
 
-  it("puts the same partner in the same group however it is spelled, and other partners elsewhere", async () => {
+  it("puts every message in the one fixed group, whoever the owner is: there is only one recipient", async () => {
     const { queue, enqueue } = setup(3);
 
-    await enqueue([entry(1, "Acme"), entry(2, "  ACME "), entry(3, "Globex")]);
+    await enqueue([entry(1, "user-a"), entry(2, "user-b"), entry(3, "user-c")]);
 
     expect(queue.calls[0]?.map((message) => message.groupId)).toEqual([
-      ACME_GROUP,
-      ACME_GROUP,
-      GLOBEX_GROUP,
+      MESSAGE_GROUP_ID,
+      MESSAGE_GROUP_ID,
+      MESSAGE_GROUP_ID,
     ]);
   });
 
-  it("puts no request text and no partner name into the message", async () => {
+  it("puts no request text into the message: only the two ids", async () => {
     const { queue, enqueue } = setup(1);
 
-    await enqueue([entry(1, "Acme")]);
+    await enqueue([entry(1)]);
 
     const body = queue.calls[0]?.[0]?.body ?? "";
-    expect(body).not.toContain("Acme");
     expect(Object.keys(JSON.parse(body) as object).sort()).toEqual(["ownerId", "requestId"]);
   });
 });
@@ -190,11 +186,10 @@ describe("EnqueueService: failures", () => {
     const { queue, logs, enqueue } = setup(1);
     queue.failCalls.set(0, new Error("SQS is down"));
 
-    await enqueue([entry(1, "Acme")]);
+    await enqueue([entry(1)]);
 
     const failure = logs.entries().find((line) => line.message === "SendMessageBatch failed");
     expect(failure).toMatchObject({ level: "error", errorName: "Error", errorMessage: "SQS is down" });
-    expect(logs.lines.join("\n")).not.toContain("Acme");
   });
 });
 
@@ -357,10 +352,10 @@ describe("EnqueueService: the trace of each request", () => {
     expect(withoutHeader(traced as NonNullable<typeof traced>)).toEqual({
       id: "seq-1",
       body: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
-      groupId: ACME_GROUP,
+      groupId: MESSAGE_GROUP_ID,
       deduplicationId: idNumber(1),
     });
-    expect(withoutHeader(plain as NonNullable<typeof plain>)).toMatchObject({ id: "seq-2", groupId: ACME_GROUP });
+    expect(withoutHeader(plain as NonNullable<typeof plain>)).toMatchObject({ id: "seq-2", groupId: MESSAGE_GROUP_ID });
   });
 });
 

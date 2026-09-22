@@ -46,10 +46,32 @@ pitch for a stranger; this file and `docs/api.md` are where its claims are backe
   branding resource before it renders anything.
 - **Outbox through DynamoDB Streams**, not the API sending to SQS after the write (that
   leaves a gap when the send fails). Mechanics: `docs/api.md`, "Delivery pipeline".
-- **SQS FIFO, `MessageGroupId` hashed from the partner name, batch size 1.** Rejected: larger
-  batches — in a FIFO batch a failing message drags the messages behind it, other partners'
-  included, into retries, and each retry is charged a receive, so they could reach the DLQ
-  untried. Mechanics: `docs/api.md`, "Delivery pipeline" (Queue, and `delivery-worker` point 8).
+- **SQS FIFO, `MessageGroupId` a fixed constant, batch size 1.** There is one recipient, so one
+  group; earlier there were many (a hash of the free-text partner name a request used to carry),
+  which is why the queue is FIFO at all rather than standard — kept for the same reason batch
+  size is 1: in a FIFO batch a failing message drags the messages behind it into retries, and
+  each retry is charged a receive, so they could reach the DLQ untried. Rejected: larger batches,
+  for that reason; a standard queue, because delivery order still matters for one recipient (a
+  later request must not overtake an earlier one that is still retrying). Mechanics: `docs/api.md`,
+  "Delivery pipeline" (Queue, and `delivery-worker` point 8).
+- **There is one recipient, chosen in code (`RECIPIENT_NAME`), not per request.** A request used
+  to carry a free-text `partner` naming who it was for. Removed rather than kept and hidden: an
+  unused-looking field with a fixed value is a worse thing to defend than adding one back,
+  properly, when a real multi-recipient feature is actually designed (its UI, its per-owner
+  assignment, would not look like the old free-text field anyway). Rejected: keeping `partner` in
+  the item and the schema, hardcoded to one value, "for later" — the project's own rule against
+  designing for a hypothetical requirement.
+- **The sender's identity is the requester's own e-mail, read from Cognito's `GetUser` with
+  their access token, once, at creation.** `GetUser` returns only the caller's own attributes, so
+  this is a read of "who is asking", not a lookup of anybody else's account, and it needs no new
+  trust: the same token the API Gateway authorizer already verified. Rejected: trusting an e-mail
+  the frontend sends in the body (unverifiable — the token proves who is asking, a body field does
+  not); a Cognito Pre-Token-Generation trigger adding `email` as a custom claim on the access
+  token (a new Lambda and a new trigger wired to the user pool, for what one extra read already
+  does with one IAM permission and no new infrastructure). Read once and stored, not re-read on
+  every delivery attempt, so a retry cannot show a different sender than the one who wrote it, and
+  a delivery does not cost a Cognito call. Mechanics: `docs/api.md`, "Delivery pipeline"
+  ("create-request").
 - **The worker writes `failed` itself on the last attempt**, not a stuck message: a failure the
   owner can act on is a state of the request. Mechanics: `docs/api.md`, "Delivery pipeline"
   (`delivery-worker`, step 7).
@@ -183,7 +205,11 @@ pitch for a stranger; this file and `docs/api.md` are where its claims are backe
 - It shows an architecture; it is **not** a real e-prescription or NCPDP implementation. The
   message and its schemas are neutral and illustrative.
 - Demo scale on purpose: DynamoDB 5/5 provisioned units, the account's Lambda concurrency of 10,
-  one delivery at a time per partner name, the worker at most two at once.
+  one delivery at a time overall (one FIFO group, one recipient), the worker at most two at once.
+- The sender's e-mail becomes `Sender/Name` in the XML, and `PartyName` (`contracts/xsd/common-types.xsd`)
+  covers the common local-part characters (letters, digits, `. , ' & @ _ + -`), not the full RFC
+  5322 grammar: a real address using a rarer character (`!`, for example) fails our own schema
+  check and the request is `rejected` before delivery is attempted.
 - The recipient is a simulator with one shared API key and one inbox login, on the public internet
   around the clock, with no rate limit on its login. It runs on a free container host (a card for
   verification, $0.90 a month for the volume, an image that has to be redeployed by hand); while it

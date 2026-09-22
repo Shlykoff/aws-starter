@@ -16,11 +16,13 @@ export type RetryOutcome =
 // without saying whose it is.
 export interface RequestRepository {
   /**
-   * Stores a new request for `ownerId`. `traceparent` (W3C, lib/tracing.ts) is the trace the
-   * request belongs to, stored with it so that the enqueuer and the webhook can continue that
-   * trace: the stream and the webhook carry none. It is never part of a `PartnerRequest`.
+   * Stores a new request for `ownerId`. `senderEmail` is the requester's own verified e-mail
+   * (Cognito), captured once at creation; like `traceparent`, it is never part of a
+   * `PartnerRequest`. `traceparent` (W3C, lib/tracing.ts) is the trace the request belongs to,
+   * stored with it so that the enqueuer and the webhook can continue that trace: the stream and
+   * the webhook carry none.
    */
-  create(ownerId: string, request: PartnerRequest, traceparent?: string): Promise<void>;
+  create(ownerId: string, request: PartnerRequest, senderEmail: string, traceparent?: string): Promise<void>;
 
   /** The owner's requests, newest first, at most `limit` of them. */
   listByOwner(ownerId: string, limit: number): Promise<PartnerRequest[]>;

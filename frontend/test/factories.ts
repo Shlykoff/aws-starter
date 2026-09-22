@@ -45,7 +45,6 @@ export function makeRequest(overrides: Partial<PartnerRequest> = {}): PartnerReq
   const id = `01J00000000000000000000${String(counter).padStart(3, "0")}`;
   return {
     id,
-    partner: "Acme Logistics",
     subject: `Delivery schedule ${counter}`,
     body: "Please confirm the schedule for next week.",
     status: "created",

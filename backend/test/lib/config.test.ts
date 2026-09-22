@@ -87,12 +87,11 @@ describe("loadWorkerConfig", () => {
     MAX_RECEIVE_COUNT: "5",
   };
 
-  it("reads all variables, defaults the sender name, and turns MAX_RECEIVE_COUNT into a number", () => {
+  it("reads all variables and turns MAX_RECEIVE_COUNT into a number", () => {
     expect(loadWorkerConfig(env)).toEqual({
       tableName: "t",
       partnerUrl: "https://partner.example.com",
       partnerApiKeyParam: "/demo/dev/partner-api-key",
-      senderName: "aws-starter",
       topicArn: "arn:aws:sns:eu-north-1:000000000000:status",
       auditBucket: "audit",
       maxReceiveCount: 5,
@@ -164,27 +163,6 @@ describe("loadWorkerConfig", () => {
     });
   });
 
-  describe("SENDER_NAME: the name in every submission", () => {
-    it("is used when it is set", () => {
-      expect(loadWorkerConfig({ ...env, SENDER_NAME: "Acme Sender, Inc." }).senderName).toBe("Acme Sender, Inc.");
-    });
-
-    it.each(["Smith & Sons", "Ünïcode Näme", "Отправитель", "a", "x".repeat(100), "it's-me.co"])("accepts %j", (value) => {
-      expect(loadWorkerConfig({ ...env, SENDER_NAME: value }).senderName).toBe(value);
-    });
-
-    // The rule is the PartyName type of contracts/xsd/common-types.xsd: the recipient would
-    // refuse every submission that carries a name outside it.
-    it.each([
-      ["a character the schema forbids", "Acme #1"],
-      ["markup", "<b>Acme</b>"],
-      ["a line break", "Acme\nSender"],
-      ["an empty name", ""],
-      ["101 characters", "x".repeat(101)],
-    ])("rejects %s", (_label, value) => {
-      expect(() => loadWorkerConfig({ ...env, SENDER_NAME: value })).toThrow(/SENDER_NAME must be 1-100 letters/);
-    });
-  });
 });
 
 describe("loadWebhookConfig", () => {

@@ -15,7 +15,6 @@ export function streamRecord(options: {
   sequenceNumber: string;
   ownerId?: string;
   id?: string;
-  partner?: string;
   subject?: string;
   body?: string;
   /** The status in the image (default "created"). */
@@ -37,7 +36,6 @@ export function streamRecord(options: {
         pk: { S: `USER#${options.ownerId ?? "user-a"}` },
         sk: { S: `REQ#${id}` },
         id: { S: id },
-        partner: { S: options.partner ?? "Acme" },
         subject: { S: options.subject ?? "Order 42" },
         body: { S: options.body ?? "Please ship." },
         status: { S: options.status ?? "created" },

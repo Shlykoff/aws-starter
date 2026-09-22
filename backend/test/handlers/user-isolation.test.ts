@@ -1,3 +1,4 @@
+import { CognitoIdentityProviderClient, GetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
@@ -27,6 +28,7 @@ const ddb = mockClient(DynamoDBDocumentClient);
 // S3 holds the exchange records. Its key is exchanges/<requestId>.json and says nothing about
 // the owner, so the isolation of exchanges rests on the ownership check in the table.
 const s3 = mockClient(S3Client);
+const cognito = mockClient(CognitoIdentityProviderClient);
 
 // An S3 that has a record for EVERY request id: the worst case for a user who guesses an id.
 const recordWithSecret = JSON.stringify({
@@ -42,20 +44,23 @@ let table: FakeTable;
 beforeEach(() => {
   ddb.reset();
   s3.reset();
+  cognito.reset();
   table = stubTable(ddb);
   s3.on(GetObjectCommand).resolves({ Body: { transformToString: () => Promise.resolve(recordWithSecret) } as never });
+  cognito.on(GetUserCommand).resolves({ UserAttributes: [{ Name: "email", Value: "sender@example.test" }] });
   captureLogs();
 });
 afterAll(() => {
   ddb.restore();
   s3.restore();
+  cognito.restore();
 });
 
 const context = lambdaContext();
 const json = (response: { body?: string }): unknown => JSON.parse(response.body ?? "null");
 
 async function createAs(sub: string, subject: string) {
-  const body = JSON.stringify({ partner: "Acme", subject, body: "private text" });
+  const body = JSON.stringify({ subject, body: "private text" });
   const response = await create(createRequestEvent({ sub, body }), context);
   expect(response.statusCode).toBe(201);
   return json(response) as { id: string };
@@ -138,7 +143,6 @@ describe("user isolation", () => {
 
   it("an owner sent in the body cannot put a request into another user's partition", async () => {
     const body = JSON.stringify({
-      partner: "Acme",
       subject: "S",
       body: "B",
       owner: "user-a",
@@ -155,7 +159,7 @@ describe("user isolation", () => {
     const requestOfA = await createAs("user-a", "A's subject");
     ddb.resetHistory();
 
-    const bodyOfB = JSON.stringify({ partner: "p", subject: "s", body: "b" });
+    const bodyOfB = JSON.stringify({ subject: "s", body: "b" });
     await create(createRequestEvent({ sub: "user-b", body: bodyOfB }), context);
     await get(getRequestEvent({ sub: "user-b", id: requestOfA.id }), context);
     await list(listRequestsEvent({ sub: "user-b" }), context);

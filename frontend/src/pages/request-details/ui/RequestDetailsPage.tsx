@@ -125,7 +125,6 @@ export const RequestDetailsPage = observer(function RequestDetailsPage() {
             {request.subject}
           </CardTitle>
           <CardDescription>
-            To {request.partner} ·{" "}
             <time dateTime={request.createdAt}>{formatDateTime(request.createdAt)}</time>
           </CardDescription>
         </CardHeader>

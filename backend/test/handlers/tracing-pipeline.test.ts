@@ -1,3 +1,4 @@
+import { CognitoIdentityProviderClient, GetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
@@ -34,30 +35,36 @@ vi.mock("../../src/lib/schemas-location", () => ({
 const ddb = mockClient(DynamoDBDocumentClient);
 const sqs = mockClient(SQSClient);
 const ssm = mockClient(SSMClient);
+const cognito = mockClient(CognitoIdentityProviderClient);
 let table: FakeTable;
 let logs: ReturnType<typeof captureLogs>;
+
+const SENDER_EMAIL = "canary-sender@example.test";
 
 beforeEach(() => {
   ddb.reset();
   sqs.reset();
   ssm.reset();
+  cognito.reset();
   table = stubTable(ddb);
   sqs.on(SendMessageBatchCommand).callsFake((input: { Entries: { Id: string }[] }) => ({
     Successful: input.Entries.map((entry) => sent(entry.Id)),
     Failed: [],
   }));
   ssm.on(GetParameterCommand).resolves({ Parameter: { Value: WEBHOOK_TOKEN } });
+  cognito.on(GetUserCommand).resolves({ UserAttributes: [{ Name: "email", Value: SENDER_EMAIL }] });
   logs = captureLogs();
 });
 afterAll(() => {
   ddb.restore();
   sqs.restore();
   ssm.restore();
+  cognito.restore();
 });
 
 const CANARY_REASON = "Out of stock canary";
 const CANARY_TEXT = "Please ship canary";
-const body = JSON.stringify({ partner: "Acme", subject: "Order 42", body: CANARY_TEXT });
+const body = JSON.stringify({ subject: "Order 42", body: CANARY_TEXT });
 
 // The invocation span that the layer makes: it starts a NEW trace, as for a stream or an HTTP call.
 const invoke = <T>(name: string, fn: () => Promise<T>): Promise<T> => withSpan(name, {}, fn);
@@ -132,11 +139,11 @@ describe("one request, one trace", () => {
     expect(toMs(decisionSpan.startTime)).toBeGreaterThanOrEqual(before);
     expect(toMs(decisionSpan.endTime)).toBeGreaterThanOrEqual(toMs(decisionSpan.startTime));
 
-    // Nothing of the request text, the partner or the reason is in any span.
+    // Nothing of the request text, the sender's e-mail or the reason is in any span.
     for (const span of spans.all()) {
       expect(wholeSpan(span), span.name).not.toContain(CANARY_TEXT);
       expect(wholeSpan(span), span.name).not.toContain(CANARY_REASON);
-      expect(wholeSpan(span), span.name).not.toContain("Acme");
+      expect(wholeSpan(span), span.name).not.toContain(SENDER_EMAIL);
     }
     // Every line of the request's timeline that the three functions wrote has the same trace id.
     expect(requestEventLines().map((entry) => entry.traceId)).toEqual([traceId, traceId, traceId]);

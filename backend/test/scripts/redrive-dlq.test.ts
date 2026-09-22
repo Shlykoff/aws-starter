@@ -3,7 +3,7 @@ import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSCli
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { decodeDeliveryMessage as decodeDeliveryMessageReal, messageGroupId as messageGroupIdReal } from "../../src/domain/delivery-message";
+import { MESSAGE_GROUP_ID as MESSAGE_GROUP_ID_REAL, decodeDeliveryMessage as decodeDeliveryMessageReal } from "../../src/domain/delivery-message";
 import { ownerKey as ownerKeyReal, requestKey as requestKeyReal } from "../../src/domain/request-keys";
 
 // backend/scripts/redrive-dlq.mjs is plain JS run with `node`, not part of the TypeScript
@@ -15,7 +15,7 @@ import { ownerKey as ownerKeyReal, requestKey as requestKeyReal } from "../../sr
 interface DlqScript {
   ownerKey: (ownerId: string) => string;
   requestKey: (id: string) => string;
-  messageGroupId: (partner: string) => string;
+  MESSAGE_GROUP_ID: string;
   decodeDeliveryMessage: (body: string) => { requestId: string; ownerId: string } | undefined;
   list: (sqs: SQSClient, ddb: DynamoDBDocumentClient, config: { dlqUrl: string; tableName: string }) => Promise<void>;
   redrive: (
@@ -75,16 +75,16 @@ function loggedLines(spy: { mock: { calls: unknown[][] } }): string {
 }
 
 describe("list", () => {
-  it("prints requestId, partner and status for a decodable message with a matching row", async () => {
+  it("prints requestId, senderEmail and status for a decodable message with a matching row", async () => {
     sqs.on(ReceiveMessageCommand).resolves({ Messages: [dlqMessage()] });
-    ddb.on(GetCommand).resolves({ Item: { partner: "Acme", status: "failed", subject: "Order 42" } });
+    ddb.on(GetCommand).resolves({ Item: { senderEmail: "sender@example.test", status: "failed", subject: "Order 42" } });
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
     await script.list(sqsClient, ddbClient, config);
 
     const output = loggedLines(log);
     expect(output).toContain(`requestId=${REQUEST_ID}`);
-    expect(output).toContain("partner=Acme");
+    expect(output).toContain("senderEmail=sender@example.test");
     expect(output).toContain("status=failed");
     expect(sqs.commandCalls(SendMessageCommand)).toHaveLength(0);
     expect(sqs.commandCalls(DeleteMessageCommand)).toHaveLength(0);
@@ -121,7 +121,7 @@ describe("redrive", () => {
     sqs.on(ReceiveMessageCommand).resolves({
       Messages: [dlqMessage({ Attributes: { SentTimestamp: String(Date.now()), ApproximateReceiveCount: "5", AWSTraceHeader: traceHeader } })],
     });
-    ddb.on(GetCommand).resolves({ Item: { partner: "Acme", status: "failed" } });
+    ddb.on(GetCommand).resolves({ Item: { status: "failed" } });
     sqs.on(SendMessageCommand).resolves({ MessageId: "sqs-new-id" });
     sqs.on(DeleteMessageCommand).resolves({});
 
@@ -131,7 +131,7 @@ describe("redrive", () => {
     expect(sendCalls).toHaveLength(1);
     const sent = sendCalls[0]?.args[0].input;
     expect(sent?.QueueUrl).toBe(QUEUE_URL);
-    expect(sent?.MessageGroupId).toBe(messageGroupIdReal("Acme"));
+    expect(sent?.MessageGroupId).toBe(MESSAGE_GROUP_ID_REAL);
     // A fresh id, never the shapes the real enqueuer uses for a first send (`requestId`) or a
     // retry (`requestId-r<n>`).
     expect(sent?.MessageDeduplicationId).toMatch(new RegExp(`^${REQUEST_ID}-redrive-\\d+$`));
@@ -153,7 +153,7 @@ describe("redrive", () => {
 
   it("sends no MessageSystemAttributes field when the received message carried no AWSTraceHeader", async () => {
     sqs.on(ReceiveMessageCommand).resolves({ Messages: [dlqMessage()] }); // no AWSTraceHeader
-    ddb.on(GetCommand).resolves({ Item: { partner: "Acme", status: "failed" } });
+    ddb.on(GetCommand).resolves({ Item: { status: "failed" } });
     sqs.on(SendMessageCommand).resolves({});
     sqs.on(DeleteMessageCommand).resolves({});
 
@@ -201,7 +201,7 @@ describe("redrive", () => {
 
   it("does not delete when the send throws, and exits 1", async () => {
     sqs.on(ReceiveMessageCommand).resolves({ Messages: [dlqMessage()] });
-    ddb.on(GetCommand).resolves({ Item: { partner: "Acme", status: "failed" } });
+    ddb.on(GetCommand).resolves({ Item: { status: "failed" } });
     sqs.on(SendMessageCommand).rejects(new Error("Throttled"));
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -243,10 +243,8 @@ describe("discard", () => {
 // What keeps the duplication in backend/scripts/redrive-dlq.mjs honest: if the real domain
 // logic ever changes, this test starts failing instead of the two copies silently drifting apart.
 describe("duplicated domain logic stays in sync with src/domain/", () => {
-  it("messageGroupId agrees with the real one, mixed case and surrounding spaces included", () => {
-    for (const partner of ["Acme", "acme", " ACME ", "Contoso Ltd.", "  Globex Corp  "]) {
-      expect(script.messageGroupId(partner)).toBe(messageGroupIdReal(partner));
-    }
+  it("MESSAGE_GROUP_ID agrees with the real one", () => {
+    expect(script.MESSAGE_GROUP_ID).toBe(MESSAGE_GROUP_ID_REAL);
   });
 
   it("ownerKey and requestKey agree with the real ones for several ids", () => {

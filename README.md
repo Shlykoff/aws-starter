@@ -268,15 +268,22 @@ nothing waits for it and nothing expires.
 
 ## A demo script
 
-Sign up in the web app, then create requests (the partner name may hold letters, digits, space
-and `. , ' & -` only, because the recipient's schema says so):
+Sign up in the web app (any e-mail Cognito accepts) and create requests: a subject and a message,
+nothing else — there is one recipient, so nothing to address it to. Two things worth trying that
+are not obvious from a single account:
+
+- **Each user only ever sees their own requests.** Sign up a second time with a different e-mail:
+  its list is empty, and the first account's requests never appear there (the table's key is the
+  signed-in user's own id; nothing about it comes from what the browser sends).
+- **The recipient sees who sent it.** Open partner-sim's inbox: every message shows the
+  requester's own e-mail as Sender — not typed by them, read once from Cognito when they created
+  the request — next to when it arrived, the subject and what happened to it.
 
 | Create | You see |
 |---|---|
-| any subject, partner `Acme Ltd` | `sent` within seconds; the Exchange panel shows the XML and the `Accepted` reply |
+| any subject and message | `sent` within seconds; the Exchange panel shows the XML (your e-mail as `Sender/Name`) and the `Accepted` reply; the same message appears in partner-sim's inbox with your e-mail as Sender |
 | `[reject]` in the subject | `rejected`; the reply says `RECIPIENT_REJECTED` |
 | `[fail]` in the subject | retried for about 8 minutes (five attempts), then `failed` with an e-mail; press **Send again** and it goes through delivery again (and fails again, the subject says so) |
-| partner `Acme #1` | `rejected` at once: our own schema check refuses it and nobody is called |
 | in the recipient's inbox (`WEBHOOK_URL` = the `webhook_url` output, stage included, `WEBHOOK_TOKEN` = yours), open a delivered message and press **Approve** or **Decline** with a reason | the request page shows the Client decision card within about 30 seconds (a reload shows it at once) |
 | stop the recipient, create a request, wait for `failed` (about 8 minutes), start the recipient, press **Send again** | the request goes through delivery again and becomes `sent` |
 | press Approve, then Decline | the later action wins: the card shows Declined |

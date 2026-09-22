@@ -32,7 +32,7 @@ describe("createRequestsApi", () => {
     const { client, api } = setup();
     const request = makeRequest();
     client.post.mockResolvedValue(request);
-    const input = { partner: "Acme", subject: "Hello", body: "Text" };
+    const input = { subject: "Hello", body: "Text" };
 
     await expect(api.create(input)).resolves.toEqual(request);
     expect(client.post).toHaveBeenCalledWith("/requests", input);

@@ -57,7 +57,7 @@ describe("RequestsStore.loadList", () => {
     const existing = makeRequest();
     const created = makeRequest();
     api.create.mockResolvedValue(created);
-    await store.create({ partner: created.partner, subject: created.subject, body: created.body });
+    await store.create({ subject: created.subject, body: created.body });
 
     api.list.mockResolvedValue([existing]);
     await store.loadList();
@@ -117,7 +117,7 @@ describe("RequestsStore.refreshList", () => {
     await store.loadList();
     // A just-created request that an eventually consistent read does not return yet.
     api.create.mockResolvedValue(missedByServer);
-    await store.create({ partner: "p", subject: "s", body: "b" });
+    await store.create({ subject: "s", body: "b" });
 
     api.list.mockResolvedValue([{ ...changing, status: "queued" }]);
     await store.refreshList();
@@ -185,9 +185,9 @@ describe("RequestsStore.create", () => {
     const created = makeRequest();
     api.create.mockResolvedValue(created);
 
-    const result = await store.create({ partner: "Acme", subject: "Hello", body: "Text" });
+    const result = await store.create({ subject: "Hello", body: "Text" });
 
-    expect(api.create).toHaveBeenCalledWith({ partner: "Acme", subject: "Hello", body: "Text" });
+    expect(api.create).toHaveBeenCalledWith({ subject: "Hello", body: "Text" });
     expect(result).toBe(created);
     expect(store.items).toEqual([created]);
     // The list is not re-read after a create (a re-read could miss the new item).
@@ -196,9 +196,9 @@ describe("RequestsStore.create", () => {
 
   it("throws the error and leaves the list unchanged when the API rejects the request", async () => {
     const { api, store } = setup();
-    api.create.mockRejectedValue(new ApiError(400, "validation_error", "partner is required"));
+    api.create.mockRejectedValue(new ApiError(400, "validation_error", "subject is required"));
 
-    await expect(store.create({ partner: "", subject: "s", body: "b" })).rejects.toMatchObject({
+    await expect(store.create({ subject: "", body: "b" })).rejects.toMatchObject({
       code: "validation_error",
     });
     expect(store.items).toEqual([]);
@@ -264,7 +264,7 @@ describe("RequestsStore.loadDetail", () => {
     const { api, store } = setup();
     const known = makeRequest();
     api.create.mockResolvedValue(known);
-    await store.create({ partner: "p", subject: "s", body: "b" });
+    await store.create({ subject: "s", body: "b" });
 
     await store.loadDetail(known.id);
 
@@ -327,7 +327,7 @@ describe("RequestsStore.refreshDetail", () => {
     const ctx = setup();
     const known = makeRequest({ status });
     ctx.api.create.mockResolvedValue(known);
-    await ctx.store.create({ partner: "p", subject: "s", body: "b" });
+    await ctx.store.create({ subject: "s", body: "b" });
     await ctx.store.loadDetail(known.id);
     return { ...ctx, known };
   }

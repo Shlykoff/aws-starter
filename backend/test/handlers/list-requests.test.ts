@@ -1,3 +1,4 @@
+import { CognitoIdentityProviderClient, GetUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { ulid } from "ulid";
@@ -10,16 +11,21 @@ import type { FakeTable } from "../helpers/fake-table";
 import { captureLogs } from "../helpers/logs";
 
 const ddb = mockClient(DynamoDBDocumentClient);
+// Only the one test that creates a request through the real API needs Cognito's GetUser.
+const cognito = mockClient(CognitoIdentityProviderClient);
 let table: FakeTable;
 let logs: ReturnType<typeof captureLogs>;
 
 beforeEach(() => {
   ddb.reset();
+  cognito.reset();
   table = stubTable(ddb);
+  cognito.on(GetUserCommand).resolves({ UserAttributes: [{ Name: "email", Value: "sender@example.test" }] });
   logs = captureLogs();
 });
 afterAll(() => {
   ddb.restore();
+  cognito.restore();
 });
 
 const list = (sub = "user-a") => listHandler(listRequestsEvent({ sub }), lambdaContext());
@@ -31,7 +37,6 @@ function seedRequest(sub: string, minute: number, subject: string) {
   const id = ulid(Date.UTC(2026, 8, 20, 12, minute));
   const request = {
     id,
-    partner: "Acme",
     subject,
     body: "text",
     status: "created",
@@ -84,7 +89,7 @@ describe("GET /requests", () => {
 
   it("shows a request that was just created through the API", async () => {
     const created = await createHandler(
-      createRequestEvent({ body: JSON.stringify({ partner: "Acme", subject: "S", body: "B" }) }),
+      createRequestEvent({ body: JSON.stringify({ subject: "S", body: "B" }) }),
       lambdaContext(),
     );
 

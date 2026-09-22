@@ -23,9 +23,9 @@ const KEY = { pk: "USER#user-a", sk: `REQ#${ID}` };
 const stored = {
   ...KEY,
   id: ID,
-  partner: "Acme",
   subject: "Order 42",
   body: "Please ship.",
+  senderEmail: "sender@example.test",
   status: "queued",
   createdAt: "2026-09-21T09:00:00.000Z",
 };
@@ -55,9 +55,9 @@ describe("DynamoDeliveryRepository.findForDelivery", () => {
 
     expect(request).toEqual({
       id: ID,
-      partner: "Acme",
       subject: "Order 42",
       body: "Please ship.",
+      senderEmail: "sender@example.test",
       status: "queued",
       createdAt: "2026-09-21T09:00:00.000Z",
     });

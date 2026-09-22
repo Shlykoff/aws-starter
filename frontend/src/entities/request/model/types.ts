@@ -8,7 +8,7 @@ export type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
 // Server-side length limits (docs/api.md). The create form reuses them so the browser
 // rejects the same input the API would; the API stays the authority.
-export const REQUEST_LIMITS = { partner: 100, subject: 200, body: 5000 } as const;
+export const REQUEST_LIMITS = { subject: 200, body: 5000 } as const;
 
 // What the CLIENT did with the delivered message. It is independent of the delivery status:
 // it arrives by webhook, minutes or months after `sent` (or even before), and never expires.
@@ -36,7 +36,6 @@ export type ClientDecision = z.infer<typeof clientDecisionSchema>;
 // response is checked against it at runtime, not just trusted by the compiler.
 export const partnerRequestSchema = z.object({
   id: z.string(),
-  partner: z.string(),
   subject: z.string(),
   body: z.string(),
   status: z.enum(REQUEST_STATUSES),
@@ -47,4 +46,4 @@ export const partnerRequestSchema = z.object({
 export type PartnerRequest = z.infer<typeof partnerRequestSchema>;
 
 // What the user fills in; the server adds id, status and createdAt.
-export type NewPartnerRequest = Pick<PartnerRequest, "partner" | "subject" | "body">;
+export type NewPartnerRequest = Pick<PartnerRequest, "subject" | "body">;

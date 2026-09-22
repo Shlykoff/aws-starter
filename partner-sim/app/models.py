@@ -17,6 +17,7 @@ class NewMessage:
 
     received_at: str  # UTC, e.g. 2026-09-21T10:11:12.123Z
     message_id: str | None  # the MessageId text of the submission, None when it could not be read
+    sender: str | None  # Header/Sender/Name: the requester's e-mail address
     recipient: str | None
     subject: str | None
     outcome: str  # "accepted" or "rejected"
@@ -34,6 +35,7 @@ class MessageSummary:
     id: int
     received_at: str
     message_id: str | None
+    sender: str | None
     recipient: str | None
     subject: str | None
     outcome: str

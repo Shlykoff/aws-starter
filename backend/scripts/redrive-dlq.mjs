@@ -3,8 +3,8 @@
 // owner with their own AWS profile: no Lambda, no IAM role, no Terraform change. It never
 // bundles into a handler (it is not in scripts/build.mjs's `functions` list) and is invoked
 // with plain `node`, so it cannot import backend/src/ (TypeScript, needs a bundler). Instead it
-// keeps its own tiny copies of four pieces of domain logic that already live in
-// src/domain/delivery-message.ts and src/domain/request-keys.ts: `messageGroupId`,
+// keeps its own tiny copies of pieces of domain logic that already live in
+// src/domain/delivery-message.ts and src/domain/request-keys.ts: `MESSAGE_GROUP_ID`,
 // `decodeDeliveryMessage`, `ownerKey`, `requestKey`. Each is exported here too, so
 // test/scripts/redrive-dlq.test.ts can hold this copy against the real one and catch drift.
 //
@@ -16,7 +16,6 @@
 // Nothing here can tell the two apart automatically, so there is no bulk "act on everything"
 // flag: `redrive`/`discard` always name exactly one message id, and a human decides per message.
 
-import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DeleteMessageCommand, ReceiveMessageCommand, SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
@@ -40,10 +39,8 @@ export function requestKey(id) {
   return `${REQUEST_PREFIX}${id}`;
 }
 
-/** Same as src/domain/delivery-message.ts: messageGroupId (SHA-256 hex of the trimmed, lower-cased partner). */
-export function messageGroupId(partner) {
-  return createHash("sha256").update(partner.trim().toLowerCase()).digest("hex");
-}
+/** Same as src/domain/delivery-message.ts: MESSAGE_GROUP_ID (one fixed group; there is one recipient). */
+export const MESSAGE_GROUP_ID = "requests";
 
 /**
  * Same as src/domain/delivery-message.ts: decodeDeliveryMessage, minus the zod schema (this
@@ -189,7 +186,7 @@ export async function list(sqs, ddb, { dlqUrl, tableName }) {
 
     const subject = typeof item.subject === "string" ? ` subject="${truncateSubject(item.subject)}"` : "";
     console.log(
-      `${message.MessageId}  requestId=${decoded.requestId}  partner=${item.partner}  status=${item.status}  age=${age}${subject}`,
+      `${message.MessageId}  requestId=${decoded.requestId}  senderEmail=${item.senderEmail}  status=${item.status}  age=${age}${subject}`,
     );
   }
 
@@ -223,7 +220,7 @@ export async function redrive(sqs, ddb, { dlqUrl, queueUrl, tableName }, message
     return;
   }
 
-  const groupId = messageGroupId(item.partner);
+  const groupId = MESSAGE_GROUP_ID;
   // A FRESH deduplication id, never `${requestId}` (the first-send shape) or
   // `${requestId}-r<n>` (the retry shape) that src/domain/delivery-message.ts already uses: SQS
   // drops a message whose deduplication id it has seen in the last 5 minutes, so reusing either

@@ -1,6 +1,7 @@
 import { container } from "../container";
 import { createRequestSchema } from "../domain/create-request";
-import { createHandler, getOwnerId, jsonResponse, parseJsonBody } from "../lib/http";
+import { MisconfigurationError } from "../lib/errors";
+import { createHandler, getHeader, getOwnerId, jsonResponse, parseJsonBody } from "../lib/http";
 import type { Logger } from "../lib/logger";
 import type { RequestService } from "../services/request-service";
 import { TOKENS } from "../tokens";
@@ -14,6 +15,15 @@ export const handler = createHandler(logger, async (event, log) => {
   const ownerId = getOwnerId(event);
   const input = parseJsonBody(event, createRequestSchema);
 
-  const request = await service.create(ownerId, input, log);
+  // The caller's own access token, unmodified: the service uses it (not the `sub` claim) to
+  // read the sender's verified e-mail from Cognito's GetUser, purely as a display identity for
+  // the outgoing XML, never for authorization. A protected route always carries it; if it were
+  // ever missing, the API Gateway authorizer could not have run either, so that is our fault.
+  const accessToken = getHeader(event, "authorization");
+  if (accessToken === undefined) {
+    throw new MisconfigurationError("Authorization header missing on an authorized route");
+  }
+
+  const request = await service.create(ownerId, input, accessToken, log);
   return jsonResponse(201, request);
 });

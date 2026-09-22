@@ -50,6 +50,22 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@aws-sdk/client-cognito-identity-provider@npm:^3.1136.0":
+  version: 3.1136.0
+  resolution: "@aws-sdk/client-cognito-identity-provider@npm:3.1136.0"
+  dependencies:
+    "@aws-sdk/core": "npm:^3.978.0"
+    "@aws-sdk/credential-provider-node": "npm:^3.972.83"
+    "@aws-sdk/types": "npm:^3.974.5"
+    "@smithy/core": "npm:^3.33.3"
+    "@smithy/fetch-http-handler": "npm:^5.7.2"
+    "@smithy/node-http-handler": "npm:^4.11.3"
+    "@smithy/types": "npm:^4.17.2"
+    tslib: "npm:^2.6.2"
+  checksum: 10c0/84b3c5426aa558e285bf0701d02623c5729cdf682f36ef81bdb939634c3a5df55e84b1c3a86322f940a85419b8d4a557d9c01d32804e9837ec830541e4e6bde1
+  languageName: node
+  linkType: hard
+
 "@aws-sdk/client-dynamodb@npm:^3.1136.0":
   version: 3.1136.0
   resolution: "@aws-sdk/client-dynamodb@npm:3.1136.0"
@@ -429,6 +445,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@aws-starter/backend@workspace:backend"
   dependencies:
+    "@aws-sdk/client-cognito-identity-provider": "npm:^3.1136.0"
     "@aws-sdk/client-dynamodb": "npm:^3.1136.0"
     "@aws-sdk/client-s3": "npm:^3.1136.0"
     "@aws-sdk/client-sns": "npm:^3.1136.0"

@@ -2,6 +2,7 @@ import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { mockClient } from "aws-sdk-client-mock";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { MESSAGE_GROUP_ID } from "../../src/domain/delivery-message";
 import { handler } from "../../src/handlers/enqueuer";
 import { stubTable } from "../helpers/fake-table";
 import type { FakeTable } from "../helpers/fake-table";
@@ -19,21 +20,19 @@ let table: FakeTable;
 let logs: ReturnType<typeof captureLogs>;
 
 const QUEUE_URL = "https://sqs.eu-north-1.amazonaws.com/000000000000/test-deliveries.fifo";
-// Reference values computed outside the code: printf 'acme' | shasum -a 256
-const ACME_GROUP = "822b33ad87c148a0a20a5ba7cd5ebcaa68d36a18e7aad165554903f52ca82757";
 
 const idNumber = (n: number): string => `01J8Z3K5W0ABCDEFGHJKMN${String(n).padStart(4, "0")}`;
 
 // A stored request in status "created", plus the stream record that announces it.
-function seededRecord(n: number, options: { partner?: string; ownerId?: string; status?: string } = {}) {
+function seededRecord(n: number, options: { ownerId?: string; status?: string } = {}) {
   const ownerId = options.ownerId ?? "user-a";
   table.seed({
     pk: `USER#${ownerId}`,
     sk: `REQ#${idNumber(n)}`,
     id: idNumber(n),
-    partner: options.partner ?? "Acme",
     subject: "Order 42",
     body: "Please ship.",
+    senderEmail: "sender@example.test",
     status: options.status ?? "created",
     createdAt: "2026-09-21T09:00:00.000Z",
   });
@@ -41,7 +40,6 @@ function seededRecord(n: number, options: { partner?: string; ownerId?: string; 
     sequenceNumber: `10000000000000000000${n}`,
     id: idNumber(n),
     ownerId,
-    partner: options.partner,
   });
 }
 
@@ -80,7 +78,7 @@ describe("enqueuer: a new request", () => {
         {
           Id: "100000000000000000001",
           MessageBody: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
-          MessageGroupId: ACME_GROUP,
+          MessageGroupId: MESSAGE_GROUP_ID,
           MessageDeduplicationId: idNumber(1),
         },
       ],
@@ -98,13 +96,11 @@ describe("enqueuer: a new request", () => {
     });
   });
 
-  it("groups by partner: one group per partner, however it is spelled", async () => {
-    await run(seededRecord(1, { partner: "Acme" }), seededRecord(2, { partner: " ACME " }), seededRecord(3, { partner: "Globex" }));
+  it("puts every request in the one fixed group: there is only one recipient", async () => {
+    await run(seededRecord(1, { ownerId: "user-a" }), seededRecord(2, { ownerId: "user-b" }), seededRecord(3, { ownerId: "user-c" }));
 
     const groups = sqs.commandCalls(SendMessageBatchCommand)[0]?.args[0].input.Entries?.map((e) => e.MessageGroupId);
-    expect(groups?.[0]).toBe(ACME_GROUP);
-    expect(groups?.[1]).toBe(ACME_GROUP);
-    expect(groups?.[2]).not.toBe(ACME_GROUP);
+    expect(groups).toEqual([MESSAGE_GROUP_ID, MESSAGE_GROUP_ID, MESSAGE_GROUP_ID]);
   });
 
   it("sends at most 10 messages per call", async () => {
@@ -128,7 +124,6 @@ describe("enqueuer: a request sent again (MODIFY with status created and a retry
       pk: "USER#user-a",
       sk: `REQ#${idNumber(n)}`,
       id: idNumber(n),
-      partner: "Acme",
       status: "created",
       retryCount,
     });
@@ -148,7 +143,7 @@ describe("enqueuer: a request sent again (MODIFY with status created and a retry
       {
         Id: "100000000000000000001",
         MessageBody: JSON.stringify({ requestId: idNumber(1), ownerId: "user-a" }),
-        MessageGroupId: ACME_GROUP,
+        MessageGroupId: MESSAGE_GROUP_ID,
         MessageDeduplicationId: `${idNumber(1)}-r1`,
       },
     ]);
@@ -245,7 +240,7 @@ describe("enqueuer: records it must ignore", () => {
   it("skips a malformed record without failing the batch, and still handles the good ones", async () => {
     const broken = streamRecord({
       sequenceNumber: "200",
-      image: { pk: { S: "USER#user-a" }, id: { S: idNumber(2) }, subject: { S: "Secret subject" } }, // no partner
+      image: { pk: { S: "OWNER#user-a" }, id: { S: idNumber(2) }, subject: { S: "Secret subject" } }, // wrong pk prefix
     });
 
     const response = await run(seededRecord(1), broken, seededRecord(3));
@@ -256,9 +251,8 @@ describe("enqueuer: records it must ignore", () => {
   });
 
   it.each([
-    ["a wrong owner key", { pk: { S: "OWNER#x" }, id: { S: "r" }, partner: { S: "Acme" } }],
-    ["an empty partner", { pk: { S: "USER#u" }, id: { S: "r" }, partner: { S: "" } }],
-    ["a partner of the wrong type", { pk: { S: "USER#u" }, id: { S: "r" }, partner: { N: "42" } }],
+    ["a wrong owner key", { pk: { S: "OWNER#x" }, id: { S: "r" } }],
+    ["a missing id", { pk: { S: "USER#u" } }],
     ["an empty image", {}],
   ])("skips a record with %s", async (_label, image) => {
     const response = await run(streamRecord({ sequenceNumber: "1", image }));
@@ -282,13 +276,13 @@ describe("enqueuer: records it must ignore", () => {
   it("logs a skipped record with its sequence number and the names of the bad fields, never the image", async () => {
     const broken = streamRecord({
       sequenceNumber: "200",
-      image: { pk: { S: "USER#user-a" }, id: { S: idNumber(2) }, subject: { S: "Secret subject" } },
+      image: { pk: { S: "OWNER#user-a" }, id: { S: idNumber(2) }, subject: { S: "Secret subject" } }, // wrong pk prefix
     });
 
     await run(broken);
 
     const skipped = logs.entries().find((line) => line.message === "Skipping a malformed stream record");
-    expect(skipped).toMatchObject({ level: "error", sequenceNumber: "200", reason: "invalid_image_fields", invalidFields: ["partner"] });
+    expect(skipped).toMatchObject({ level: "error", sequenceNumber: "200", reason: "invalid_image_fields", invalidFields: ["pk"] });
     expect(logs.lines.join("\n")).not.toContain("Secret subject");
   });
 });
@@ -379,15 +373,14 @@ describe("enqueuer: logging", () => {
     ]);
   });
 
-  it("never logs the request text or the partner name", async () => {
+  it("never logs the request text", async () => {
     sqs.on(SendMessageBatchCommand).rejects(new Error("AccessDenied"));
 
-    await run(seededRecord(1, { partner: "Acme" }), streamRecord({ sequenceNumber: "9", image: {} }));
+    await run(seededRecord(1), streamRecord({ sequenceNumber: "9", image: {} }));
 
     const everything = logs.lines.join("\n");
     expect(everything).not.toContain("Order 42");
     expect(everything).not.toContain("Please ship.");
-    expect(everything).not.toContain("Acme");
   });
 });
 
@@ -399,7 +392,6 @@ describe("enqueuer: the client's decision in the stream", () => {
     pk: { S: "USER#user-a" },
     sk: { S: `REQ#${idNumber(n)}` },
     id: { S: idNumber(n) },
-    partner: { S: "Acme" },
     subject: { S: "Order 42" },
     body: { S: "Please ship." },
     status: { S: "sent" },
@@ -417,7 +409,7 @@ describe("enqueuer: the client's decision in the stream", () => {
   });
 
   it("does not queue a request again when a decision is stored (a MODIFY record)", async () => {
-    table.seed({ pk: "USER#user-a", sk: `REQ#${idNumber(1)}`, id: idNumber(1), partner: "Acme", status: "sent" });
+    table.seed({ pk: "USER#user-a", sk: `REQ#${idNumber(1)}`, id: idNumber(1), status: "sent" });
 
     const response = await run(streamRecord({ eventName: "MODIFY", sequenceNumber: "100000000000000000001", image: decisionImage(1) }));
 
@@ -427,7 +419,7 @@ describe("enqueuer: the client's decision in the stream", () => {
   });
 
   it("still enqueues a request whose image carries the decision attributes, and puts ids only on the queue", async () => {
-    table.seed({ pk: "USER#user-a", sk: `REQ#${idNumber(1)}`, id: idNumber(1), partner: "Acme", status: "created" });
+    table.seed({ pk: "USER#user-a", sk: `REQ#${idNumber(1)}`, id: idNumber(1), status: "created" });
 
     const response = await run(streamRecord({ sequenceNumber: "100000000000000000001", image: decisionImage(1) }));
 

@@ -44,8 +44,8 @@ export type DeliveryOutcome =
   | "notAttempted"; // an earlier message of the batch failed, so this one was not tried
 
 // `failed` is acknowledged: the failure is handled (recorded, announced, and the owner sees it
-// with a "Send again" button), the partner's group is not held back, and the DLQ stays for
-// what could not be processed at all (docs/api.md, "delivery-worker", steps 7 and 10).
+// with a "Send again" button), the FIFO group is not held back, and the DLQ stays for what
+// could not be processed at all (docs/api.md, "delivery-worker", steps 7 and 10).
 const ACKNOWLEDGED: readonly DeliveryOutcome[] = ["sent", "rejected", "failed", "alreadyDone"];
 
 export type DeliveryCounts = Record<DeliveryOutcome, number>;
@@ -57,8 +57,6 @@ export interface DeliveryResult {
 }
 
 export interface DeliverySettings {
-  /** SENDER_NAME: the name in `Sender/Name` of every submission. */
-  senderName: string;
   // The queue's maxReceiveCount: the receive after which SQS would give up on the message. It
   // is this function's LAST attempt: on it the worker writes "failed" and acknowledges the
   // message itself. Terraform passes the same number to the queue and to this function.
@@ -74,7 +72,7 @@ export interface DeliverySettings {
 // overwritten and status changes are conditional.
 //
 // LOGGING: this class logs ids, outcomes, status codes, counts, problem counts and rule
-// names, and nothing else. Never the XML, the subject, the text, the partner name, the
+// names, and nothing else. Never the XML, the subject, the text, the sender's e-mail, the
 // description of a reply, or a message of the validator. All of those hold personal data.
 export class DeliveryService {
   constructor(
@@ -102,9 +100,10 @@ export class DeliveryService {
     };
     const failedMessageIds: string[] = [];
 
-    // Stop at the first message that goes back to the queue. The queue is FIFO: if message 2
-    // is to be tried again, message 3 (which may belong to the same partner) must not be
-    // delivered before it. So that message and everything after it go back, untouched.
+    // Stop at the first message that goes back to the queue. The queue is FIFO, and every
+    // message shares the one fixed group (domain/delivery-message.ts): if message 2 is to be
+    // tried again, message 3 must not be delivered before it. So that message and everything
+    // after it go back, untouched.
     // A message whose last attempt ended as `failed` is acknowledged, so it does not stop the batch.
     let stopped = false;
     for (const job of jobs) {
@@ -181,8 +180,7 @@ export class DeliveryService {
     const submission = buildSubmissionXml({
       messageId: request.id,
       sentAt: at,
-      senderName: this.settings.senderName,
-      recipientName: request.partner,
+      senderEmail: request.senderEmail,
       subject: request.subject,
       text: request.body,
     });
