@@ -11,6 +11,17 @@ So the rule above all others: **the owner must be able to explain every line.**
 Prefer plain, boring, well-commented solutions over clever ones. If something can't be
 explained in two sentences, simplify it, or write down why in the README "Decisions".
 
+## Two files, two readers
+
+`README.md` is for a stranger: what the project shows, how to try it, the architecture, the
+`Decisions` (non-obvious choices and the rejected alternative) and `Limits`. Keep it short.
+Never add a stage-by-stage build log to it, and never write "checked on AWS: ..." there.
+
+`.claude/STATUS.md` is for Claude Code: read it at the start of a session to pick up where the
+project stands, and add one entry per finished stage there (what was built, what was checked,
+live numbers, what was found only by running it). It is tracked in git like this file, so the
+history is not lost, but it is not part of the pitch a reader sees first.
+
 ## Roles
 
 - **Owner**: the user. Decides scope, runs `terraform apply`, learns the code.
@@ -34,9 +45,11 @@ explained in two sentences, simplify it, or write down why in the README "Decisi
    typecheck, lint, test); don't take "it passes" on trust. A finding goes to a NEW agent
    as a short brief of its own; after two rounds without a fix, bring the decision to the owner.
 4. **Walkthrough.** Explain the change to the owner in Russian, briefly, then run a
-   Q&A round on it (below). Update the README status and Decisions, and add the
-   stage's questions to `NOTES.md` (personal, git-ignored; `walkthrough-coach` can
-   draft them). Every answer there must say what is in the repo and what is not yet.
+   Q&A round on it (below). Add the stage's entry to `.claude/STATUS.md` (never to
+   README: see "Two files, two readers" below), a Decisions line in README when the
+   stage made a non-obvious choice, and the stage's questions to `NOTES.md` (personal,
+   git-ignored; `walkthrough-coach` can draft them). Every answer there must say what
+   is in the repo and what is not yet.
 5. **Apply.** Only after explicit owner confirmation (see hard rules).
 
 ## Keeping agents cheap
