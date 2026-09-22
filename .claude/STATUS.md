@@ -32,7 +32,7 @@ finishes, add its entry here, not to README (`.claude/CLAUDE.md`, "How a stage r
   pressing again, or on a delivered request, gets `409`; another user's or a malformed id gets
   `404`. A second `terraform plan` after the deploy shows no changes.
 - [x] Stage 6: the logs are guarded by the logger (only listed fields, each with a shape; see
-  README Decisions). Checked: every log group was searched for the text of about twenty live test requests
+  `.claude/DECISIONS.md`). Checked: every log group was searched for the text of about twenty live test requests
   before the change (no hit); after the deploy, traffic through every function, error paths
   included (a broken JSON body and invalid fields carrying a marker string), left no marker string
   and no `[unlisted]` or `[rejected]` in 97 log lines, and the lines still carry ids, outcomes and
@@ -74,7 +74,7 @@ finishes, add its entry here, not to README (`.claude/CLAUDE.md`, "How a stage r
   validator started the tracing SDK again (fixed in the build), and Lambda links the consumer of a
   queue message to the trace instead of joining it (the worker takes the parent from the message).
 - [x] Stage 12: the API is a REST API instead of an HTTP API, so that API Gateway is a node of the
-  trace and the trace of a user action starts with an id made in the browser (see README Decisions). Checked on
+  trace and the trace of a user action starts with an id made in the browser (see `.claude/DECISIONS.md`). Checked on
   AWS after the deploy (55 added, 8 changed, 21 destroyed: the old HTTP API): without a token the
   gateway answers 401 with the CORS header, and a preflight for `POST /requests` allows
   `X-Amzn-Trace-Id`; a signed decision event with Cyrillic and Chinese text went through the gateway and

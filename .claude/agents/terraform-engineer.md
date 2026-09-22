@@ -34,7 +34,7 @@ application-side change (an env var name, an event shape), put it in your report
 - API Gateway: a REST API (`infra/modules/rest-api`) with a Cognito user pool authorizer, X-Ray
   tracing and throttling on the stage. It has no CORS switch, so CORS is built by hand (a `MOCK`
   `OPTIONS` method per resource, gateway responses). The stage is in the URL. It was an HTTP API
-  before; the reason for the change is in README "Decisions".
+  before; the reason for the change is in `.claude/DECISIONS.md`.
 - S3: public access blocked, encryption on, versioning where the data matters.
 - No hardcoded account IDs, secrets or e-mails; use variables and data sources.
 - Every non-obvious setting gets a one-line comment saying why, not what.
